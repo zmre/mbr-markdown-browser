@@ -313,6 +313,11 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterEnter('1. a\n3. b\n7. c\n', 'a', 'n')).toBe('1. a\n2. n\n3. b\n7. c\n');
   });
 
+  it('a repeated number stays while both items are untouched; a split copy is counted on', async () => {
+    expect(serializeBody(await openCrepe('1. a\n3. b\n3. c\n'))).toBe('1. a\n3. b\n3. c\n');
+    expect(await afterEnter('1. a\n3. b\n3. c\n', 'b', 'n')).toBe('1. a\n3. b\n4. n\n3. c\n');
+  });
+
   it('a list right under a heading stays there; a block put between gets blank lines', async () => {
     expect(await afterTyping('# Title\n- a\n', 'Title', 5, 'X')).toBe('# TitleX\n- a\n');
     expect(await afterEnter('# Title\n- a\n', 'Title', 'p')).toBe('# Title\n\np\n\n- a\n');

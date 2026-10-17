@@ -1221,8 +1221,16 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
     const start = typeof parent.start === 'number' && parent.start > -1 ? parent.start : 1;
     const previous = index > 0 ? itemNumbers.get(parent.children[index - 1]) : undefined;
     let number: number;
+    // An untouched item after an untouched one is as typed, a repeated number
+    // too: neither is a copy made by splitting an item.
+    const untouched =
+      index > 0 &&
+      style?.number !== undefined &&
+      printedAsTyped.has(parent.children[index - 1]) &&
+      style.typed?.key !== undefined &&
+      style.typed.key === itemKey(node);
     if (previous === undefined) number = start + (state.options.incrementListMarker === false ? 0 : index);
-    else if (style?.number !== undefined && style.number !== previous) {
+    else if (style?.number !== undefined && (style.number !== previous || untouched)) {
       // After the first, a number is only a spelling (CommonMark counts from
       // the first): as typed. One equal to the previous item's is a copy
       // (Enter splits an item, attrs and all), so it is counted on.

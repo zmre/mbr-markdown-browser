@@ -148,13 +148,13 @@ describe('openEditor: the safety net', () => {
     document.querySelector('.mbr-editor-overlay')?.remove()
   })
 
-  // An ordered number equal to the one before is counted on: `3. third` is printed `4. third`.
-  const INEXACT = '---\ntitle: t\n---\n# Note\n\n1. item\n3. second item\n3. third\n\nIntro.\n'
+  // A `<` right after a bare URL is escaped: `\<a_b>` (a known limit).
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\nSee https://example.com/?q=<a_b> here.\n\nIntro.\n'
 
   it('names the lines the editor would write differently', async () => {
     const { modal } = await openOn(INEXACT)
     const notice = modal.querySelector('.mbr-editor-notice')
-    expect(notice?.textContent).toContain('Lines 6–8')
+    expect(notice?.textContent).toContain('Line 6 ')
     expect(notice?.textContent).toContain('saved as written unless you edit them')
   })
 

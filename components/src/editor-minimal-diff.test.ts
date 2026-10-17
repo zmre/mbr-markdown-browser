@@ -122,10 +122,10 @@ describe('the save', () => {
   });
 
   it('reports the lines the round trip changes', async () => {
-    // An ordered number equal to the one before is counted on: `3. third` is printed `4. third`.
-    const source = 'Fine\n\n1. item\n3. other\n3. third\n\nAlso fine\n';
+    // A `<` right after a bare URL is escaped: `\<a_b>` (a known limit).
+    const source = 'Fine\n\nSee https://example.com/?q=<a_b> here.\n\nAlso fine\n';
     const crepe = await openCrepe(source);
-    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 5 }], onSave: [] });
+    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 3 }], onSave: [] });
   });
 
   it('reports nothing for an exact round trip', async () => {
