@@ -220,6 +220,37 @@ fn test_title_prefix_and_suffix_reach_rendered_output() {
     );
 }
 
+/// `--stdout` renders one file through `index.html` with no server and no
+/// build, so its template context is assembled separately from both. It used
+/// to miss `sidebar_style` and fail every render; this pins that it shares the
+/// keys the templates read.
+#[test]
+fn test_stdout_renders_a_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "note.md",
+        "---\ntitle: A Note\n---\n# Heading\n\nSome *text*.\n",
+    );
+
+    let output = mbr_command()
+        .arg("--stdout")
+        .arg("-q")
+        .arg(repo.path().join("note.md"))
+        .output()
+        .expect("failed to run the mbr binary");
+    assert!(
+        output.status.success(),
+        "--stdout failed:\n{}",
+        stderr_of(&output)
+    );
+    let html = stdout_of(&output);
+    assert!(
+        html.contains("<title>A Note</title>"),
+        "no title in:\n{html}"
+    );
+    assert!(html.contains("<em>text</em>"), "no body in:\n{html}");
+}
+
 /// `--host ::1` parses as an IP but cannot be stored in `Config`'s four-octet
 /// host, so startup aborts. Exercised in build mode: it reaches the same
 /// override code and is guaranteed to terminate (server mode would block).
