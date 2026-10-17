@@ -236,4 +236,11 @@ describe('withAuthoredBlankLines: whitespace-only lines as loaded', () => {
   it('never touches a non-empty line', () => {
     expect(withAuthoredBlankLines('a\n    x\nb\n', 'a\n  \nb\n')).toBe('a\n    x\nb\n');
   });
+
+  it('keeps a whitespace-only last line and the line break after it, with the end kept', () => {
+    // The empty string after the final line break is not a blank line to fill.
+    expect(withAuthoredBlankLines('p\n', 'p\n \n')).toBe('p\n');
+    expect(withAuthoredEnd(withAuthoredBlankLines('p\n', 'p\n \n'), 'p\n \n')).toBe('p\n \n');
+    expect(withAuthoredEnd(withAuthoredBlankLines('p\n', 'p\n\t'), 'p\n\t')).toBe('p\n\t');
+  });
 });

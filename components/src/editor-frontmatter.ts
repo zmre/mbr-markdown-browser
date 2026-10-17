@@ -204,7 +204,12 @@ export function documentToSave(doc: OpenedDocument, yaml: string, body: string):
   return head + withLineEnding(ended, doc.lineEnding);
 }
 
-/** Calls `visit(index, key)` for each blank line of `lines`: its non-blank neighbours and place in its run. */
+/**
+ * Calls `visit(index, key)` for each blank line of `lines`: its non-blank
+ * neighbours and place in its run. The empty string after a final line break
+ * is not a line: filling it with a whitespace-only last line took the line
+ * break away (`p⏎ ⏎` saved as `p⏎ `).
+ */
 function eachBlankLine(lines: readonly string[], visit: (index: number, key: string) => void): void {
   let before = '\u0001start';
   let run: number[] = [];
@@ -212,7 +217,8 @@ function eachBlankLine(lines: readonly string[], visit: (index: number, key: str
     run.forEach((index, k) => visit(index, `${before}\u0000${after}\u0000${k}`));
     run = [];
   };
-  lines.forEach((line, index) => {
+  const count = lines.length > 1 && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+  lines.slice(0, count).forEach((line, index) => {
     if (line.trim() === '') {
       run.push(index);
     } else {
