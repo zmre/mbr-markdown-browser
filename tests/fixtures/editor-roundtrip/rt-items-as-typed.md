@@ -35,3 +35,16 @@ Indented:
 
   * Indented list
   * second
+
+Nested items of every kind:
+
+* Top
+	* [>] a deferred task
+	    * [x] a done one
+	* ~~[https://example.com/s](https://example.com/s)~~
+	* [a reference][ref]
+	* [[A wiki link]]
+	* - an item starting with a list
+	* ![Picture](https://example.com/p.png)
+
+[ref]: https://example.com/r

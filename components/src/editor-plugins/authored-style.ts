@@ -441,11 +441,12 @@ export function absorbsIndentedParagraph(node: { type: string } | undefined): bo
 /**
  * Fields that are not content: the tree walk, positions, recorded spellings,
  * and what Milkdown adds on one side only — `isMark` on the mdast its
- * serializer builds from a mark; on the parsed tree, `label` (an ordered
+ * serializer builds from a mark, and a task item's `listType` (its list's
+ * `ordered`); on the parsed tree, `label` (an ordered
  * item's number, derived from the list's `start`) and inline math's `display`
  * (derived from its `value`, which keeps the `$`/`$$` delimiters).
  */
-const KEY_IGNORED = new Set(['type', 'children', 'position', 'mbrStyle', 'isMark', 'label', 'display']);
+const KEY_IGNORED = new Set(['type', 'children', 'position', 'mbrStyle', 'isMark', 'label', 'listType', 'display']);
 
 /**
  * `children` as one side of the round trip sees them: a soft line break is
@@ -477,6 +478,45 @@ function normalizedChildren(children: readonly Record<string, unknown>[]): Recor
  * helpers); a difference not normalized here only costs the authored
  * spelling, never content.
  */
+/** Types the editor's parse renames, by the name its serializer writes (`references.ts`). */
+const KEY_TYPE_ALIASES: Record<string, string> = {
+  mbrLinkReference: 'linkReference',
+  mbrImageReference: 'imageReference',
+};
+
+/** Inline wrappers whose nesting order ProseMirror does not keep (they are marks). */
+const MARK_TYPES = new Set(['emphasis', 'strong', 'delete', 'link', 'linkReference', 'mbrLinkReference']);
+
+/**
+ * `node` as the other side of the round trip holds it: renamed types under
+ * one name, Crepe's `image-block` as the paragraph holding one image it
+ * prints, a wiki link by its source alone (the rest is read from it), and
+ * nested marks wrapping the same content (`~~[x](u)~~`, `[~~x~~](u)`) in
+ * one order, since marks have none.
+ */
+function keyedNode(node: Record<string, unknown>): Record<string, unknown> {
+  const type = KEY_TYPE_ALIASES[String(node.type)] ?? node.type;
+  if (type === 'image-block') return { type: 'paragraph', children: [{ ...node, type: 'image' }] };
+  if (type === 'wikiLink') return { type, value: node.value };
+  if (!MARK_TYPES.has(String(node.type))) return type === node.type ? node : { ...node, type };
+  const chain: Record<string, unknown>[] = [];
+  let current: Record<string, unknown> = node;
+  for (;;) {
+    chain.push({ ...current, type: KEY_TYPE_ALIASES[String(current.type)] ?? current.type });
+    const children = current.children as Record<string, unknown>[] | undefined;
+    if (children?.length !== 1 || !MARK_TYPES.has(String(children[0].type))) break;
+    current = children[0];
+  }
+  if (chain.length === 1) return chain[0];
+  const content = chain[chain.length - 1].children;
+  const label = (wrapper: Record<string, unknown>): string => contentKey([{ ...wrapper, children: [] }]);
+  chain.sort((a, b) => (label(a) < label(b) ? -1 : label(a) > label(b) ? 1 : 0));
+  return chain.reduceRight<Record<string, unknown> | undefined>(
+    (inner, wrapper) => ({ ...wrapper, children: inner ? [inner] : content }),
+    undefined,
+  ) as Record<string, unknown>;
+}
+
 export function contentKey(nodes: readonly unknown[]): string {
   // Object fields count too (a table's `align`, an alert's `data`): a key
   // that missed an edit would print the content as loaded.
@@ -490,7 +530,8 @@ export function contentKey(nodes: readonly unknown[]): string {
     return `{${fields.map((field) => `${field}:${stableJson(record[field])}`).join(',')}}`;
   };
   const parts: string[] = [];
-  const walk = (node: Record<string, unknown>): void => {
+  const walk = (raw: Record<string, unknown>): void => {
+    const node = keyedNode(raw);
     parts.push(`(${String(node.type)}`);
     for (const field of Object.keys(node).sort()) {
       if (KEY_IGNORED.has(field)) continue;
@@ -499,7 +540,7 @@ export function contentKey(nodes: readonly unknown[]): string {
       if (value === null || value === undefined || (value === '' && field !== 'value')) continue;
       parts.push(`${field}=${typeof value === 'object' ? stableJson(value) : JSON.stringify(value)}`);
     }
-    const children = node.children;
+    const children = node.type === 'listItem' ? itemBlocks(node.children as RootContent[] | undefined) : node.children;
     if (Array.isArray(children)) for (const child of normalizedChildren(children)) walk(child);
     parts.push(')');
   };
@@ -650,15 +691,22 @@ export function itemSourceFrom(source: string, item: Positioned, lazyOk: boolean
 }
 
 /**
- * What an item's content compares by ({@link ItemSource}): its task state and
- * the {@link contentKey} of its blocks. The serialized side drops the empty
- * paragraph the editor puts first in an item that starts with another block,
- * and an empty item's placeholder, as {@link printListItem} does.
+ * An item's blocks as the source has them: none for an empty item (the
+ * editor holds an empty paragraph), and without the empty paragraph the
+ * editor puts before an item's first block when that is not a paragraph
+ * (`- - x`), which {@link printListItem} does not print either.
  */
-export function itemKey(item: ListItem & { status?: unknown }, leadingBlock = false): string {
-  let children: readonly RootContent[] = item.children ?? [];
-  if (isEmptyFlow(children)) children = [];
-  else if (leadingBlock && children.length > 1 && isEmptyFlow(children.slice(0, 1))) children = children.slice(1);
+function itemBlocks(children: readonly RootContent[] | undefined): readonly RootContent[] {
+  if (!children || isEmptyFlow(children)) return [];
+  return children.length > 1 && isEmptyFlow(children.slice(0, 1)) ? children.slice(1) : children;
+}
+
+/**
+ * What an item's content compares by ({@link ItemSource}): its task state and
+ * the {@link contentKey} of its blocks ({@link itemBlocks}).
+ */
+export function itemKey(item: ListItem & { status?: unknown }): string {
+  const children = itemBlocks(item.children);
   const checked = typeof item.checked === 'boolean' ? String(item.checked) : '';
   const status = typeof item.status === 'string' ? item.status : '';
   return `${checked}|${status}|${contentKey(children)}`;
@@ -1190,7 +1238,7 @@ export function wasPrintedAsTyped(item: ListItem): boolean {
 function asTyped(node: ListItem, style: ListItemStyle | undefined, bullet: string, marker: string | undefined): string | undefined {
   const typed = style?.typed;
   if (!typed?.key || bullet.length !== typed.marker.length) return undefined;
-  if (typed.key !== itemKey(node, Boolean(style?.leadingBlock))) return undefined;
+  if (typed.key !== itemKey(node)) return undefined;
   const [first, ...rest] = typed.lines;
   // A top-level item's own indentation (one to three spaces) is printed by the item.
   const ownIndent = marker === '' && /^ {1,3}$/.test(typed.lead) ? typed.lead : '';

@@ -419,6 +419,30 @@ describe('a list item is printed as typed while it holds what was loaded', () =>
     expect(deleted).toBe('* top\n  * a\n');
   });
 
+  it('keys what the editor\'s parse and print spell differently the same', () => {
+    const text = (value: string) => ({ type: 'text', value });
+    const link = (children: unknown[]) => ({ type: 'link', url: 'u', children });
+    const del = (children: unknown[]) => ({ type: 'delete', children });
+    // Marks have no nesting order.
+    expect(contentKey([del([link([text('x')])])])).toBe(contentKey([link([del([text('x')])])]));
+    expect(contentKey([del([link([text('x')])])])).not.toBe(contentKey([link([text('x')])]));
+    // The editor's names for references; Crepe's image block; a wiki link's derived fields.
+    const reference = (type: string) => ({ type, identifier: 'r', referenceType: 'full', children: [text('x')] });
+    expect(contentKey([reference('mbrLinkReference')])).toBe(contentKey([reference('linkReference')]));
+    expect(contentKey([{ type: 'image-block', url: 'a.png' }])).toBe(
+      contentKey([{ type: 'paragraph', children: [{ type: 'image', url: 'a.png' }] }]),
+    );
+    expect(contentKey([{ type: 'wikiLink', value: '[[a]]', target: 'a', embed: false }])).toBe(
+      contentKey([{ type: 'wikiLink', value: '[[a]]' }]),
+    );
+    // A task item's `listType` follows from its list; a nested item's empty first paragraph is the editor's.
+    const item = (extra: object, children: unknown[]) => ({ type: 'listItem', spread: false, ...extra, children });
+    const nested = { type: 'list', ordered: false, children: [item({}, [{ type: 'paragraph', children: [text('x')] }])] };
+    expect(contentKey([item({ listType: 'bullet' }, [{ type: 'paragraph', children: [] }, nested])])).toBe(
+      contentKey([item({}, [nested])]),
+    );
+  });
+
   it('keys object fields too, so a table\'s alignment is content', () => {
     const table = (align: (string | null)[]) => [{ type: 'table', align, children: [] }];
     expect(contentKey(table(['left', null]))).not.toBe(contentKey(table(['right', null])));
