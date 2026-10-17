@@ -740,8 +740,7 @@ is also overridden: on iOS the picked folder *is* the grant, so an ancestor
 ### 12.4 Timings
 
 Simulator (iPhone 17, iOS 27.0) on a Mac loaded by a parallel build, release
-Rust, Debug Swift. Indicative only; device numbers go here once
-the checklist in `apple/ios/TESTING.md` is run.
+Rust, Debug Swift. Indicative only; the device numbers follow.
 
 | | Cold | Warm |
 |---|---|---|
@@ -752,8 +751,38 @@ the checklist in `apple/ios/TESTING.md` is run.
 | Staticlib size (`libmbr.a`, release, per arch) | 315–316 MB | — |
 | App bundle (Debug) | 61 MB (55 MB linked code) | — |
 
-Device, `~/Notes` on iCloud (to fill in): cold scan ___, warm scan ___,
-with iopolicy OFF ___ / ___, content search ___, task-toggle round trip ___.
+Device, `~/Notes` on iCloud (2026-10-15/16): iPhone 15 Pro, iOS 27.0.1, and
+iPad Pro 12.9" 3rd gen (iPad8,7); Release build. The vault: 4,452–4,454 files
+(~3,150 notes), ~2.3 GB, with ~500 files offloaded by iOS. The iopolicy is
+always OFF (fail fast on dataless files); turning it on made the open download
+the whole vault, and the scan had not finished after 5+ minutes, so the
+setting was removed. Full results: `apple/ios/TESTING.md`.
+
+| iPhone 15 Pro                                  | open      | scan       | ready    | first page |
+|------------------------------------------------|-----------|------------|----------|------------|
+| Cold: new build (snapshot fingerprint changed) | 15 ms     | 518 ms     | 713 ms   | 163 ms     |
+| Cold: after Clear Cache                        | 34 ms     | 718 ms     | 821 ms   | 238 ms     |
+| Warm: back to the list, open again (cache)     | 23 ms     | 33 ms      | 466 ms   | 124 ms     |
+| Cache-warm: relaunch (cache, diff `+0/~0/-0`)  | 25 ms     | 43 ms      | 545 ms   | 278 ms     |
+| **iPad**, first open ever on that device       | 5877 ms ¹ | 16494 ms ² | 16630 ms | 2022 ms    |
+| iPad, sample vault                             | 57 ms     | 58 ms      | 69 ms    | 699 ms     |
+
+¹ Four `.mbr/` files materializing on the Swift thread at open.
+² Every folder listing fetched from iCloud for the first time; the page is on
+screen from what is local long before.
+
+| Operation (iPhone)                          | Measured                                        |
+|---------------------------------------------|-------------------------------------------------|
+| Content search, 231–988 hits                | 231–242 ms server time                          |
+| Metadata search, 41 hits                    | 462 ms                                          |
+| Search with ~500 files not downloaded       | 265–347 ms, no stall; skipped files are counted |
+| Flashcard review                            | request 26–42 ms, coordinated write 12–23 ms    |
+| Task toggle → visible on the Mac            | < 10 s (iCloud sync)                            |
+| Foreground refresh, 12 files evicted        | 308 ms                                          |
+| Evicted note: Downloading page → note       | ~2 s                                            |
+| Provider refresh before a Refresh (Dropbox) | ~2 s (1984 ms)                                  |
+| Prewarm (iPad)                              | 1299 ms, off the critical path                  |
+| Large video (452 MB, 1.5 GB)                | plays and scrubs; the app is not killed         |
 
 ### 12.5 Decisions and inputs for later PRs
 
@@ -769,6 +798,34 @@ with iopolicy OFF ___ / ___, content search ___, task-toggle round trip ___.
   buffering (`to_bytes(usize::MAX)` today) and add `Range`/206 for media.
   Promote `redirect_as_document` and the `Accept-Encoding` strip into the
   transport layer for good.
+
+**Device test findings (2026-10-15/16).** Issues found running
+`apple/ios/TESTING.md` on the phone and the iPad, and their fixes (branch
+`2026-10-15-editor-plugins`):
+
+| Issue                                                                                                                                                     | Fix                                                     |
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
+| An iCloud folder whose listing was never downloaded indexed as empty (here 131 folders, 705 files); a page rendered from the stale index was not reloaded | ec83873, 9a9bc9b                                        |
+| The Download files on read setting downloaded the whole 2.3 GB vault on open; removed                                                                     | ec83873                                                 |
+| The app aborted when `Log` wrote to stderr after the `devicectl` console dropped (`EPIPE`)                                                                | 8cf83ae                                                 |
+| A task toggle on a note whose newer version was not downloaded: `/.mbr/raw` 404, "Could not read the file" (nothing written)                              | 7fdaf94 (503 + download + message)                      |
+| A task or flashcard write addressed only by line text could hit another, identical line after lines moved                                                 | 9e34e40 (`base_hash`)                                   |
+| Flashcard rating buttons kept their hover look after a tap                                                                                                | 71c912a                                                 |
+| Dropbox: Refresh did not see a Mac edit until the folder was browsed in Files (stale replica)                                                             | b0d0d2a                                                 |
+| Share → MBR while a vault was open did nothing                                                                                                            | fd5116c                                                 |
+| Grant Folder Access: picker opens elsewhere; picker white in dark mode                                                                                    | 2673b59, 37b29ed (banner names the folder; dark picker) |
+| Downloading page while offline gave no hint                                                                                                               | dfb318a                                                 |
+| An edited `.mbr/config.toml` was dataless at refresh (`EDEADLK`) → "Configuration ignored"; open page missed `user.css`                                   | 82c5962                                                 |
+| Phone Safari: search results under the keyboard; QuickType bar on the search field                                                                        | e2ba412, 602aa13                                        |
+| CLI: startup errors printed as `Debug`; `cargo run` needed `--bin mbr`                                                                                    | a9b7e28                                                 |
+
+Still open (TODO.md, Mobile): iOS 27 ignores the picker's `directoryURL` for
+third-party File Provider folders (the banner is the workaround); a provider
+Refresh waits ~2 s even when nothing changed; a first open of a large vault on
+a device that has never listed it takes ~16 s of background listing with no
+indication; there is no way to start a review note in the app. Not yet run:
+a true 409 on a task toggle, the dark picker recheck, an hour in the
+background, a reboot, Working Copy, Google Drive single files, Split View.
 
 ### 12.6 App simulator findings (PR5b, 2026-10-14)
 
