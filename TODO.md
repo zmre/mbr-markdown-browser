@@ -13,8 +13,11 @@
   * [ ] Refresh on a cloud-provider vault waits up to 2 s for the provider (`ProviderRefresh`) even when nothing changed; consider a shorter budget or skipping it when the provider reports the folder current.
   * [ ] First open of a large iCloud vault on a device that has never listed it is slow while folder listings come down (iPad: 16.5 s scan for ~4,450 files; a 705-file vault: 19 s); the page shows at once from what is local, but there is no indication that more is arriving. Consider a "Still listing folders from iCloud…" hint, and Browse showing folders that hold no notes or are still listing.
 * **Editor follow-ups** (the Milkdown plugins for mbr's syntax are done — see `components/src/editor-plugins/`, the parity harness and `docs/modes/editing.md`)
-  * [ ] Act on the `roundtrip-check` run over a real repository (3,153 notes: 2,976 differ under a full re-serialize, 2 are rewritten by any save, 2 errors): fix the clusters found, then re-run until the open-time notice is rare. In progress.
-  * [ ] A lazy continuation line of a list item or quote that starts with `:` is indented and escaped when that block is edited (`deflist-edge` in `ROUND_TRIP_FAILS`).
+  * [ ] Re-run `roundtrip-check` on a real repository after the 2026-10-16 fixes (on the anonymized repros of the first run: 2,963 → 271 still change on a full re-serialize, 0 rewritten by any save, the open-time notice on 7% of notes) and check the 2 earlier `TypeError: … reading 'length'` errors are gone.
+  * [ ] A nested list that mixes tabs and four spaces within one list prints with 2-space indentation once that list is edited (one indentation is recorded per item; ~80 notes in the run).
+  * [ ] Lazy continuation lines inside footnote definitions are indented when the footnote is edited.
+  * [ ] Notes with old Mac (CR-only) line endings are saved with LF (same meaning).
+  * [ ] Scattered blank-line cases still normalized when the block is edited: an empty item under a quote, an HTML block directly against a paragraph, whitespace-only lines next to an edited block.
   * [ ] An authored unneeded escape in a table cell or a definition term is dropped when that block is edited (paragraphs and headings keep theirs via `mbrStyle.source`); `x\\y` saves as `x\y` (same text).
   * [ ] A list item whose first block is a definition list holds an empty filler paragraph in the editor (Milkdown's `list_item` must start with a paragraph); it is dropped on save but visible as an empty line above the term while editing.
   * [ ] Two definition lists separated only by a deleted block become one list (markdown cannot write two adjacent lists apart) — the save writes the merged list; expected, but the editor shows them as two until reload.
