@@ -395,6 +395,15 @@ describe('a list item is printed as typed while it holds what was loaded', () =>
     expect(await afterTyping(source, 'y', 1, 'X')).toBe('* x\n\t* yX\n\n\t        * a\n\t        * b\n');
   });
 
+  it('a blank line after a nested list keeps the list loose, in a quote too', async () => {
+    // mdast counts the blank line into the first item and calls the list tight; the renderer does not.
+    for (const source of ['* a\n  * b\n\n* c\n', '> * a\n>   * b\n>\n> * c\n']) {
+      expect(serializeBody(await openCrepe(source))).toBe(source);
+      expect(await afterTyping(source, 'c', 1, 'X')).toBe(source.replace('* c', '* cX'));
+      expect(await afterTyping(source, 'b', 1, 'X')).toBe(source.replace('* b', '* bX'));
+    }
+  });
+
   it('a toggled task, a new mark, a deleted nested item: printed again', async () => {
     const tasks = '* [ ] a\n* [ ]  b\n';
     const toggled = await afterItemEdit(tasks, 0, (view, pos, node) =>

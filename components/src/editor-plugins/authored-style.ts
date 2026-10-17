@@ -643,6 +643,9 @@ export function itemSourceFrom(source: string, item: Positioned, lazyOk: boolean
     .split('\n')
     .map((line) => line.replace(/\r$/, ''));
   if (lines.some((line) => line.includes('\r'))) return undefined;
+  // Blank lines at its end (a quote's `>` lines, which mdast counts in) are the list's gap, printed by the list.
+  const quotes = countOf(lead, '>');
+  while (lines.length > 1 && /^[\s>]*$/.test(lines[lines.length - 1]) && countOf(lines[lines.length - 1], '>') <= quotes) lines.pop();
   return { lead, marker, lines, lazyOk };
 }
 
@@ -747,11 +750,12 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
       }
       childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
     }
-    if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null });
+    if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null }, lines);
     const nested = inContainer || CONTAINERS.has(node.type);
     const lazy = lazyLines && (!CONTAINERS.has(node.type) || node.type === 'listItem' || node.type === 'blockquote');
     for (const child of node.children ?? []) visit(child, nested, childPrefix, lazy);
   };
+  const lines: SourceLines = { text: source, lines: source.split('\n') };
   visit(tree, false, '', true);
   recordGaps(tree);
 }
@@ -776,16 +780,44 @@ function tagGap(left: Positioned, right: Positioned, blank: number, line: number
  * none in a tight one. A list with a blank line between two of its items is
  * loose, and the printer would put one between all of them.
  */
-function recordItemGaps(list: MdNode & { spread?: boolean | null }): void {
+function recordItemGaps(list: MdNode & { spread?: boolean | null }, source: SourceLines): void {
   const items = (list.children ?? []) as Positioned[];
-  const printed = list.spread ? 1 : 0;
+  const gaps: { end: number; blank: number }[] = [];
   for (let i = 0; i < items.length - 1; i++) {
-    const end = (items[i].position?.end as { line?: number } | undefined)?.line;
+    const end = lastContentLine(items[i], source);
     const next = (items[i + 1].position?.start as { line?: number } | undefined)?.line;
-    if (end === undefined || next === undefined || next <= end) continue;
-    const blank = next - end - 1;
-    if (blank !== printed) tagGap(items[i], items[i + 1], blank, end);
+    gaps.push(end === undefined || next === undefined || next <= end ? { end: -1, blank: -1 } : { end, blank: next - end - 1 });
   }
+  // mdast counts blank lines after an item's nested list as the item's, so
+  // `* a⏎  * b⏎⏎* c` is tight to it; two items with a blank line between
+  // make a list loose (CommonMark, pulldown-cmark).
+  if (!list.spread && gaps.some((gap) => gap.blank > 0)) list.spread = true;
+  const printed = list.spread ? 1 : 0;
+  gaps.forEach((gap, i) => {
+    if (gap.blank >= 0 && gap.blank !== printed) tagGap(items[i], items[i + 1], gap.blank, gap.end);
+  });
+}
+
+/** A source's lines (`\r` kept) — split once per parse. */
+type SourceLines = { text: string; lines: string[] };
+
+/**
+ * The last line of `item` with content: its end line, less the blank lines
+ * mdast counts into it — blank in its container (`>` as often as in its own
+ * prefix, if inside a quote; a quote's own empty line inside the item is content).
+ */
+function lastContentLine(item: Positioned, source: SourceLines): number | undefined {
+  const start = item.position?.start as { line?: number; offset?: number } | undefined;
+  const end = (item.position?.end as { line?: number } | undefined)?.line;
+  if (start?.line === undefined || start.offset === undefined || end === undefined) return end;
+  const quotes = countOf(source.text.slice(lineStartOf(source.text, start.offset), start.offset), '>');
+  let line = end;
+  while (line > start.line) {
+    const text = source.lines[line - 1] ?? '';
+    if (!/^[\s>]*$/.test(text) || countOf(text, '>') > quotes) break;
+    line--;
+  }
+  return line;
 }
 
 /**
