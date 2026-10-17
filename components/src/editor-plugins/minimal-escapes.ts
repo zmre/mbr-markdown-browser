@@ -131,7 +131,8 @@ export function minimizeEscapes(
  */
 function treeKey(tree: unknown): string {
   const replacer = (key: string, value: unknown): unknown => {
-    if (key === 'position' || key === 'mbrStyle') return undefined;
+    // `mbrImageBlockPositions`: positions too (`images.ts`, on the root).
+    if (key === 'position' || key === 'mbrStyle' || key === 'mbrImageBlockPositions') return undefined;
     const node = value as MdNode | null;
     if (!node || typeof node !== 'object' || Array.isArray(node) || !node.children?.some((child) => MARK_TYPES.has(child.type))) {
       return value;

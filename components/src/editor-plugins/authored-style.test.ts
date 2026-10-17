@@ -340,6 +340,19 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterTyping(source, 'para', 4, '!')).toBe('para! <https://a.b/x>\n\\- <https://c.d/>\n');
   });
 
+  it('a block right under an HTML block that ends on its line stays there', async () => {
+    expect(await afterTyping('<!-- note -->\nText\n', 'Text', 4, '!')).toBe('<!-- note -->\nText!\n');
+    // A `<div>` block runs to a blank line, so what follows one was never right under it.
+    expect(adjacentIsSafe({ type: 'html', value: '<div>\nx\n</div>' }, { type: 'paragraph', children: [] })).toBe(false);
+    expect(adjacentIsSafe({ type: 'html', value: '<!-- a\nb -->' }, { type: 'paragraph', children: [] })).toBe(true);
+    expect(adjacentIsSafe({ type: 'html', value: '<!-- a -->\nb' }, { type: 'paragraph', children: [] })).toBe(false);
+  });
+
+  it('an image on its own keeps its spelling until edited', async () => {
+    const source = 'Text.\n\n![a b](https://x.y/p?a=b&c=d)\n';
+    expect(await afterTyping(source, 'Text', 4, '!')).toBe('Text!.\n\n![a b](https://x.y/p?a=b&c=d)\n');
+  });
+
   it('a quote keeps `> ` on its blank lines', async () => {
     expect(await afterTyping('> a\n> \n> b\n', 'b', 1, 'X')).toBe('> a\n> \n> bX\n');
   });

@@ -766,6 +766,8 @@ const RECORDERS: Record<
   (source: string, node: Positioned, inContainer: boolean, linePrefix: string | undefined, lazyLines: boolean) => unknown
 > = {
   paragraph: paragraphStyleFrom,
+  // Crepe's block for a paragraph holding only an image (`images.ts` prints it as one).
+  'image-block': paragraphStyleFrom,
   defListTerm: paragraphStyleFrom,
   defListDescription: definitionStyleFrom,
   list: listStyleFrom,
@@ -1533,9 +1535,29 @@ export function adjacentIsSafe(left: RootContent, right: RootContent): boolean {
   if (left.type === 'list') {
     return interrupts || (right.type === 'list' && startsAnotherList(left, right) && interruptsParagraph(right));
   }
+  if (endsOwnHtmlBlock(left)) return true;
   if (left.type === 'paragraph' || left.type === 'blockquote') {
     return interrupts || right.type === 'blockquote' || (right.type === 'list' && interruptsParagraph(right));
   }
+  return false;
+}
+
+/**
+ * An HTML block that ends on its own last line (CommonMark types 1 to 5:
+ * `<script>`/`<pre>`/`<style>`/`<textarea>` to its closing tag, a comment,
+ * `<?…?>`, `<!X…>`, CDATA), so whatever follows starts a block of its own.
+ * Milkdown holds an HTML block as a paragraph of one `html` node.
+ */
+function endsOwnHtmlBlock(node: RootContent): boolean {
+  const html = node.type === 'html' ? node : node.type === 'paragraph' && node.children?.length === 1 ? node.children[0] : undefined;
+  if (html?.type !== 'html') return false;
+  const value = html.value;
+  const last = value.slice(value.lastIndexOf('\n') + 1);
+  if (/^ {0,3}<(?:script|pre|style|textarea)(?:[\s>]|$)/i.test(value)) return /<\/(?:script|pre|style|textarea)>/i.test(last);
+  if (/^ {0,3}<!--/.test(value)) return last.includes('-->');
+  if (/^ {0,3}<\?/.test(value)) return last.includes('?>');
+  if (/^ {0,3}<!\[CDATA\[/.test(value)) return last.includes(']]>');
+  if (/^ {0,3}<![A-Za-z]/.test(value)) return last.includes('>');
   return false;
 }
 
