@@ -21,13 +21,13 @@ afterAll(() => rmSync(temp, { recursive: true, force: true }));
 const SECRETS = ['Zanzibar', 'Quarterly', 'lossy', 'kitchen', 'tasks', 'hidden'];
 
 /**
- * Rewritten by a full re-serialization (by design, not for want of a
- * plugin): a paragraph directly under a heading gets a blank line between,
- * and the unclosed fence is closed. The blank line ending the frontmatter is
- * kept: an unedited frontmatter is saved as loaded.
+ * Rewritten by a full re-serialization: two lists with different bullets and
+ * no blank line between get one (the only rewrite the test needs; if the
+ * editor learns to keep it, pick another). The blank line ending the
+ * frontmatter is kept: an unedited frontmatter is saved as loaded.
  */
 const LOSSY =
-  '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\nKickoff.\n\nMeet in Zanzibar on 2026-03-04.\n\n```js\nlet secret = 42\n';
+  '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\nKickoff.\n\nMeet in Zanzibar on 2026-03-04.\n\n* secret one\n+ secret two\n';
 
 function write(path: string, text: string): void {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -35,8 +35,11 @@ function write(path: string, text: string): void {
 }
 
 describe('parseArgs', () => {
-  it('reads the folder, --out and --minimize-seconds', () => {
-    expect(parseArgs(['notes', '--out', 'r', '--minimize-seconds=2.5'])).toMatchObject({ minimizeSeconds: 2.5 });
+  it('reads the folder, --out, --minimize-seconds and --samples-per-cause', () => {
+    expect(parseArgs(['notes', '--out', 'r', '--minimize-seconds=2.5'])).toMatchObject({ minimizeSeconds: 2.5, samplesPerCause: 3 });
+    expect(parseArgs(['notes', '--out', 'r', '--samples-per-cause', '1'])).toMatchObject({ samplesPerCause: 1, minimizeSeconds: 2 });
+    expect(parseArgs(['notes', '--out', 'r', '--samples-per-cause', '1.5'])).toMatch(/whole number/);
+    expect(parseArgs(['notes', '--out', 'r', '--minimize-total-seconds', '60'])).toMatchObject({ minimizeTotalSeconds: 60 });
     expect(parseArgs(['--help'])).toBe('help');
     expect(parseArgs(['notes'])).toMatch(/--out/);
     expect(parseArgs(['--out', 'r'])).toMatch(/missing/);
@@ -85,6 +88,7 @@ describe('roundtrip-check end to end', () => {
     expect(stdout).toMatch(/unchanged\s+2\n/);
     expect(stdout).toMatch(/would change\s+1\n/);
     expect(stdout).toMatch(/errors\s+0\n/);
+    expect(stdout).toMatch(/causes\s+\d+\n/);
     expect(stdout).toContain(`report: ${join(out, 'index.md')}`);
     for (const secret of SECRETS) {
       expect(stdout).not.toContain(secret);
@@ -93,7 +97,7 @@ describe('roundtrip-check end to end', () => {
 
     expect(readdirSync(out).sort()).toEqual(['.roundtrip-report', '0001', 'index.md', 'progress.json', 'run.log', 'summary.json']);
     const index = readFileSync(join(out, 'index.md'), 'utf8');
-    expect(index).toMatch(/\| 0001 \| deep\/lossy\.md \| \d+ \| [^|]*code block[^|]* \| reproduces \|/);
+    expect(index).toMatch(/\| 0001 \| deep\/lossy\.md \| \d+ \| [^|]*list[^|]* \| reproduces \| S\d+/);
     expect(readdirSync(join(out, '0001')).sort()).toEqual([
       'diff.patch',
       'repro.anon.diff.patch',
@@ -102,26 +106,25 @@ describe('roundtrip-check end to end', () => {
       'repro.md',
     ]);
     const patch = readFileSync(join(out, '0001', 'diff.patch'), 'utf8');
-    expect(patch).toContain('Notice at open, saved as written unless edited: 10–12');
+    // Only the gap between the blocks changes, and gaps are always kept: no notice.
+    expect(patch).toContain('Notice at open, saved as written unless edited: none');
     expect(patch).toContain('Notice at open, if the frontmatter is edited: blank lines at its end are dropped');
     // The unedited frontmatter, its trailing blank line included, is not part of the diff.
     expect(patch).toContain('Any save writes the parts you did not edit as: the note unchanged');
-    expect(patch).toContain(' # Quarterly Plan\n+\n Kickoff.\n');
     expect(patch).toContain('--- a/deep/lossy.md\n+++ b/deep/lossy.md\n');
-    expect(patch).toContain('+```\n');
+    expect(patch).toContain(' * secret one\n+\n + secret two\n');
 
-    // The reproduction keeps both rewrites and drops what neither needs: the
-    // paragraphs, and the frontmatter (no longer rewritten).
+    // The reproduction keeps the rewrite and drops what it does not need:
+    // the heading and paragraphs, and the frontmatter (no longer rewritten).
     const repro = readFileSync(join(out, '0001', 'repro.md'), 'utf8');
     expect(repro).not.toContain('Zanzibar');
     expect(repro).not.toContain('title:');
-    expect(repro).toContain('# Quarterly Plan\n');
-    expect(repro).toContain('```js\n');
+    expect(repro).not.toContain('Kickoff');
+    expect(repro).toBe('* secret one\n+ secret two\n');
     const anon = readFileSync(join(out, '0001', 'repro.anon.md'), 'utf8');
     expect(anon).toBe(anonymize(repro));
-    expect(anon).toContain('# Xxxxxxxxx Xxxx\n');
     expect(index).toContain(ANON_REPRODUCES);
-    expect(readFileSync(join(out, '0001', 'repro.anon.diff.patch'), 'utf8')).toContain('+```\n');
+    expect(readFileSync(join(out, '0001', 'repro.anon.diff.patch'), 'utf8')).toContain(' * xxxxxx xxx\n+\n + xxxxxx xxx\n');
 
     // A rerun replaces its own report.
     const again = await main([notes, '--out', out, '--minimize-seconds', '0'], { stdout: () => {}, stderr: () => {} });

@@ -27,7 +27,10 @@ export interface CliIo {
 /** Marks a folder as a report this tool wrote, so a rerun may replace it. */
 export const REPORT_MARKER = '.roundtrip-report';
 
-export const USAGE = `Usage: bun run roundtrip-check <folder-or-note> --out <report-folder> [--minimize-seconds N]
+/** Default `--minimize-seconds`. */
+export const DEFAULT_MINIMIZE_SECONDS = 2;
+
+export const USAGE = `Usage: bun run roundtrip-check <folder-or-note> --out <report-folder> [options]
 
 Runs every .md/.markdown note under the folder through the editor's round trip
 (open, then save untouched) and writes a report of the notes it would change.
@@ -35,20 +38,29 @@ Prints only counts. Hidden folders (.git, .obsidian, .mbr) are skipped.
 
   --out <dir>             report folder (created; replaced if it holds a
                           previous report; refused if it holds anything else)
-  --minimize-seconds N    time spent shrinking each reproduction (default 10)
+  --minimize-seconds N    time spent shrinking each reproduction (default 2)
+  --samples-per-cause N   notes minimized per cause, i.e. per kind of line the
+                          editor rewrites (default 3; the others get
+                          diff.patch only)
+  --minimize-total-seconds N
+                          time for all minimizing together (default 300)
 `;
 
 interface Args {
   input: string;
   out: string;
   minimizeSeconds: number;
+  samplesPerCause: number;
+  minimizeTotalSeconds: number;
 }
 
 /** Parses `argv`; a string is an error message. */
 export function parseArgs(argv: readonly string[]): Args | string | 'help' {
   let input: string | undefined;
   let out: string | undefined;
-  let minimizeSeconds = 10;
+  let minimizeSeconds = DEFAULT_MINIMIZE_SECONDS;
+  let samplesPerCause = 3;
+  let minimizeTotalSeconds = 300;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const [flag, inline] = arg.startsWith('--') && arg.includes('=') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined];
@@ -58,13 +70,21 @@ export function parseArgs(argv: readonly string[]): Args | string | 'help' {
     else if (flag === '--minimize-seconds') {
       minimizeSeconds = Number(value());
       if (!Number.isFinite(minimizeSeconds) || minimizeSeconds < 0) return '--minimize-seconds needs a number of seconds';
+    } else if (flag === '--minimize-total-seconds') {
+      minimizeTotalSeconds = Number(value());
+      if (!Number.isFinite(minimizeTotalSeconds) || minimizeTotalSeconds < 0) {
+        return '--minimize-total-seconds needs a number of seconds';
+      }
+    } else if (flag === '--samples-per-cause') {
+      samplesPerCause = Number(value());
+      if (!Number.isInteger(samplesPerCause) || samplesPerCause < 0) return '--samples-per-cause needs a whole number';
     } else if (flag.startsWith('-')) return `unknown option ${flag}`;
     else if (input === undefined) input = arg;
     else return 'only one folder or note can be checked at a time';
   }
   if (!input) return 'missing the folder or note to check';
   if (!out) return 'missing --out <report-folder>';
-  return { input: resolve(input), out: resolve(out), minimizeSeconds };
+  return { input: resolve(input), out: resolve(out), minimizeSeconds, samplesPerCause, minimizeTotalSeconds };
 }
 
 /** Empties or creates `out`; a string is an error message. */
@@ -115,6 +135,8 @@ export async function main(argv: readonly string[], io: CliIo): Promise<number> 
     MBR_ROUNDTRIP_DIR: args.input,
     MBR_ROUNDTRIP_OUT: args.out,
     MBR_ROUNDTRIP_MINIMIZE_MS: String(Math.round(args.minimizeSeconds * 1000)),
+    MBR_ROUNDTRIP_SAMPLES: String(args.samplesPerCause),
+    MBR_ROUNDTRIP_MINIMIZE_TOTAL_MS: String(Math.round(args.minimizeTotalSeconds * 1000)),
   });
   // Vitest runs on node (`bun run test` does the same); `bun run` puts a `node` on PATH.
   const node = process.versions.bun ? 'node' : process.execPath;
@@ -150,7 +172,7 @@ export async function main(argv: readonly string[], io: CliIo): Promise<number> 
   showProgress();
   if (io.isTTY && shown) io.stderr('\n');
 
-  let summary: { files: number; unchanged: number; wouldChange: number; rewrittenOnSave: number; errors: number; elapsedMs: number };
+  let summary: { files: number; unchanged: number; wouldChange: number; rewrittenOnSave: number; errors: number; causes?: number; elapsedMs: number };
   try {
     summary = JSON.parse(readFileSync(join(args.out, 'summary.json'), 'utf8'));
   } catch {
@@ -165,6 +187,7 @@ export async function main(argv: readonly string[], io: CliIo): Promise<number> 
       row('would change', summary.wouldChange) +
       row('  on any save', summary.rewrittenOnSave) +
       row('errors', summary.errors) +
+      row('causes', summary.causes ?? 0) +
       `report: ${join(args.out, 'index.md')}\n`,
   );
   return 0;

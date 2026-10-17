@@ -157,14 +157,31 @@ It opens and re-saves every `.md`/`.markdown` note under the folder exactly as
 the editor does — the same code, run in a headless DOM — without writing to
 your notes. Hidden folders (`.git`, `.obsidian`, `.mbr`) are skipped. The
 terminal shows only counts (notes checked, unchanged, would change, errors,
-time) and the report's path, never a note's name or text, so the output is
-safe to paste into an issue. `--minimize-seconds N` (default 10) bounds the
-time spent shrinking each reproduction.
+causes, time) and the report's path, never a note's name or text, so the
+output is safe to paste into an issue. Checking takes a few tens of
+milliseconds a note; shrinking reproductions is what costs, so it is bounded:
 
-The report folder holds `index.md`, a table of the notes that would change
-(their path, how many lines change, a guess at the markdown involved, and
-whether the anonymized reproduction still reproduces), and a numbered folder
-for each of them:
+| Option | Default | What it bounds |
+|--------|---------|----------------|
+| `--samples-per-cause N` | 3 | A note is shrunk only if one of its causes (below) has fewer than N reproductions so far |
+| `--minimize-seconds N` | 2 | Time spent shrinking one note |
+| `--minimize-total-seconds N` | 300 | Time spent shrinking, all notes together |
+
+Notes over 200 kB are never shrunk.
+
+The report folder holds `index.md` and a numbered folder for each note that
+would change. `index.md` starts with a ranked table of **causes**: each is the
+shape of a line the round trip removes or adds — its indentation (tabs, or how
+many spaces), block prefix (`#`, `>`, a list marker, a task box, a fence),
+whether it holds a bare URL, an `<autolink>`, a `<br />` or an escape, and its
+trailing whitespace — with how many notes show it. Shapes keep no letters or
+digits, so the table can be shared as is. Then a table of the notes (their
+path, how many lines change, a guess at the markdown involved, whether the
+anonymized reproduction still reproduces — or `see <id>` for a note whose
+causes already have reproductions — its causes, and `rewritten` under "any
+save" for a note the safety net cannot keep, which any save rewrites; those
+are always shrunk). Each folder holds
+`diff.patch`; the notes that were shrunk also hold the rest:
 
 | File | What it is |
 |------|------------|

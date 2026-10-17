@@ -16,10 +16,18 @@
  * happy-dom, so the tool cannot disagree with the editor.
  *
  * The terminal shows **counts only** (notes checked, unchanged, would change,
- * errors, time) and the report's path — never a note's name or content. The
- * report folder holds `index.md` (id → note, changed lines, a guess at the
- * construct, whether the anonymized reproduction still reproduces) and, per
- * note that would change, `NNNN/`:
+ * errors, causes, time) and the report's path — never a note's name or
+ * content. The report folder holds `index.md` — a ranked table of **causes**
+ * (each the content-free shape of a line the round trip removes or adds:
+ * indentation, block prefix, `url`/`<url>`/`<br/>`/escape, trailing
+ * whitespace) and per note: id → note, changed lines, a guess at the
+ * construct, whether the anonymized reproduction still reproduces, its
+ * causes — and, per note that would change, `NNNN/` with `diff.patch`.
+ * Reproductions are written only for notes that bring one of their causes
+ * its first `--samples-per-cause` (default 3) samples, at most
+ * `--minimize-seconds` (default 2) each and `--minimize-total-seconds`
+ * (default 300) together, and never for notes over 200 kB; the rest say
+ * `see <id>` (or why not). Those notes also get:
  *
  * - `diff.patch` — the note → what a full re-serialize writes, preceded by
  *   the lines the editor's notice lists;
