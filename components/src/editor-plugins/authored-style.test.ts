@@ -334,6 +334,12 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterTyping('Text.\n\n\tcode\n\t\tdeeper\n', 'Text', 4, '!')).toBe('Text!.\n\n\tcode\n\t\tdeeper\n');
   });
 
+  it('an indented continuation line that reads as a list item stays in its paragraph', async () => {
+    const source = 'para [https://a.b/x](https://a.b/x)\n    - [https://c.d/](https://c.d/)\n';
+    expect(serializeBody(await openCrepe(source))).toBe(source);
+    expect(await afterTyping(source, 'para', 4, '!')).toBe('para! <https://a.b/x>\n\\- <https://c.d/>\n');
+  });
+
   it('a quote keeps `> ` on its blank lines', async () => {
     expect(await afterTyping('> a\n> \n> b\n', 'b', 1, 'X')).toBe('> a\n> \n> bX\n');
   });

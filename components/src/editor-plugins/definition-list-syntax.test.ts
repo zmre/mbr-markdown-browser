@@ -12,7 +12,7 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkStringify from 'remark-stringify';
 import type { Nodes, Root } from 'mdast';
-import { escapeContinuationColons, remarkDefinitionList } from './definition-list-syntax.js';
+import { escapeContinuationBlockStarts, escapeContinuationColons, remarkDefinitionList } from './definition-list-syntax.js';
 
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkDefinitionList).use(remarkStringify, {
   bullet: '*',
@@ -189,5 +189,33 @@ describe('escapeContinuationColons', () => {
     expect(escapeContinuationColons(':a\n:b\n  :c')).toBe(':a\n\\:b\n  \\:c');
     expect(escapeContinuationColons('a\r\n: b')).toBe('a\r\n\\: b');
     expect(escapeContinuationColons('a: b\nc :d')).toBe('a: b\nc :d');
+  });
+});
+
+describe('escapeContinuationBlockStarts', () => {
+  it.each([
+    ['- <https://b.c>', '\\- <https://b.c>'],
+    ['+ x', '\\+ x'],
+    ['* x', '\\* x'],
+    ['# x', '\\# x'],
+    ['###', '\\###'],
+    ['> x', '\\> x'],
+    ['1. x', '1\\. x'],
+    ['1) x', '1\\) x'],
+    ['---', '\\---'],
+    ['* * *', '\\* * *'],
+    ['===', '\\==='],
+    ['```js', '\\`\\`\\`js'],
+    ['~~~', '\\~\\~\\~'],
+  ])('escapes %j on a later line', (line, escaped) => {
+    expect(escapeContinuationBlockStarts(`para\n${line}`)).toBe(`para\n${escaped}`);
+  });
+
+  it('leaves what cannot interrupt a paragraph, and the first line', () => {
+    for (const line of ['-x', '2. x', '1.x', '#x', '**bold**', '``code``', '\\- x', 'a - b']) {
+      expect(escapeContinuationBlockStarts(`para\n${line}`)).toBe(`para\n${line}`);
+    }
+    expect(escapeContinuationBlockStarts('- not a continuation')).toBe('- not a continuation');
+    expect(escapeContinuationBlockStarts('a\r\n> b')).toBe('a\r\n\\> b');
   });
 });

@@ -587,6 +587,32 @@ export function escapeContinuationColons(value: string): string {
 }
 
 /**
+ * A line after the first of a paragraph or term that would start another
+ * block — a bullet or `1.` item, a heading, a quote, a fence, a rule or a
+ * setext underline, all of which interrupt a paragraph — has its first
+ * character escaped. remark escapes them in a text node that holds the line
+ * break, but not where the line's text starts a node of its own (after a
+ * soft break, before a link): a continuation line typed indented, `    - [x](x)`,
+ * re-spelled `- <x>` had become a list. Inline code needs nothing: its
+ * printer turns such a line break into a space.
+ */
+export function escapeContinuationBlockStarts(value: string): string {
+  return value.replace(/(\r?\n|\r)([\t ]*)([^\r\n]*)/g, (match, eol: string, indent: string, line: string) => {
+    const escaped = escapeBlockStart(line);
+    return escaped === line ? match : eol + indent + escaped;
+  });
+}
+
+function escapeBlockStart(line: string): string {
+  if (/^([-*_])([\t ]*\1){2,}[\t ]*$/.test(line) || /^(=+|-+)[\t ]*$/.test(line)) return `\\${line}`;
+  if (/^[-+*][\t ]+\S/.test(line) || /^#{1,6}(?:[\t ]|$)/.test(line) || line.startsWith('>')) return `\\${line}`;
+  if (/^1[.)][\t ]+\S/.test(line)) return `1\\${line.slice(1)}`;
+  const fence = /^(`{3,}|~{3,})/.exec(line)?.[1];
+  if (fence) return fence.replace(/./g, '\\$&') + line.slice(fence.length);
+  return line;
+}
+
+/**
  * mdast-util-to-markdown's `paragraph` handler plus
  * {@link escapeContinuationColons} — except for a paragraph that is one HTML
  * node, which is how Milkdown holds an HTML *block*: its lines are raw HTML,
@@ -603,7 +629,9 @@ const paragraphHandler: Handle = (node: Paragraph, parent, state: ToMarkdownStat
   const htmlBlock = node.children?.length === 1 && node.children[0].type === 'html';
   if (htmlBlock) return value;
   const style = styleOf<ParagraphStyle>(node);
-  const printed = escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source));
+  const printed = escapeContinuationBlockStarts(
+    escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source)),
+  );
   // Only a top-level paragraph has an indentation of its own to keep (one in
   // a container is recorded relative to it, see `authoredLines`).
   const siblings = (parent?.children ?? []) as Nodes[];
@@ -618,7 +646,9 @@ const defListTermHandler: Handle = (node: DefListTerm, parent, state: ToMarkdown
   phrasing();
   exit();
   const style = styleOf<ParagraphStyle>(node);
-  const printed = escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source));
+  const printed = escapeContinuationBlockStarts(
+    escapeContinuationColons(minimizeBlockEscapes(value, state, style?.source)),
+  );
   // A term after a definition would be read as that definition's content if
   // indented; only a list's first term, after something that does not
   // continue (a heading, a paragraph), keeps its indentation.
