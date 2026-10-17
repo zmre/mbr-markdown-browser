@@ -12,13 +12,12 @@ import { constructGuess, RoundTripChecker, touchedLines } from './checker.js';
 /** A note in the editor's own spelling: unchanged by an untouched save. */
 const CLEAN = '# Title\n\nSome *text*.\n\n* one\n* two\n';
 /**
- * Rewritten, a known limit: remark escapes a `<` right after a bare URL,
- * and GFM's autolink literal then reads the backslash into the URL, so the
- * editor cannot show that `<a_b>` and `\<a_b>` read the same there. The blank
+ * Rewritten, an accepted cosmetic: a lazy continuation line in a footnote
+ * is indented (the same footnote, as both parsers read it). The blank
  * line ending the frontmatter is kept (an unedited frontmatter is saved as
  * loaded); editing the frontmatter would drop it.
  */
-const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\nSee https://example.com/?q=<a_b> here.\n';
+const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n[^1]: a\nlazy\n';
 
 describe('RoundTripChecker', () => {
   const checker = new RoundTripChecker();
@@ -31,15 +30,15 @@ describe('RoundTripChecker', () => {
 
     const lossy = await checker.check(LOSSY);
     expect(lossy.changed).toBe(true);
-    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\nSee https://example.com/?q=\\<a_b> here.\n');
+    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n[^1]: a\n    lazy\n');
     // The body's unedited blocks are kept, and so is the unedited frontmatter.
     expect(lossy.untouchedSave).toBe(LOSSY);
     expect(lossy.notice).toEqual({
-      ifEdited: [{ first: 7, last: 7 }],
+      ifEdited: [{ first: 7, last: 8 }],
       onSave: [],
       frontmatter: ['blank lines at its end are dropped'],
     });
-    expect(constructGuess(LOSSY, lossy)).toBe('paragraph');
+    expect(constructGuess(LOSSY, lossy)).toBe('footnote (whitespace only)');
   });
 
   it('keeps CRLF and names a lost byte-order mark', async () => {

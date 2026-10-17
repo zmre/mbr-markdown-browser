@@ -252,6 +252,11 @@ export function samePhrasing(state: State, a: string, b: string): boolean {
   return canonical !== undefined && canonical(`${a}\n`) === canonical(`${b}\n`);
 }
 
+/** The editor's parse as a comparable key, as installed by {@link minimalEscapesPlugin}; `undefined` without it. */
+export function editorCanonical(state: State): Canonical | undefined {
+  return (state.options as MinimizeOptions).mbrCanonical;
+}
+
 /** Records the document's definitions for {@link minimizeBlockEscapes}, then prints it. */
 function printRoot(node: Root, parent: Parents | undefined, state: State, info: Info): string {
   definitionsByState.set(state, collectDefinitions(node as unknown as MdNode));

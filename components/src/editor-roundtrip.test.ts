@@ -148,13 +148,13 @@ describe('openEditor: the safety net', () => {
     document.querySelector('.mbr-editor-overlay')?.remove()
   })
 
-  // A `<` right after a bare URL is escaped: `\<a_b>` (a known limit).
-  const INEXACT = '---\ntitle: t\n---\n# Note\n\nSee https://example.com/?q=<a_b> here.\n\nIntro.\n'
+  // A lazy line in a footnote is indented once edited (an accepted cosmetic).
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\nSee[^1].\n\n[^1]: a\nlazy\n\nIntro.\n'
 
   it('names the lines the editor would write differently', async () => {
     const { modal } = await openOn(INEXACT)
     const notice = modal.querySelector('.mbr-editor-notice')
-    expect(notice?.textContent).toContain('Line 6 ')
+    expect(notice?.textContent).toContain('Lines 8–9 ')
     expect(notice?.textContent).toContain('saved as written unless you edit them')
   })
 

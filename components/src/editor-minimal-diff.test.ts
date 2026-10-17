@@ -122,10 +122,10 @@ describe('the save', () => {
   });
 
   it('reports the lines the round trip changes', async () => {
-    // A `<` right after a bare URL is escaped: `\<a_b>` (a known limit).
-    const source = 'Fine\n\nSee https://example.com/?q=<a_b> here.\n\nAlso fine\n';
+    // A lazy line in a footnote is indented once edited (an accepted cosmetic).
+    const source = 'Fine\n\n[^1]: a\nlazy\n\nAlso fine\n';
     const crepe = await openCrepe(source);
-    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 3 }], onSave: [] });
+    expect(createBodySaver(crepe, source).rewritten).toEqual({ ifEdited: [{ first: 3, last: 4 }], onSave: [] });
   });
 
   it('reports nothing for an exact round trip', async () => {

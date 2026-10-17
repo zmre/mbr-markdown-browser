@@ -21,14 +21,14 @@ afterAll(() => rmSync(temp, { recursive: true, force: true }));
 const SECRETS = ['Zanzibar', 'Quarterly', 'lossy', 'kitchen', 'tasks', 'hidden'];
 
 /**
- * Rewritten by a full re-serialization: a `<` right after a bare URL is
- * escaped, `\<secret_two>` (the only
+ * Rewritten by a full re-serialization: a lazy line in a footnote is
+ * indented, `    secret_two here.` (the only
  * rewrite the test needs; if the editor learns to keep it, pick another). The
  * blank line ending the frontmatter is kept: an unedited frontmatter is saved
  * as loaded.
  */
 const LOSSY =
-  '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\nKickoff.\n\nMeet in Zanzibar on 2026-03-04.\n\nSee https://example.com/?q=<secret_two> here.\n';
+  '---\ntitle: Quarterly Plan\n\n---\n# Quarterly Plan\nKickoff.\n\nMeet in Zanzibar on 2026-03-04.\n\n[^1]: See\nsecret_two here.\n';
 
 function write(path: string, text: string): void {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -98,7 +98,7 @@ describe('roundtrip-check end to end', () => {
 
     expect(readdirSync(out).sort()).toEqual(['.roundtrip-report', '0001', 'index.md', 'progress.json', 'run.log', 'summary.json']);
     const index = readFileSync(join(out, 'index.md'), 'utf8');
-    expect(index).toMatch(/\| 0001 \| deep\/lossy\.md \| \d+ \| [^|]*paragraph[^|]* \| reproduces \| S\d+/);
+    expect(index).toMatch(/\| 0001 \| deep\/lossy\.md \| \d+ \| [^|]*footnote[^|]* \| reproduces \| S\d+/);
     expect(readdirSync(join(out, '0001')).sort()).toEqual([
       'diff.patch',
       'repro.anon.diff.patch',
@@ -107,13 +107,13 @@ describe('roundtrip-check end to end', () => {
       'repro.md',
     ]);
     const patch = readFileSync(join(out, '0001', 'diff.patch'), 'utf8');
-    // The list's lines are named: an edit to it would write them this way.
-    expect(patch).toContain('Notice at open, saved as written unless edited: 10');
+    // The footnote's lines are named: an edit to it would write them this way.
+    expect(patch).toContain('Notice at open, saved as written unless edited: 10–11\n');
     expect(patch).toContain('Notice at open, if the frontmatter is edited: blank lines at its end are dropped');
     // The unedited frontmatter, its trailing blank line included, is not part of the diff.
     expect(patch).toContain('Any save writes the parts you did not edit as: the note unchanged');
     expect(patch).toContain('--- a/deep/lossy.md\n+++ b/deep/lossy.md\n');
-    expect(patch).toContain('-See https://example.com/?q=<secret_two> here.\n+See https://example.com/?q=\\<secret_two> here.\n');
+    expect(patch).toContain('-secret_two here.\n+    secret_two here.\n');
 
     // The reproduction keeps the rewrite and drops what it does not need:
     // the heading and paragraphs, and the frontmatter (no longer rewritten).
@@ -121,12 +121,12 @@ describe('roundtrip-check end to end', () => {
     expect(repro).not.toContain('Zanzibar');
     expect(repro).not.toContain('title:');
     expect(repro).not.toContain('Kickoff');
-    expect(repro).toBe('See https://example.com/?q=<secret_two> here.\n');
+    expect(repro).toBe('[^1]: See\nsecret_two here.\n');
     const anon = readFileSync(join(out, '0001', 'repro.anon.md'), 'utf8');
     expect(anon).toBe(anonymize(repro));
     expect(index).toContain(ANON_REPRODUCES);
     expect(readFileSync(join(out, '0001', 'repro.anon.diff.patch'), 'utf8')).toContain(
-      '-Xxx https://xxxxxxx.xxx/?x=<xxxxxx_xxx> xxxx.\n+Xxx https://xxxxxxx.xxx/?x=\\<xxxxxx_xxx> xxxx.\n',
+      '-xxxxxx_xxx xxxx.\n+    xxxxxx_xxx xxxx.\n',
     );
 
     // A rerun replaces its own report.

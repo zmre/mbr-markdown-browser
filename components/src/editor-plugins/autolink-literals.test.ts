@@ -65,4 +65,36 @@ describe('in the editor', () => {
     typeText(view, '!');
     expect(serializeBody(crepe)).toBe('See <https://example.com> and more!\n');
   });
+
+  it('keeps a `<` that ends a bare URL unescaped when the paragraph is edited', async () => {
+    // Escaped, the backslash would be the URL's last character to GFM.
+    for (const source of [
+      'See https://example.com/?q=<a_b> here.\n',
+      'See https://example.com<x here.\n',
+      'See www.example.com/<!x here.\n',
+      '* https://example.com/<a and here\n',
+    ]) {
+      const crepe = await openCrepe(source);
+      const view = viewOf(crepe);
+      placeCursor(view, 'here', 4);
+      typeText(view, '!');
+      expect(serializeBody(crepe)).toBe(source.replace('here', 'here!'));
+    }
+  });
+
+  it('prints the link in brackets where the `<` after it starts a tag', async () => {
+    // Typed against the URL: escaping the tag would put the backslash in the URL.
+    const crepe = await openCrepe('See https://example.com here\n');
+    const view = viewOf(crepe);
+    placeCursor(view, 'https://example.com', 19);
+    const at = view.state.selection.from;
+    view.dispatch(view.state.tr.insert(at, view.state.schema.text('<b>')));
+    const saved = serializeBody(crepe);
+    expect(saved).toBe('See <https://example.com>\\<b> here\n');
+    // Re-read, the link is whole and `<b>` is text.
+    const again = await openCrepe(saved);
+    const para = viewOf(again).state.doc.firstChild;
+    expect(para?.textContent).toBe('See https://example.com<b> here');
+    expect(para?.child(1).marks[0]?.attrs.href).toBe('https://example.com');
+  });
 });

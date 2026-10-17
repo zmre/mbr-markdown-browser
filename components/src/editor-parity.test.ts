@@ -95,7 +95,9 @@
  * container opened on the same line (`* a` / `  * 6. x`, `> 6. x` under a
  * paragraph) was text to micromark, a list to pulldown-cmark, and was saved
  * `6\. x` once edited (`nested-list-start.ts`); a task box with nothing
- * after it was text, a task to the renderer (`task-markers.ts`).
+ * after it was text, a task to the renderer (`task-markers.ts`); a `<`
+ * ending a bare URL was saved `\<` once edited, and GFM read the backslash
+ * into the URL (`autolink-literals.ts`, `rt-bare-url-less-than`).
  *
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,

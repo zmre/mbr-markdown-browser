@@ -14,14 +14,28 @@
  * (`mbrStyle` on Milkdown's link mark), and a literal link whose text still
  * reads as its URL prints as that text ({@link literalText}). One the reader
  * changed (other text, another URL) prints as remark prints any link.
+ *
+ * A literal ends at `<`, so `https://example.com/?q=<a_b>` is a link and the
+ * text `<a_b>`. remark escapes that `<` (`<a` could start a tag), and after a
+ * bare URL the backslash is not an escape: GFM reads it as the URL's last
+ * character, `https://example.com/?q=\`, and the escape check
+ * (`minimal-escapes.ts`) could not drop it, since it compares against the
+ * printed text. {@link keepLessThanAfterLiteral} prints that `<` bare whenever
+ * it starts nothing (no tag, no autolink) — always, for text the editor
+ * parsed, since a literal cannot end before a `<` that does. Where it would
+ * (`<b>` typed against a URL), the link is printed as remark prints any link,
+ * `<url>\<b>`, which keeps the URL whole.
  */
-import type { Link, Parents } from 'mdast';
+import type { Link, Parents, Text } from 'mdast';
 import { defaultHandlers, type Info, type State } from 'mdast-util-to-markdown';
 import type { Mark, Node as ProseNode } from '@milkdown/kit/prose/model';
 import { linkSchema } from '@milkdown/kit/preset/commonmark';
 import type { MarkSchema, ParserState, SerializerState } from '@milkdown/kit/transformer';
+import { initTimerCtx, remarkStringifyOptionsCtx } from '@milkdown/kit/core';
+import { createTimer, type MilkdownPlugin } from '@milkdown/kit/ctx';
 import { $remark } from '@milkdown/kit/utils';
 import { keepLinkEdgeSpaces } from './link-spaces.js';
+import { editorCanonical } from './minimal-escapes.js';
 import { addRemarkExtensions, type MdNode } from './remark-support.js';
 
 /** A link typed as a bare URL (a GFM autolink literal); `at`, where it was parsed (see `link-spaces.ts`). */
@@ -59,10 +73,79 @@ export function literalText(node: Link): string | undefined {
   return node.url === text || node.url === `http://${text}` || node.url === `mailto:${text}` ? text : undefined;
 }
 
-function printLink(node: Link, parent: Parents | undefined, state: State, info: Info): string {
-  const literal = (node as Link & { mbrStyle?: LinkStyle }).mbrStyle?.literal ? literalText(node) : undefined;
-  return literal ?? defaultHandlers.link(node, parent, state, info);
+/** A `<` remark escapes in text: one that could start a tag, a declaration or an autolink. */
+const ESCAPED_LESS_THAN = /^<[!/?A-Za-z]/;
+
+/**
+ * Whether the `<` that opens `value`, printed right after a bare URL, needs
+ * its escape (unescaped, it would start a tag or an autolink); `undefined`
+ * without the editor's parse to ask (`minimal-escapes.ts` not installed).
+ */
+function lessThanNeedsEscape(state: State, value: string): boolean | undefined {
+  if (!ESCAPED_LESS_THAN.test(value)) return false;
+  const canonical = editorCanonical(state);
+  // After a word character, so a `<div>` cannot read as an HTML block.
+  return canonical === undefined ? undefined : canonical(`x\\${value}`) !== canonical(`x${value}`);
 }
+
+/** The bare text `node` prints as, when it is a literal and still reads as its URL. */
+function bareText(node: MdNode | undefined): string | undefined {
+  if (node?.type !== 'link' || !(node as MdNode & { mbrStyle?: LinkStyle }).mbrStyle?.literal) return undefined;
+  return literalText(node as unknown as Link);
+}
+
+function printLink(node: Link, parent: Parents | undefined, state: State, info: Info): string {
+  const literal = bareText(node as unknown as MdNode);
+  if (literal === undefined) return defaultHandlers.link(node, parent, state, info);
+  const siblings = (parent as MdNode | undefined)?.children ?? [];
+  const next = siblings[siblings.indexOf(node as unknown as MdNode) + 1];
+  // Its escape would join the URL: print the link as any link instead.
+  if (next?.type === 'text' && lessThanNeedsEscape(state, String(next.value ?? '')) === true) {
+    return defaultHandlers.link(node, parent, state, info);
+  }
+  return literal;
+}
+
+/** Text handler signature (mdast-util-to-markdown's `Handle`, narrowed). */
+type TextHandle = (node: Text, parent: Parents | undefined, state: State, info: Info) => string;
+
+/**
+ * Wraps the text handler so a `<` right after a bare URL is not escaped when
+ * it starts nothing (see the module docs).
+ */
+export function keepLessThanAfterLiteral(inner: TextHandle): TextHandle {
+  return (node, parent, state, info) => {
+    const out = inner(node, parent, state, info);
+    if (!out.startsWith('\\<')) return out;
+    const siblings = (parent?.children ?? []) as unknown as MdNode[];
+    const previous = siblings[siblings.indexOf(node as unknown as MdNode) - 1];
+    if (bareText(previous) === undefined) return out;
+    return lessThanNeedsEscape(state, node.value) === false ? out.slice(1) : out;
+  };
+}
+
+const TextHandlerReady = createTimer('MbrAutolinkLiteralTextHandler');
+
+/**
+ * Installs {@link keepLessThanAfterLiteral} around the stringify options'
+ * text handler, which overrides any a remark plugin could add (as
+ * `section-attrs.ts` does) — before `init` builds the processor from it.
+ */
+const literalTextHandler: MilkdownPlugin = (ctx) => {
+  ctx.record(TextHandlerReady);
+  ctx.update(initTimerCtx, (timers) => [...timers, TextHandlerReady]);
+  return async () => {
+    ctx.update(remarkStringifyOptionsCtx, (options) => {
+      const text = options.handlers?.text as TextHandle | undefined;
+      if (!text) return options;
+      return { ...options, handlers: { ...options.handlers, text: keepLessThanAfterLiteral(text) } };
+    });
+    ctx.done(TextHandlerReady);
+    return () => {
+      ctx.clearTimer(TextHandlerReady);
+    };
+  };
+};
 
 /** Records literals at parse; prints them back bare. */
 export const remarkAutolinkLiterals = $remark('mbrAutolinkLiterals', () => function autolinkLiterals(this: unknown) {
@@ -119,4 +202,4 @@ export const literalLinkSchema = linkSchema.extendSchema((prev) => (ctx) => {
   };
 });
 
-export const autolinkLiteralsPlugin = [remarkAutolinkLiterals, literalLinkSchema].flat();
+export const autolinkLiteralsPlugin = [remarkAutolinkLiterals, literalLinkSchema, literalTextHandler].flat();
