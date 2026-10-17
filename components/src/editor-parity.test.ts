@@ -111,7 +111,10 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 const ROUND_TRIP_FAILS: Record<string, string> = {};
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
-const OUTLINE_FAILS: Record<string, string> = {};
+const OUTLINE_FAILS: Record<string, string> = {
+  'rt-items-parsed-differently':
+    'micromark reads `* 6. x` under an item\'s paragraph as text (it applies the paragraph-interrupt rule, start must be 1) and `* [ ] ` with nothing after the box as text, not a task; pulldown-cmark reads a list and a task. Saved as typed while untouched.',
+};
 
 const names = Object.keys(EDITOR_FIXTURES);
 

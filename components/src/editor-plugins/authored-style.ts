@@ -183,6 +183,31 @@ export interface ListItemStyle {
   leadingBreak?: string;
   /** An ordered item's number as typed (`1.`, `3.`, `3.`): only the first one means anything. */
   number?: number;
+  /** The whole item as typed, printed back while its content is what was loaded ({@link ItemSource}). */
+  typed?: ItemSource;
+}
+
+/**
+ * A list item as typed, for printing it back byte for byte while it holds
+ * what was loaded — `key`, {@link itemKey} of the item, set when the editor
+ * parses it ({@link carryAuthoredStyle}). Everything the item's printer
+ * normalizes stays: a tab before one nested item and four spaces before the
+ * next, a tab after the marker, the spacing after this item's marker when the
+ * list's first item has other spacing, lazy lines, blank lines and the
+ * whitespace on them, an empty task's trailing space, a nested list as the
+ * item's first block. An edit anywhere in the item prints it as before; its
+ * untouched nested items are still printed as typed.
+ */
+export interface ItemSource {
+  /** What precedes the marker on its line: container prefixes (`> `) and the item's own indentation. */
+  lead: string;
+  /** The marker as typed (`*`, `12.`). */
+  marker: string;
+  /** The item's lines: the first from just after its marker; the others whole, container prefixes included. */
+  lines: string[];
+  /** Every container around the item leaves a lazy line unprefixed ({@link LAZY_LINE}). */
+  lazyOk: boolean;
+  key?: string;
 }
 
 /** Each source row of a table, the delimiter row second, without container prefixes. */
@@ -453,14 +478,26 @@ function normalizedChildren(children: readonly Record<string, unknown>[]): Recor
  * spelling, never content.
  */
 export function contentKey(nodes: readonly unknown[]): string {
+  // Object fields count too (a table's `align`, an alert's `data`): a key
+  // that missed an edit would print the content as loaded.
+  const stableJson = (value: unknown): string => {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? '';
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+    const record = value as Record<string, unknown>;
+    const fields = Object.keys(record)
+      .filter((field) => !KEY_IGNORED.has(field) && record[field] !== undefined && record[field] !== null)
+      .sort();
+    return `{${fields.map((field) => `${field}:${stableJson(record[field])}`).join(',')}}`;
+  };
   const parts: string[] = [];
   const walk = (node: Record<string, unknown>): void => {
     parts.push(`(${String(node.type)}`);
     for (const field of Object.keys(node).sort()) {
       if (KEY_IGNORED.has(field)) continue;
       const value = node[field];
-      if (value === null || value === undefined || typeof value === 'object') continue;
-      parts.push(`${field}=${JSON.stringify(value)}`);
+      // `''` is no value too (a code block's `lang`, a link's `title`), but for text.
+      if (value === null || value === undefined || (value === '' && field !== 'value')) continue;
+      parts.push(`${field}=${typeof value === 'object' ? stableJson(value) : JSON.stringify(value)}`);
     }
     const children = node.children;
     if (Array.isArray(children)) for (const child of normalizedChildren(children)) walk(child);
@@ -587,6 +624,71 @@ export function listItemStyleFrom(
 }
 
 /**
+ * A list item's {@link ItemSource}: from its marker to the end of its last
+ * line (trailing whitespace included). `undefined` when something other than
+ * container prefixes precedes the marker (`- - x`: the inner item is printed
+ * with the outer one) or the item holds a bare `\r` (a line ending the
+ * editor normalizes).
+ */
+export function itemSourceFrom(source: string, item: Positioned, lazyOk: boolean): ItemSource | undefined {
+  const start = item.position?.start.offset;
+  let end = item.position?.end.offset;
+  if (start === undefined || end === undefined) return undefined;
+  const lead = source.slice(lineStartOf(source, start), start);
+  const marker = /^(?:[*+-]|\d{1,9}[.)])/.exec(source.slice(start, start + 10))?.[0];
+  if (!/^[ \t>]*$/.test(lead) || marker === undefined) return undefined;
+  end += /^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0].length ?? 0;
+  const lines = source
+    .slice(start + marker.length, end)
+    .split('\n')
+    .map((line) => line.replace(/\r$/, ''));
+  if (lines.some((line) => line.includes('\r'))) return undefined;
+  return { lead, marker, lines, lazyOk };
+}
+
+/**
+ * What an item's content compares by ({@link ItemSource}): its task state and
+ * the {@link contentKey} of its blocks. The serialized side drops the empty
+ * paragraph the editor puts first in an item that starts with another block,
+ * and an empty item's placeholder, as {@link printListItem} does.
+ */
+export function itemKey(item: ListItem & { status?: unknown }, leadingBlock = false): string {
+  let children: readonly RootContent[] = item.children ?? [];
+  if (isEmptyFlow(children)) children = [];
+  else if (leadingBlock && children.length > 1 && isEmptyFlow(children.slice(0, 1))) children = children.slice(1);
+  const checked = typeof item.checked === 'boolean' ? String(item.checked) : '';
+  const status = typeof item.status === 'string' ? item.status : '';
+  return `${checked}|${status}|${contentKey(children)}`;
+}
+
+/**
+ * `line`, a line of an item after its first, relative to the item's marker
+ * line: without `lead`, or `''` for a blank line, `lazy` for a line short of
+ * the item's indentation (a lazy continuation), `undefined` for one whose
+ * prefix cannot be cut at `lead` (a tab spanning it, `>` spaced differently).
+ */
+function relativeItemLine(line: string, lead: string): { text: string; lazy?: true } | undefined {
+  if (/^[ \t>]*$/.test(line) && countOf(line, '>') === countOf(lead, '>')) return { text: '' };
+  if (line.startsWith(lead)) return { text: line.slice(lead.length) };
+  if (lead.includes('>')) return countOf(line, '>') === 0 || !/^[ \t>]*>/.test(line) ? { text: line, lazy: true } : undefined;
+  const width = visualWidth(lead);
+  let column = 0;
+  let index = 0;
+  while (index < line.length && column < width && (line[index] === ' ' || line[index] === '\t')) {
+    column = line[index] === '\t' ? column + 4 - (column % 4) : column + 1;
+    index++;
+  }
+  if (column < width) return { text: line, lazy: true };
+  return column === width ? { text: line.slice(index) } : undefined;
+}
+
+function countOf(text: string, char: string): number {
+  let count = 0;
+  for (const c of text) if (c === char) count++;
+  return count;
+}
+
+/**
  * A table's rows as typed. Lines after the first lose the container prefix
  * the first line's column implies (`> `, list indentation); a line whose
  * prefix is anything else gives up (no style, the default print).
@@ -634,6 +736,8 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
     if (node.type === 'listItem') {
       const { style, linePrefix } = listItemStyleFrom(source, node as Positioned, prefix);
       if (style) mergeStyle(node, style);
+      const typed = itemSourceFrom(source, node as Positioned, lazyLines);
+      if (typed) mergeStyle(node, { typed });
       childPrefix = linePrefix;
     } else {
       const record = RECORDERS[node.type];
@@ -754,7 +858,7 @@ export function carryAuthoredStyle<T extends string>(schema: $NodeSchema<T>): $N
       parseMarkdown: {
         match: base.parseMarkdown.match,
         runner: (state, node, type) => {
-          const style = styleOf(node);
+          const style = keyedStyle(node);
           const run = () => base.parseMarkdown.runner(state, node, type);
           if (style === undefined) run();
           else withFirstNode(state, 1, { mbrStyle: style }, run);
@@ -772,6 +876,13 @@ export function carryAuthoredStyle<T extends string>(schema: $NodeSchema<T>): $N
       },
     };
   });
+}
+
+/** A node's `mbrStyle`, with the key of an item recorded as typed ({@link ItemSource}). */
+function keyedStyle(node: unknown): unknown {
+  const style = styleOf<ListItemStyle>(node);
+  if (!style?.typed || (node as { type?: unknown }).type !== 'listItem') return style;
+  return { ...style, typed: { ...style.typed, key: itemKey(node as ListItem) } };
 }
 
 /** {@link withFirstNode} for the serializer, whose two calls put `props` at different positions. */
@@ -967,6 +1078,15 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
     itemNumbers.set(node, number);
     bullet = number + bullet;
   }
+  const frames = itemFrames.get(state) ?? [];
+  itemFrames.set(state, frames);
+  const depth = state.indexStack.length;
+  const marker = markerLinePrefix(frames, depth, state);
+  const typed = asTyped(node, style, bullet, marker);
+  if (typed !== undefined) {
+    printedAsTyped.add(node);
+    return typed;
+  }
   if (isEmptyItem(node)) return bullet + (style?.empty ?? '');
   // `- - x`: the editor's empty first paragraph is not in the source.
   if (style?.leadingBlock && (node.children?.length ?? 0) > 1 && isEmptyFlow(node.children.slice(0, 1))) {
@@ -983,20 +1103,10 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
     size = Math.ceil(size / 4) * 4;
   }
 
-  // Where this item's marker line starts, as a literal prefix, when known.
-  const frames = itemFrames.get(state) ?? [];
-  itemFrames.set(state, frames);
-  const depth = state.indexStack.length;
-  const outer = frames[frames.length - 1];
-  let marker: string | undefined;
-  if (!outer) {
-    marker = depth === 2 ? '' : undefined; // root → list → this item
-  } else if (depth === outer.depth + 2) {
-    // outer item → list → this item; not on the outer item's first line.
-    const onFirstLine = state.indexStack[outer.depth] === 0 && state.indexStack[outer.depth + 1] === 0;
-    marker = onFirstLine ? undefined : outer.lines;
-  }
-  const prefix = continuationPrefix(style?.indent, size, marker);
+  // Indented code is four columns past the content column exactly: a wider
+  // authored prefix would move its text, so such an item takes the default.
+  const holdsIndentedCode = (node.children ?? []).some((child) => isIndentedCode(child));
+  const prefix = holdsIndentedCode ? ' '.repeat(size) : continuationPrefix(style?.indent, size, marker);
 
   const tracker = state.createTracker(info);
   tracker.move(bullet + ' '.repeat(size - bullet.length));
@@ -1017,6 +1127,61 @@ export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
     exit();
   }
 };
+
+/** Where an item's marker line starts, as a literal prefix, when known. */
+function markerLinePrefix(frames: readonly ItemFrame[], depth: number, state: State): string | undefined {
+  const outer = frames[frames.length - 1];
+  if (!outer) return depth === 2 ? '' : undefined; // root → list → this item
+  if (depth !== outer.depth + 2) return undefined;
+  // outer item → list → this item; not on the outer item's first line.
+  const onFirstLine = state.indexStack[outer.depth] === 0 && state.indexStack[outer.depth + 1] === 0;
+  return onFirstLine ? undefined : outer.lines;
+}
+
+/** Items {@link printListItem} printed as typed, so `task-markers.ts` does not add their box again. */
+const printedAsTyped = new WeakSet<ListItem>();
+
+/** Whether {@link printListItem} printed `item` as typed (its task box included). */
+export function wasPrintedAsTyped(item: ListItem): boolean {
+  return printedAsTyped.has(item);
+}
+
+/**
+ * `node` as typed ({@link ItemSource}) when it holds what was loaded, under
+ * `bullet` (the printer's marker, the same width as the typed one). Its lines
+ * after the first are written whole — marked lazy, so no container prefixes
+ * them again — when the printer puts the marker line under the prefix it was
+ * typed under (`marker`); else relative to the marker line, under whatever
+ * prefix the containers print, which keeps every block where it was as long
+ * as no tab in the item's indentation lands on another column.
+ */
+function asTyped(node: ListItem, style: ListItemStyle | undefined, bullet: string, marker: string | undefined): string | undefined {
+  const typed = style?.typed;
+  if (!typed?.key || bullet.length !== typed.marker.length) return undefined;
+  if (typed.key !== itemKey(node, Boolean(style?.leadingBlock))) return undefined;
+  const [first, ...rest] = typed.lines;
+  // A top-level item's own indentation (one to three spaces) is printed by the item.
+  const ownIndent = marker === '' && /^ {1,3}$/.test(typed.lead) ? typed.lead : '';
+  if (marker !== undefined && marker + ownIndent === typed.lead) {
+    return [ownIndent + bullet + first, ...rest.map((line) => LAZY_LINE + line)].join('\n');
+  }
+  const lines = [bullet + first];
+  let tabs = /^[ \t]*\t/.test(first);
+  for (const line of rest) {
+    const relative = relativeItemLine(line, typed.lead);
+    if (!relative || (relative.lazy && !typed.lazyOk)) return undefined;
+    if (relative.lazy) {
+      lines.push(LAZY_LINE + relative.text);
+      continue;
+    }
+    tabs ||= /^[ \t]*\t/.test(relative.text);
+    lines.push(/^[ \t]*$/.test(relative.text) ? '' : relative.text);
+  }
+  // A tab's width depends on its column: only where the marker sits on a column of the same tab stop phase.
+  const typedColumn = visualWidth(typed.lead.replace(/>/g, ' '));
+  if (tabs && (marker === undefined || visualWidth(marker) % 4 !== typedColumn % 4)) return undefined;
+  return lines.join('\n');
+}
 
 /**
  * A rule as typed, else the house `---` — except straight under a paragraph

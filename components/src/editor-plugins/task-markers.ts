@@ -54,7 +54,7 @@ import { splitListItem } from '@milkdown/kit/prose/schema-list';
 import type { Command } from '@milkdown/kit/prose/state';
 import type { NodeView } from '@milkdown/kit/prose/view';
 import { $command, $remark, $useKeymap, $view } from '@milkdown/kit/utils';
-import { carryAuthoredStyle, printListItem } from './authored-style.js';
+import { carryAuthoredStyle, printListItem, wasPrintedAsTyped } from './authored-style.js';
 import { injectEditorCss } from './inject-css.js';
 
 declare module 'micromark-util-types' {
@@ -265,8 +265,8 @@ function listItemWithTaskMarker(node: TaskListItem, parent: Parents | undefined,
   const tracker = state.createTracker(info);
   if (checkable) tracker.move(checkbox);
   const value = printListItem(node, parent, state, { ...info, ...tracker.current() });
-  // GFM's pattern only knows `1.`; `1)` items are tasks too.
-  return checkable ? value.replace(/^(?:[*+-]|\d+[.)])(?:[\r\n]| {1,3})/, (bullet) => bullet + checkbox) : value;
+  // GFM's pattern only knows `1.`; `1)` items are tasks too. An item printed as typed has its box.
+  return checkable && !wasPrintedAsTyped(node) ? value.replace(/^(?:[*+-]|\d+[.)])(?:[\r\n]| {1,3})/, (bullet) => bullet + checkbox) : value;
 }
 
 export function taskMarkerToMarkdown(): ToMarkdownExtension {

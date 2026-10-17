@@ -148,8 +148,8 @@ describe('openEditor: the safety net', () => {
     document.querySelector('.mbr-editor-overlay')?.remove()
   })
 
-  // A list's gap after the marker is its first item's: `- second` is printed `-  second`.
-  const INEXACT = '---\ntitle: t\n---\n# Note\n\n-  item\n- second item\n\nIntro.\n'
+  // A tab after a quote's `>` before a nested item is printed as spaces: `>   - second`.
+  const INEXACT = '---\ntitle: t\n---\n# Note\n\n> - item\n>\t- second item\n\nIntro.\n'
 
   it('names the lines the editor would write differently', async () => {
     const { modal } = await openOn(INEXACT)

@@ -339,6 +339,78 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
   });
 });
 
+/** Opens `source`, runs `edit` on the `n`th list item (document order), returns what a save writes. */
+async function afterItemEdit(
+  source: string,
+  n: number,
+  edit: (view: ReturnType<typeof viewOf>, pos: number, node: import('@milkdown/kit/prose/model').Node) => void,
+): Promise<string> {
+  const crepe = await openCrepe(source);
+  const view = viewOf(crepe);
+  let found: { pos: number; node: import('@milkdown/kit/prose/model').Node } | undefined;
+  let seen = 0;
+  view.state.doc.descendants((node, pos) => {
+    if (found) return false;
+    if (node.type.name === 'list_item' && seen++ === n) found = { pos, node };
+    return true;
+  });
+  if (!found) throw new Error(`no list item ${n}`);
+  edit(view, found.pos, found.node);
+  return serializeBody(crepe);
+}
+
+describe('a list item is printed as typed while it holds what was loaded', () => {
+  const MIXED = '* top\n\t* a\n    * b\n        * c\n';
+
+  it.each([
+    ['tabs and four spaces for one level', MIXED],
+    ['a tab after the marker', '-\tx - a\n-\tx - b\n'],
+    ['its own spacing after the marker', '*  0 x\n* b\n* --\n'],
+    ['a nested list as its first block', '* a\n\t* 6. x\n'],
+    ['an empty task\'s trailing space', '* [ ] \n* b\n'],
+    ['a whitespace-only line inside it', '* u\n\t* x\n\t\n\t## h\n'],
+    ['a lazy line under a four-space nested list', '* x\n    * a\n    * b\nlazy\n\n- y\n'],
+    ['an indented top-level list', '  * item\n  * other\n'],
+  ])('%s', async (_name, source) => {
+    expect(serializeBody(await openCrepe(source))).toBe(source);
+  });
+
+  it('an edited item is printed again, its untouched nested items as typed', async () => {
+    // `top` is printed with the house prefix; `b` keeps `c` four columns in.
+    expect(await afterTyping(MIXED, 'a', 1, 'X')).toBe('* top\n  * aX\n  * b\n      * c\n');
+    expect(await afterTyping(MIXED, 'c', 1, 'X')).toBe('* top\n  * a\n  * b\n    * cX\n');
+  });
+
+  it('an edited item holding indented code keeps the code where it was', async () => {
+    // The code (`  * a`) starts four columns past `y`'s content column (6),
+    // at 10: a tab prefix (column 8) would add two spaces to every line of it.
+    const source = '* x\n\t* y\n\n\n\t\t\t* a\n\t\t\t* b\n';
+    expect(serializeBody(await openCrepe(source))).toBe(source);
+    expect(await afterTyping(source, 'y', 1, 'X')).toBe('* x\n\t* yX\n\n\t        * a\n\t        * b\n');
+  });
+
+  it('a toggled task, a new mark, a deleted nested item: printed again', async () => {
+    const tasks = '* [ ] a\n* [ ]  b\n';
+    const toggled = await afterItemEdit(tasks, 0, (view, pos, node) =>
+      view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, checked: true })),
+    );
+    expect(toggled).toBe('* [x] a\n* [ ]  b\n');
+    const bold = await afterItemEdit('* a word\n* b\n', 0, (view, pos) => {
+      const from = pos + 2;
+      view.dispatch(view.state.tr.addMark(from, from + 1, view.state.schema.marks.strong.create()));
+    });
+    expect(bold).toBe('* **a** word\n* b\n');
+    const deleted = await afterItemEdit(MIXED, 2, (view, pos, node) => view.dispatch(view.state.tr.delete(pos, pos + node.nodeSize)));
+    expect(deleted).toBe('* top\n  * a\n');
+  });
+
+  it('keys object fields too, so a table\'s alignment is content', () => {
+    const table = (align: (string | null)[]) => [{ type: 'table', align, children: [] }];
+    expect(contentKey(table(['left', null]))).not.toBe(contentKey(table(['right', null])));
+    expect(contentKey(table(['left', null]))).toBe(contentKey(table(['left', null])));
+  });
+});
+
 describe('recording list items', () => {
   const item = (start: number, end: number, children: number[] = []) => ({
     type: 'listItem',

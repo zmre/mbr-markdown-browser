@@ -12,12 +12,12 @@ import { constructGuess, RoundTripChecker, touchedLines } from './checker.js';
 /** A note in the editor's own spelling: unchanged by an untouched save. */
 const CLEAN = '# Title\n\nSome *text*.\n\n* one\n* two\n';
 /**
- * Rewritten by design, not for want of a plugin: a list's gap after the
- * marker is its first item's, so `* other` is printed `*  other`. The blank
+ * Rewritten by design, not for want of a plugin: a tab after a quote's `>`
+ * is part of a nested item's indentation, printed as spaces (`>   * other`). The blank
  * line ending the frontmatter is kept (an unedited frontmatter is saved as
  * loaded); editing the frontmatter would drop it.
  */
-const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n*  item\n* other\n';
+const LOSSY = '---\ntitle: t\n\n---\n# Heading\n\n> * item\n>\t* other\n';
 
 describe('RoundTripChecker', () => {
   const checker = new RoundTripChecker();
@@ -30,7 +30,7 @@ describe('RoundTripChecker', () => {
 
     const lossy = await checker.check(LOSSY);
     expect(lossy.changed).toBe(true);
-    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n*  item\n*  other\n');
+    expect(lossy.saved).toBe('---\ntitle: t\n\n---\n# Heading\n\n> * item\n>   * other\n');
     // The body's unedited blocks are kept, and so is the unedited frontmatter.
     expect(lossy.untouchedSave).toBe(LOSSY);
     expect(lossy.notice).toEqual({
@@ -38,7 +38,7 @@ describe('RoundTripChecker', () => {
       onSave: [],
       frontmatter: ['blank lines at its end are dropped'],
     });
-    expect(constructGuess(LOSSY, lossy)).toBe('list (whitespace only)');
+    expect(constructGuess(LOSSY, lossy)).toBe('blockquote (whitespace only)');
   });
 
   it('keeps CRLF and names a lost byte-order mark', async () => {
