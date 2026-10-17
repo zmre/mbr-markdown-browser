@@ -148,15 +148,27 @@ Share → **MBR**, or "Open with".
 - [ ] It opens in place, as one page; the log has `document: open …` and
       `MbrApp.openFile`: ______
 - [ ] A task in it toggles and the change reaches the original file: ______
-- [ ] Tap **Grant Folder Access** (folder-plus in the toolbar). The picker
-      starts in the file's folder. Open it: the folder becomes a vault, opened at
-      that same note, and its links and images now resolve: ______
+- [ ] Tap **Grant Folder Access** (folder-plus in the toolbar). A banner under
+      the bar names the folder ("Pick the folder: Dropbox › Dev › elovation")
+      for a moment, then the picker opens. Open that folder: it becomes a vault,
+      opened at that same note, and its links and images now resolve: ______
+      - The picker does **not** start in the file's folder for a third-party
+        File Provider location: iOS 27.0.1 ignores `directoryURL` there
+        (Dropbox, iPhone 15 Pro, 2026-10-16: it opened at the last folder
+        picked, with the file's scope started and the parent from
+        `.parentDirectoryURLKey`). The banner is how you find the folder.
+      - Log: `picker: start … (parent from resource key, file scope
+        started=true, provider=…, label "…")`, `picker: provider name
+        localizedName=…, displayName=…, containerDisplayName=…` (whether iOS
+        names the provider at all) and `picker: opening in …`: ______
+      - The picker follows dark mode (dark sheet, readable title): ______
 - [ ] A Google Drive / OneDrive file opens this way too (single file only): ______
 - [ ] With a vault open (a note on screen), Share → MBR another `.md`: the
       file replaces the vault (`close: <vault>`, `MbrApp.openFile`), and Back
       returns to the vault list: ______
 - [ ] Grant Folder Access on a Google Drive / Sync.com file: Open stays dimmed in
-      its folder; Cancel keeps the file open and shows "No folder opened": ______
+      its folder; Cancel keeps the file open and shows "No folder opened", with
+      the folder's name and **Try Again**: ______
 
 ## 11. iPad
 

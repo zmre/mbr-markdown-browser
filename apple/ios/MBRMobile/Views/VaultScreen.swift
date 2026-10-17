@@ -210,13 +210,20 @@ struct VaultScreen: View {
         let start = await PickerStart.resolve(file: file)
         self.grantLabel = start.label
         self.noFolderGranted = false
+        // The hint first, on its own for a moment: the full-height picker
+        // covers it, and it may open far from this folder.
+        self.grantStart = start
+        try? await Task.sleep(for: Self.hintLead)
         self.presentPicker(start: start)
     }
+
+    /// How long the folder hint shows before the picker covers it.
+    private static let hintLead: Duration = .milliseconds(1200)
 
     /// The folder picker, for Grant Folder Access (`start`) or a re-pick.
     private func presentPicker(start: PickerStart?) {
         self.grantStart = start
-        FolderPicker.present(start: start?.url, hintHeight: start == nil ? 0 : FolderPickerHint.height) { folder in
+        FolderPicker.present(start: start?.url) { folder in
             self.grantStart = nil
             if let folder {
                 self.noFolderGranted = false

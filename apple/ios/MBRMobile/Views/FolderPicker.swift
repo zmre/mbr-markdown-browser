@@ -12,9 +12,15 @@ import UniformTypeIdentifiers
 /// Presented by UIKit from the top view controller, not wrapped in a SwiftUI
 /// `.sheet`: as a representable inside a sheet, the picker opened at the
 /// root of On My iPhone with `directoryURL` set (simulator, iOS 27), and
-/// drew itself over anything placed beside it in the sheet. `directoryURL`
-/// is still only a hint ("Picker will try to display this URL"), so Grant
-/// Folder Access also names the folder in words (`FolderPickerHint`).
+/// drew itself over anything placed beside it in the sheet.
+///
+/// `directoryURL` is only a hint ("Picker will try to display this URL"),
+/// and iOS 27.0.1 ignores it for a third-party File Provider folder
+/// (observed with Dropbox: the picker opened at the last folder picked).
+/// So Grant Folder Access names the folder in words (`FolderPickerHint`)
+/// before the picker opens. Always at full height: any shorter detent
+/// (which would have kept the hint visible above it) draws the picker's
+/// sheet as light glass in dark mode, under its white text.
 @MainActor
 enum FolderPicker {
     /// The delegate of the picker on screen; UIKit holds delegates weakly.
@@ -22,11 +28,7 @@ enum FolderPicker {
 
     /// Presents the picker. `done` gets the folder picked, or `nil` when it
     /// was cancelled (or could not be presented).
-    ///
-    /// With `hintHeight`, the sheet stops that far short of full height and
-    /// leaves the screen above it undimmed, so the hint under the bar stays
-    /// readable while picking.
-    static func present(start: URL?, hintHeight: CGFloat = 0, done: @escaping (URL?) -> Void) {
+    static func present(start: URL?, done: @escaping (URL?) -> Void) {
         guard let host = self.topViewController() else {
             Log.info("picker: no view controller to present from")
             done(nil)
@@ -41,16 +43,9 @@ enum FolderPicker {
         }
         self.current = coordinator
         picker.delegate = coordinator
+        let place = start?.path(percentEncoded: false) ?? "the last place"
         let set = picker.directoryURL?.path(percentEncoded: false) ?? "nil"
-        Log
-            .info(
-                "picker: opening in \(start?.path(percentEncoded: false) ?? "the last place") (directoryURL now \(set))"
-            )
-        if hintHeight > 0, let sheet = picker.sheetPresentationController {
-            let short = UISheetPresentationController.Detent.Identifier("mbr.belowHint")
-            sheet.detents = [.custom(identifier: short) { $0.maximumDetentValue - hintHeight }]
-            sheet.largestUndimmedDetentIdentifier = short
-        }
+        Log.info("picker: opening in \(place) (directoryURL now \(set))")
         host.present(picker, animated: true)
     }
 
@@ -81,12 +76,10 @@ enum FolderPicker {
     }
 }
 
-/// "Pick the folder: Dropbox › Dev › elovation", above the picker: the
+/// "Pick the folder: Dropbox › Dev › elovation", under the bar from the
+/// moment Grant Folder Access is tapped until the picker returns: the
 /// picker may open somewhere else, and this is where to go.
 struct FolderPickerHint: View {
-    /// The room `FolderPicker` leaves above its sheet for this.
-    static let height: CGFloat = 130
-
     let label: String
 
     var body: some View {

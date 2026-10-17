@@ -4,16 +4,13 @@ import UIKit
 /// Where Grant Folder Access opens the folder picker, and how to name that
 /// folder to the reader in case the picker opens somewhere else.
 ///
-/// `UIDocumentPickerViewController.directoryURL` is a hint ("Picker will try
-/// to display this URL"): on a device (iOS 27.0.1, a Dropbox file) it was
-/// ignored and the picker opened where the last pick was. What it is given
-/// is therefore as close as possible to what the picker itself hands out:
-/// the parent comes from the file's own `.parentDirectoryURLKey`, read while
-/// the file's security scope is held (not `deletingLastPathComponent`, a
-/// string edit that drops whatever the system attached to the URL), it keeps
-/// the `/private/var` form the picker and Files use, and the file's scope
-/// stays started for as long as the picker is up. Whatever the picker does
-/// with it, `label` says in plain words which folder to pick.
+/// The start is the file's own `.parentDirectoryURLKey`, read with the
+/// file's security scope started, and the scope stays started while the
+/// picker is up. That is harmless and is the best `directoryURL` the app
+/// can give, but iOS 27.0.1 still ignored it for a Dropbox folder (device,
+/// with the scope started and the parent from the resource key): the
+/// picker opened at the last folder picked. For a third-party File
+/// Provider folder, `label` is how the reader finds it.
 final class PickerStart: @unchecked Sendable {
     /// The folder to open in.
     let url: URL
@@ -37,7 +34,7 @@ final class PickerStart: @unchecked Sendable {
             let fromKey = (try? file.resourceValues(forKeys: [.parentDirectoryURLKey]))?.parentDirectory
             let parent = (fromKey ?? file.deletingLastPathComponent()).standardizedFileURL
             let folder = URL(filePath: parent.path(percentEncoded: false), directoryHint: .isDirectory)
-            let provider = self.providerName(for: folder)
+            let provider = self.providerName(for: folder, file: file)
             let label = self.label(for: folder, provider: provider, device: device)
             Log.info("picker: start \(folder.path(percentEncoded: false)) "
                 + "(parent from \(fromKey == nil ? "path" : "resource key"), file scope started=\(scoped), "
@@ -49,29 +46,49 @@ final class PickerStart: @unchecked Sendable {
     // MARK: Naming
 
     /// The provider's own name for its root folder, when the system will
-    /// say (`localizedName` of `…/CloudStorage/<id>` or of a third-party
-    /// iCloud container); `nil` when all it has is an identifier.
-    private static func providerName(for folder: URL) -> String? {
+    /// say; `nil` when all it has is an identifier (iOS names a provider's
+    /// `CloudStorage` folder by a UUID). Asked three ways, each logged, run
+    /// with the file's scope started: `localizedName` and
+    /// `FileManager.displayName` of the root (`…/CloudStorage/<id>` or a
+    /// third-party iCloud container), then the file's
+    /// `ubiquitousItemContainerDisplayName`. Without an entitlement the
+    /// first two may only echo the folder's own name.
+    /// (`NSFileProviderManager.getIdentifierForUserVisibleFile` gives a
+    /// domain identifier, not a name, and listing domains is the
+    /// provider's own business.)
+    private static func providerName(for folder: URL, file: URL) -> String? {
+        var tried: [String] = []
+        defer { Log.info("picker: provider name \(tried.joined(separator: ", "))") }
+        func usable(_ name: String?, _ how: String) -> String? {
+            tried.append("\(how)=\(name.map { "\"\($0)\"" } ?? "nil")")
+            guard let name, !name.isEmpty, !self.looksLikeIdentifier(name), !name.contains("~") else { return nil }
+            return name
+        }
+        if let root = self.providerRoot(of: folder) {
+            let localized = (try? root.resourceValues(forKeys: [.localizedNameKey]))?.localizedName
+            if let name = usable(localized, "localizedName") { return name }
+            let display = FileManager.default.displayName(atPath: root.path(percentEncoded: false))
+            if let name = usable(display, "displayName") { return name }
+        }
+        let container = (try? file.resourceValues(forKeys: [.ubiquitousItemContainerDisplayNameKey]))?
+            .ubiquitousItemContainerDisplayName
+        return usable(container, "containerDisplayName")
+    }
+
+    /// `…/CloudStorage/<id>`, or a third-party iCloud container; `nil`
+    /// elsewhere.
+    private static func providerRoot(of folder: URL) -> URL? {
         let parts = folder.pathComponents
-        let root: URL
+        let end: Int
         if let index = parts.firstIndex(of: "CloudStorage"), index + 1 < parts.count {
-            root = URL(
-                filePath: NSString.path(withComponents: Array(parts[...(index + 1)])),
-                directoryHint: .isDirectory
-            )
+            end = index + 1
         } else if let index = parts.firstIndex(of: "Mobile Documents"), index + 1 < parts.count,
                   parts[index + 1] != "com~apple~CloudDocs" {
-            root = URL(
-                filePath: NSString.path(withComponents: Array(parts[...(index + 1)])),
-                directoryHint: .isDirectory
-            )
+            end = index + 1
         } else {
             return nil
         }
-        guard let name = (try? root.resourceValues(forKeys: [.localizedNameKey]))?.localizedName,
-              !name.isEmpty, !self.looksLikeIdentifier(name), !name.contains("~")
-        else { return nil }
-        return name
+        return URL(filePath: NSString.path(withComponents: Array(parts[...end])), directoryHint: .isDirectory)
     }
 
     /// The folder as a reader would find it in the picker:
