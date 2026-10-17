@@ -91,7 +91,11 @@
  * quote was indented (`LAZY_LINE`), and whitespace-only blank lines emptied
  * (`withAuthoredBlankLines`). Structural: indented code after an
  * empty list item was split in two by micromark and saved that way, which
- * any save rewrote (`indented-code.ts`).
+ * any save rewrote (`indented-code.ts`); a list item opened inside a
+ * container opened on the same line (`* a` / `  * 6. x`, `> 6. x` under a
+ * paragraph) was text to micromark, a list to pulldown-cmark, and was saved
+ * `6\. x` once edited (`nested-list-start.ts`); a task box with nothing
+ * after it was text, a task to the renderer (`task-markers.ts`).
  *
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
@@ -111,10 +115,7 @@ import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './edi
 const ROUND_TRIP_FAILS: Record<string, string> = {};
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
-const OUTLINE_FAILS: Record<string, string> = {
-  'rt-items-parsed-differently':
-    'micromark reads `* 6. x` under an item\'s paragraph as text (it applies the paragraph-interrupt rule, start must be 1) and `* [ ] ` with nothing after the box as text, not a task; pulldown-cmark reads a list and a task. Saved as typed while untouched.',
-};
+const OUTLINE_FAILS: Record<string, string> = {};
 
 const names = Object.keys(EDITOR_FIXTURES);
 

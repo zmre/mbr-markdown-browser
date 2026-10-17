@@ -42,7 +42,6 @@
 import type { ListItem, Parents } from 'mdast';
 import type { CompileContext, Extension as FromMarkdownExtension, Token } from 'mdast-util-from-markdown';
 import type { Info, Options as ToMarkdownExtension, State } from 'mdast-util-to-markdown';
-import { factorySpace } from 'micromark-factory-space';
 import { markdownLineEnding, markdownLineEndingOrSpace, markdownSpace } from 'micromark-util-character';
 import type { Code, Effects, Extension as SyntaxExtension, State as MicromarkState, TokenizeContext } from 'micromark-util-types';
 import type { Processor } from 'unified';
@@ -148,8 +147,9 @@ const GREATER_THAN = 62;
  * A micromark syntax extension for `[ ]` `[x]` `[X]` `[-]` `[>]` at the start
  * of a list item's first paragraph. Identical to GFM's tokenizer — the same
  * position rule (`_gfmTasklistFirstContentOfListItem`, set by micromark's
- * subtokenizer), the same "must be followed by whitespace and content" rule —
- * except for the two extra marker characters.
+ * subtokenizer) — except for the two extra marker characters, and that the
+ * box need not be followed by content: GFM reads `* [ ]` alone as text,
+ * pulldown-cmark as an empty task, and the editor follows the renderer.
  */
 export function taskMarkerSyntax(): SyntaxExtension {
   return { text: { [LEFT_BRACKET]: { name: 'mbrTaskListCheck', tokenize: tokenizeTaskListCheck } } };
@@ -209,14 +209,12 @@ function tokenizeTaskListCheck(
   }
 
   function after(code: Code): MicromarkState | undefined {
-    if (markdownLineEnding(code)) return ok(code);
-    if (markdownSpace(code)) return effects.check({ tokenize: spaceThenNonSpace }, ok, nok)(code);
+    // GFM wants content after the box; pulldown-cmark, the renderer, reads a
+    // box with nothing after it (`* [ ]`, `* [ ] `) as an empty task, and so
+    // does the editor: `null` is the end of the paragraph.
+    if (code === null || markdownLineEnding(code) || markdownSpace(code)) return ok(code);
     return nok(code);
   }
-}
-
-function spaceThenNonSpace(effects: Effects, ok: MicromarkState, nok: MicromarkState): MicromarkState {
-  return factorySpace(effects, (code: Code) => (code === null ? nok(code) : ok(code)), 'whitespace');
 }
 
 // ============================================================================

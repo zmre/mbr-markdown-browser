@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Crepe } from '@milkdown/crepe';
 import { editorViewCtx } from '@milkdown/kit/core';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
-import { serializeBody } from '../editor-crepe.js';
-import { destroyEditors, editorOutline, fixture, openCrepe, savedFile } from '../editor-test-support.js';
+import { createBodySaver, serializeBody } from '../editor-crepe.js';
+import { destroyEditors, editorOutline, fixture, openCrepe, placeCursor, savedFile, typeText, viewOf } from '../editor-test-support.js';
 import { effectiveMarker, nextCancelMarker, nextToggleMarker, statusOf } from './task-markers.js';
 
 afterEach(destroyEditors);
@@ -103,13 +103,35 @@ describe('round trip', () => {
     expect(outline.filter((node) => node.kind === 'item').map((node) => node.task)).toEqual([undefined, undefined, 'x']);
   });
 
-  it('needs content after the box, as GFM does', async () => {
-    const outline = await editorOutline('* [-]\n* [>]   \n* [-] x\n');
-    expect(outline.filter((node) => node.kind === 'item').map((node) => node.task)).toEqual([
-      undefined,
-      undefined,
-      '-',
-    ]);
+  it('reads a box with nothing after it as a task, as the renderer does (GFM reads text)', async () => {
+    const outline = await editorOutline('* [-]\n* [>]   \n* [ ] \n* [x]\n* [-] x\n');
+    expect(outline.filter((node) => node.kind === 'item').map((node) => node.task)).toEqual(['-', '>', ' ', 'x', '-']);
+  });
+
+  it('keeps an empty task a task when the list is edited', async () => {
+    for (const source of ['* [ ] \n* b\n', '* [ ]\n* [x] b\n', '- [-] \n  - [x]\n- b\n']) {
+      const crepe = await openCrepe(source);
+      const saver = createBodySaver(crepe, source);
+      const view = viewOf(crepe);
+      placeCursor(view, 'b', 1);
+      typeText(view, '!');
+      const { body } = saver.body();
+      expect(body).toBe(source.replace('b', 'b!'));
+      // Re-read, the saved list has the same tasks.
+      const tasks = async (md: string) => (await editorOutline(md)).filter((n) => n.kind === 'item').map((n) => n.task);
+      expect(await tasks(body)).toEqual(await tasks(source));
+    }
+  });
+
+  it('types into an empty task', async () => {
+    const source = '* [ ] \n';
+    const crepe = await openCrepe(source);
+    const saver = createBodySaver(crepe, source);
+    const view = viewOf(crepe);
+    const items = listItems(crepe);
+    // Inside the item's (empty) paragraph.
+    view.dispatch(view.state.tr.insertText('new', items[0].pos + 2));
+    expect(saver.body().body).toBe('* [ ] new\n');
   });
 });
 

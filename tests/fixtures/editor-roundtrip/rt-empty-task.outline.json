@@ -1,0 +1,18 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"list","lines":[5,7],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[5,5],"task":" "},
+  {"depth":2,"kind":"paragraph","lines":[5,5]},
+  {"depth":1,"kind":"item","lines":[6,6],"task":" "},
+  {"depth":2,"kind":"paragraph","lines":[6,6]},
+  {"depth":1,"kind":"item","lines":[7,7],"task":"x"},
+  {"depth":2,"kind":"paragraph","lines":[7,7]},
+  {"depth":0,"kind":"list","lines":[9,10],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[9,10],"task":"-"},
+  {"depth":2,"kind":"paragraph","lines":[9,9]},
+  {"depth":2,"kind":"list","lines":[10,10],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[10,10],"task":"x"},
+  {"depth":4,"kind":"paragraph","lines":[10,10]},
+  {"depth":0,"kind":"paragraph","lines":[12,12]}
+]
