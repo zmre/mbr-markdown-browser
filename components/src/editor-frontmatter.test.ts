@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  withAuthoredEnd,
   documentToSave,
   frontmatterCloseLine,
   frontmatterRewrites,
@@ -198,5 +199,22 @@ describe('frontmatterRewrites: what editing the frontmatter normalizes', () => {
       'blank lines at its end are dropped',
     ]);
     expect(rewrites('---\r\ntitle: t\n---\r\n# H\r\n')).toEqual(['its line endings are made uniform']);
+  });
+});
+
+describe('withAuthoredEnd: the body ends as loaded', () => {
+  it('drops the printer\'s line break when the note had none', () => {
+    expect(withAuthoredEnd('a\n', 'a')).toBe('a');
+  });
+
+  it('keeps blank lines (and their spaces) after the last line', () => {
+    expect(withAuthoredEnd('a\n', 'a\n\n\n')).toBe('a\n\n\n');
+    expect(withAuthoredEnd('a\n', 'a  \n \n')).toBe('a\n \n');
+  });
+
+  it('leaves a body that does not end in one line break alone', () => {
+    expect(withAuthoredEnd('a', 'a\n')).toBe('a');
+    expect(withAuthoredEnd('a\n\n', 'a')).toBe('a\n\n');
+    expect(withAuthoredEnd('a\n', '')).toBe('a\n');
   });
 });

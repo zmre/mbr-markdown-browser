@@ -107,16 +107,18 @@ describe('the save', () => {
     expect(body).toBe('One\n\nNew\n\nTwo\n');
   });
 
-  it('falls back to the whole serialization when an original block would swallow the next', async () => {
-    // An unclosed fence runs to the end of the file; a paragraph after it would be code.
+  it('closes an unclosed fence once something follows it, so nothing is swallowed', async () => {
+    // An unclosed fence runs to the end of the file. It is printed as typed
+    // while it ends the note, and closed once a block follows it: the
+    // original (unclosed) spelling would make the new paragraph code.
     const source = 'Para\n\n```\ncode\n';
-    const { body, whole, crepe } = await saveAfter(source, (c) => {
+    const { body, whole } = await saveAfter(source, (c) => {
       const view = viewOf(c);
       const end = view.state.doc.content.size;
       view.dispatch(view.state.tr.insert(end, view.state.schema.nodes.paragraph.create(null, view.state.schema.text('After'))));
     });
-    expect(whole).toBe(true);
-    expect(body).toBe(serializeBody(crepe));
+    expect(whole).toBe(false);
+    expect(body).toBe('Para\n\n```\ncode\n```\n\nAfter\n');
   });
 
   it('reports the lines the round trip changes', async () => {

@@ -95,7 +95,7 @@ import { minimizeBlockEscapes } from './minimal-escapes.js';
 import {
   absorbsIndentedParagraph,
   contentKey,
-  keepAuthoredLines,
+  keepAuthoredText,
   type DefinitionStyle,
   type ParagraphStyle,
 } from './authored-style.js';
@@ -607,7 +607,7 @@ const paragraphHandler: Handle = (node: Paragraph, parent, state: ToMarkdownStat
   // a container is recorded relative to it, see `authoredLines`).
   const siblings = (parent?.children ?? []) as Nodes[];
   const indentFirst = parent?.type === 'root' && !absorbsIndentedParagraph(siblings[siblings.indexOf(node) - 1]);
-  return keepAuthoredLines(printed, style?.lines, indentFirst);
+  return keepAuthoredText(printed, style?.lines, indentFirst, state);
 };
 
 const defListTermHandler: Handle = (node: DefListTerm, parent, state: ToMarkdownState, info: Info) => {
@@ -623,7 +623,7 @@ const defListTermHandler: Handle = (node: DefListTerm, parent, state: ToMarkdown
   // continue (a heading, a paragraph), keeps its indentation.
   const list = parent as DefList | undefined;
   const indentFirst = list?.children[0] === node && firstTermMayIndent.get(list) !== false;
-  return keepAuthoredLines(printed, style?.lines, indentFirst);
+  return keepAuthoredText(printed, style?.lines, indentFirst, state);
 };
 
 function styleOf<T>(node: unknown): T | undefined {

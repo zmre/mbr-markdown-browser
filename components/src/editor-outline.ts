@@ -17,7 +17,7 @@
  * | kind            | fields                                             |
  * |-----------------|----------------------------------------------------|
  * | `heading`       | `level`; `id`, `classes` from `{#id .class}`       |
- * | `paragraph`     | —                                                  |
+ * | `paragraph`     | — (also Crepe's `image-block`, a lone image)       |
  * | `blockquote`    | `alert` for a GitHub alert                         |
  * | `list`          | `ordered`, `start` (ordered only), `tight`         |
  * | `item`          | `task`: `" "` `"x"` `"-"` `">"`, on task items only |
@@ -188,6 +188,9 @@ function describe(node: MdastNode, base: OutlineNode, source: string): OutlineNo
     }
     case 'paragraph':
       return isWrappedHtmlBlock(node) ? { ...base, kind: 'html' } : { ...base, kind: 'paragraph' };
+    // Crepe's lone image: the paragraph holding it (`images.ts` restores its position).
+    case 'image-block':
+      return { ...base, kind: 'paragraph' };
     case 'blockquote':
       return typeof node.data?.alert === 'string'
         ? { ...base, kind: 'blockquote', alert: node.data.alert }

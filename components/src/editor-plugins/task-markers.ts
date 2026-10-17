@@ -41,7 +41,7 @@
  */
 import type { ListItem, Parents } from 'mdast';
 import type { CompileContext, Extension as FromMarkdownExtension, Token } from 'mdast-util-from-markdown';
-import { defaultHandlers, type Info, type Options as ToMarkdownExtension, type State } from 'mdast-util-to-markdown';
+import type { Info, Options as ToMarkdownExtension, State } from 'mdast-util-to-markdown';
 import { factorySpace } from 'micromark-factory-space';
 import { markdownLineEnding, markdownLineEndingOrSpace, markdownSpace } from 'micromark-util-character';
 import type { Code, Effects, Extension as SyntaxExtension, State as MicromarkState, TokenizeContext } from 'micromark-util-types';
@@ -54,6 +54,7 @@ import { splitListItem } from '@milkdown/kit/prose/schema-list';
 import type { Command } from '@milkdown/kit/prose/state';
 import type { NodeView } from '@milkdown/kit/prose/view';
 import { $command, $remark, $useKeymap, $view } from '@milkdown/kit/utils';
+import { carryAuthoredStyle, printListItem } from './authored-style.js';
 import { injectEditorCss } from './inject-css.js';
 
 declare module 'micromark-util-types' {
@@ -263,7 +264,7 @@ function listItemWithTaskMarker(node: TaskListItem, parent: Parents | undefined,
   const checkbox = `[${marker}] `;
   const tracker = state.createTracker(info);
   if (checkable) tracker.move(checkbox);
-  const value = defaultHandlers.listItem(node, parent, state, { ...info, ...tracker.current() });
+  const value = printListItem(node, parent, state, { ...info, ...tracker.current() });
   // GFM's pattern only knows `1.`; `1)` items are tasks too.
   return checkable ? value.replace(/^(?:[*+-]|\d+[.)])(?:[\r\n]| {1,3})/, (bullet) => bullet + checkbox) : value;
 }
@@ -293,7 +294,7 @@ type DomSpec = readonly [string, Record<string, unknown>, ...unknown[]];
  * `'\t'`, `'x'`, `'X'`, `'-'`, `'>'`), `null` on a plain item or one whose
  * marker nothing has set yet.
  */
-export const taskListItemSchema = extendListItemSchemaForTask.extendSchema((prev) => (ctx) => {
+export const taskListItemSchema = carryAuthoredStyle(extendListItemSchemaForTask.extendSchema((prev) => (ctx) => {
   const base = prev(ctx);
   return {
     ...base,
@@ -357,7 +358,7 @@ export const taskListItemSchema = extendListItemSchemaForTask.extendSchema((prev
       },
     },
   };
-});
+}));
 
 /** The label CSS class per status (Crepe's `checked`/`unchecked`, plus ours). */
 const LABEL_CLASS: Record<TaskStatusMarker, string> = {

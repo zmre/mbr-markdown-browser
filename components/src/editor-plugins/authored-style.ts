@@ -47,7 +47,7 @@ import {
   type Options as ToMarkdownExtension,
   type State,
 } from 'mdast-util-to-markdown';
-import type { Blockquote, Break, Code, Heading, List, Parents, Table, TableRow, ThematicBreak } from 'mdast';
+import type { Blockquote, Break, Code, Heading, List, ListItem, Parents, RootContent, Table, TableRow, ThematicBreak } from 'mdast';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
 import type { NodeSchema, ParserState, SerializerState } from '@milkdown/kit/transformer';
 import type { $NodeSchema } from '@milkdown/kit/utils';
@@ -62,7 +62,7 @@ import {
   paragraphSchema,
 } from '@milkdown/kit/preset/commonmark';
 import { tableSchema } from '@milkdown/kit/preset/gfm';
-import { minimizeBlockEscapes, samePhrasing } from './minimal-escapes.js';
+import { minimizeBlockEscapes, sameBlockMeaning, samePhrasing } from './minimal-escapes.js';
 import { addRemarkExtensions, type MdNode } from './remark-support.js';
 
 // ============================================================================
@@ -76,6 +76,8 @@ export interface ListStyle {
   indent?: 'tab';
   /** Every item repeats the first number (`1. 1. 1.`). */
   sameNumber?: true;
+  /** Spaces after the marker, two to four, where that is not `tab` (`*  x`). */
+  spaces?: number;
 }
 
 export interface HeadingStyle {
@@ -96,16 +98,18 @@ export interface CodeStyle {
   fence?: string;
   /** The info string's words after the language (`title="x"`). */
   meta?: string;
+  /** A fence never closed (the block runs to the end of the note). */
+  unclosed?: true;
 }
 
 /**
  * A paragraph's (or a definition term's) spelling: its source as loaded, for
- * keeping its escapes (`minimal-escapes.ts`), and its lines as typed when
- * they carry whitespace the printer would drop ({@link keepAuthoredLines}).
+ * keeping its escapes (`minimal-escapes.ts`), and its lines as typed
+ * ({@link keepAuthoredText}).
  */
 export interface ParagraphStyle {
   source?: string;
-  /** The lines as typed, relative to the container ({@link authoredLines}); only when one has leading or trailing whitespace. */
+  /** The lines as typed, relative to the container ({@link authoredLines}); a task item's box left out. */
   lines?: string[];
 }
 
@@ -125,8 +129,10 @@ export interface DefinitionStyle {
 }
 
 /**
- * Blank lines between two top-level blocks, when more than the one the
- * printer writes. Kept on both blocks, tagged with the line the gap follows,
+ * Blank lines between two top-level blocks, when other than the one the
+ * printer writes: several, or none where that is safe ({@link adjacentIsSafe});
+ * and between two items of a list, when other than the printer writes for
+ * the list ({@link recordItemGaps}). Kept on both blocks, tagged with the line the gap follows,
  * so it is written only between the same two blocks: a block inserted
  * between them, or a neighbour deleted, gets the printer's single blank line.
  */
@@ -148,9 +154,31 @@ export interface BreakStyle {
   spaces: string;
 }
 
-/** `>>`: no space between this quote's `>` and a nested one's. */
+/**
+ * `>>`: no space between this quote's `>` and a nested one's. `empty`: a
+ * quote with nothing in it, and what followed its `>` (`''`, `' '`).
+ */
 export interface BlockquoteStyle {
-  compact: true;
+  compact?: true;
+  empty?: string;
+  /** What follows `>` on the quote's blank lines, when every one has it (`'> '`). */
+  blank?: string;
+}
+
+/**
+ * A list item's spelling. `empty`: an item with nothing in it, and what
+ * followed its marker on the line (`''`, `' '`) — printed as typed instead of
+ * Milkdown's `<br />` placeholder. `indent`: the whitespace its lines after
+ * the first begin with, relative to the item's own marker line (a tab, four
+ * spaces where two would do), so nested lists keep their indentation.
+ */
+export interface ListItemStyle {
+  empty?: string;
+  indent?: string;
+  /** The item's first block is not a paragraph of text (`- - x`, `- ## x`, a lone image): no paragraph in front of it. */
+  leadingBlock?: true;
+  /** An ordered item's number as typed (`1.`, `3.`, `3.`): only the first one means anything. */
+  number?: number;
 }
 
 /** Each source row of a table, the delimiter row second, without container prefixes. */
@@ -198,6 +226,7 @@ export function listStyleFrom(source: string, list: Positioned): ListStyle | und
   if (contentFollows && /^ +$/.test(gap) && gap.length > 1 && gap.length <= 4) {
     const size = markerLength + gap.length;
     if (size === Math.ceil((markerLength + 1) / 4) * 4) style.indent = 'tab';
+    else style.spaces = gap.length;
   }
   const secondAt = second && startOf(second);
   if (match[2] !== undefined && secondAt !== undefined) {
@@ -232,7 +261,7 @@ export function headingStyleFrom(source: string, heading: Positioned): HeadingSt
  * its indentation is kept. `undefined` when a later line does not have the
  * prefix (a lazy continuation inside a container), or a position is missing.
  */
-export function authoredLines(source: string, node: Positioned, prefix: number): string[] | undefined {
+export function authoredLines(source: string, node: Positioned, prefix: number | string): string[] | undefined {
   let start = node.position?.start.offset;
   let end = node.position?.end.offset;
   if (start === undefined || end === undefined) return undefined;
@@ -249,6 +278,12 @@ export function authoredLines(source: string, node: Positioned, prefix: number):
       lines.push(line);
       continue;
     }
+    if (typeof prefix === 'string') {
+      // The container's prefix as typed (a list item's `indent`): tabs included.
+      if (!line.startsWith(prefix)) return undefined;
+      lines.push(line.slice(prefix.length));
+      continue;
+    }
     if (!/^[ >]*$/.test(line.slice(0, prefix))) return undefined;
     lines.push(line.slice(prefix));
   }
@@ -263,10 +298,17 @@ function prefixOf(node: Positioned, inContainer: boolean): number {
   return inContainer ? (node.position?.start.column ?? 1) - 1 : 0;
 }
 
+/**
+ * `linePrefix`: the literal prefix of the container's lines after its first,
+ * when the container is a list item that records it ({@link ListItemStyle}):
+ * the paragraph's lines are kept relative to it, since that is what the item
+ * prints them under.
+ */
 export function paragraphStyleFrom(
   source: string,
   paragraph: Positioned,
   inContainer = false,
+  linePrefix?: string,
 ): ParagraphStyle | undefined {
   const text = sliceOf(paragraph, source);
   if (text === undefined) return undefined;
@@ -274,8 +316,11 @@ export function paragraphStyleFrom(
   // Each only worth carrying when there is something to keep: an escape, or
   // whitespace the printer drops.
   if (text.includes('\\')) style.source = text;
-  const lines = authoredLines(source, paragraph, prefixOf(paragraph, inContainer));
-  if (lines?.some((line) => /^[ \t]|[ \t]$/.test(line))) style.lines = lines;
+  const prefix = inContainer && linePrefix !== undefined ? linePrefix : prefixOf(paragraph, inContainer);
+  const lines = authoredLines(source, paragraph, prefix);
+  // A task item's box is in its paragraph's source but printed by the item.
+  if (lines && /^\[[ \txX>-]\][ \t]/.test(lines[0])) lines[0] = lines[0].replace(/^\[.\][ \t]+/, '');
+  if (lines) style.lines = lines;
   return style.source === undefined && style.lines === undefined ? undefined : style;
 }
 
@@ -313,10 +358,34 @@ export function keepAuthoredLines(printed: string, lines: readonly string[] | un
     if (out[i].trim() !== lines[i].trim()) return printed;
     if (i < out.length - 1 && trailingSpace(out[i]) !== trailingSpace(lines[i])) return printed;
   }
+  return authoredText(lines, indentFirst);
+}
+
+/** `lines` as one block, the first line's indentation kept only where allowed (see {@link keepAuthoredLines}). */
+function authoredText(lines: readonly string[], indentFirst: boolean): string {
   const first = lines[0];
   // Four columns of indentation would make the first line indented code.
   const keepIndent = indentFirst && /^ {0,3}(?! )/.test(first) && !first.startsWith('\t');
   return [keepIndent ? first : first.trimStart(), ...lines.slice(1)].join('\n');
+}
+
+/**
+ * {@link keepAuthoredLines}, and where that prints `printed` (the text was
+ * spelled differently: an escape the printer does not write, `~x~`, an
+ * address written as a link), the lines as typed when they parse to the same
+ * tree in the block's context (`sameBlockMeaning`). Only blocks that print
+ * differently are parsed, and only at a save or open.
+ */
+export function keepAuthoredText(
+  printed: string,
+  lines: readonly string[] | undefined,
+  indentFirst: boolean,
+  state: State,
+): string {
+  const kept = keepAuthoredLines(printed, lines, indentFirst);
+  if (kept !== printed || !lines) return kept;
+  const authored = authoredText(lines, indentFirst);
+  return authored !== printed && sameBlockMeaning(state, authored, printed) ? authored : printed;
 }
 
 /** Whether an indented paragraph right after `node` (blank lines between) would continue it instead. */
@@ -394,6 +463,11 @@ export function codeStyleFrom(source: string, code: Positioned & { meta?: string
   const style: CodeStyle = {};
   if (!fence) style.indented = true;
   else if (fence !== '```') style.fence = fence;
+  if (fence) {
+    const lines = (sliceOf(code, source) ?? '').replace(/\r?\n$/, '').split('\n');
+    const closing = new RegExp(`^[ \\t]*${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \\t]*\\r?$`);
+    if (lines.length < 2 || !closing.test(lines[lines.length - 1])) style.unclosed = true;
+  }
   if (code.meta) style.meta = code.meta;
   return Object.keys(style).length ? style : undefined;
 }
@@ -410,7 +484,77 @@ export function breakStyleFrom(source: string, hardBreak: Positioned): BreakStyl
 
 export function blockquoteStyleFrom(source: string, quote: Positioned): BlockquoteStyle | undefined {
   const at = startOf(quote);
-  return at !== undefined && source.startsWith('>>', at) ? { compact: true } : undefined;
+  if (at === undefined) return undefined;
+  if ((quote.children ?? []).length === 0) {
+    const rest = /^>([ \t]*)$/.exec(sliceOf(quote, source) ?? '')?.[1];
+    return rest === undefined ? undefined : { empty: rest };
+  }
+  const style: BlockquoteStyle = {};
+  if (source.startsWith('>>', at)) style.compact = true;
+  const column = (quote.position?.start.column ?? 1) - 1;
+  const blanks = new Set<string>();
+  for (const line of (sliceOf(quote, source) ?? '').split('\n').slice(1)) {
+    const rest = /^>([ \t]*)\r?$/.exec(line.slice(column))?.[1];
+    if (rest !== undefined) blanks.add(rest);
+  }
+  const [blank] = blanks;
+  if (blanks.size === 1 && blank !== '') style.blank = blank;
+  return Object.keys(style).length ? style : undefined;
+}
+
+/** The start of the line `offset` is on. */
+function lineStartOf(source: string, offset: number): number {
+  return source.lastIndexOf('\n', offset - 1) + 1;
+}
+
+/**
+ * A list item's {@link ListItemStyle}, and the literal prefix of its lines
+ * after the first (`linePrefix`), for what is nested in it. `parentPrefix`:
+ * the same for the item this one's list is in (`''` for a list at the top
+ * level), `undefined` when not known — inside a block quote, or under an
+ * item whose lines do not share one prefix.
+ *
+ * `indent` is recorded only when it is exact: the item starts right at its
+ * parent's prefix (no indentation of its own, which the printer would drop),
+ * its second block starts on a line of its own after a whitespace prefix, and
+ * every other non-blank line of the item starts with that prefix too (a lazy
+ * line does not).
+ */
+export function listItemStyleFrom(
+  source: string,
+  item: Positioned,
+  parentPrefix: string | undefined,
+): { style?: ListItemStyle; linePrefix?: string } {
+  const start = item.position?.start.offset;
+  const end = item.position?.end.offset;
+  if (start === undefined || end === undefined) return {};
+  const children = (item.children ?? []) as Positioned[];
+  if (children.length === 0) {
+    const empty = /^(?:[*+-]|(\d{1,9})[.)])([ \t]*)$/.exec(source.slice(start, end));
+    if (!empty) return {};
+    return { style: { empty: empty[2], ...(empty[1] !== undefined ? { number: Number(empty[1]) } : {}) } };
+  }
+  const first = children[0] as Positioned & { children?: { type: string }[] };
+  const imageOnly = first.type === 'paragraph' && first.children?.length === 1 && first.children[0].type === 'image';
+  const number = /^(\d{1,9})[.)]/.exec(source.slice(start, start + 10))?.[1];
+  const leading: ListItemStyle | undefined =
+    first.type !== 'paragraph' || imageOnly || number !== undefined
+      ? {
+          ...(first.type !== 'paragraph' || imageOnly ? { leadingBlock: true as const } : {}),
+          ...(number !== undefined ? { number: Number(number) } : {}),
+        }
+      : undefined;
+  const second = children[1]?.position?.start.offset;
+  if (parentPrefix === undefined || second === undefined) return { style: leading };
+  const lead = source.slice(lineStartOf(source, start), start);
+  const secondLine = lineStartOf(source, second);
+  const linePrefix = source.slice(secondLine, second);
+  if (lead !== parentPrefix || secondLine <= start || !/^[ \t]+$/.test(linePrefix) || !linePrefix.startsWith(lead)) {
+    return { style: leading };
+  }
+  const lines = source.slice(start, end).split('\n').slice(1);
+  if (lines.some((line) => /\S/.test(line) && !line.startsWith(linePrefix))) return { style: leading };
+  return { style: { ...leading, indent: linePrefix.slice(lead.length) }, linePrefix };
 }
 
 /**
@@ -435,7 +579,10 @@ export function tableStyleFrom(source: string, table: Positioned): TableStyle | 
   return { rows: rows.map((row) => row.replace(/\r$/, '')) };
 }
 
-const RECORDERS: Record<string, (source: string, node: Positioned, inContainer: boolean) => unknown> = {
+const RECORDERS: Record<
+  string,
+  (source: string, node: Positioned, inContainer: boolean, linePrefix: string | undefined) => unknown
+> = {
   paragraph: paragraphStyleFrom,
   defListTerm: paragraphStyleFrom,
   defListDescription: definitionStyleFrom,
@@ -450,30 +597,75 @@ const RECORDERS: Record<string, (source: string, node: Positioned, inContainer: 
 
 /** Sets `mbrStyle` on every node in `tree` whose spelling is recorded (see the module docs). */
 export function recordAuthoredStyles(tree: MdNode, source: string): void {
-  const visit = (node: MdNode, inContainer: boolean): void => {
-    const record = RECORDERS[node.type];
-    if (record) {
-      const style = record(source, node as Positioned, inContainer);
-      if (style) (node as Styled<unknown>).mbrStyle = style;
+  // `prefix`: the literal prefix of the lines `node` is printed under, when
+  // known — `''` at the top level, a list item's for its paragraphs and lists.
+  const visit = (node: MdNode, inContainer: boolean, prefix: string | undefined): void => {
+    let childPrefix: string | undefined;
+    if (node.type === 'listItem') {
+      const { style, linePrefix } = listItemStyleFrom(source, node as Positioned, prefix);
+      if (style) mergeStyle(node, style);
+      childPrefix = linePrefix;
+    } else {
+      const record = RECORDERS[node.type];
+      if (record) {
+        const style = record(source, node as Positioned, inContainer, prefix);
+        if (style) mergeStyle(node, style);
+      }
+      childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
     }
+    if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null });
     const nested = inContainer || CONTAINERS.has(node.type);
-    for (const child of node.children ?? []) visit(child, nested);
+    for (const child of node.children ?? []) visit(child, nested, childPrefix);
   };
-  visit(tree, false);
+  visit(tree, false, '');
   recordGaps(tree);
 }
 
-/** Records {@link GapStyle} on each pair of top-level blocks with more than one blank line between. */
+/** Adds `style` to what is recorded on `node` (a list's item gaps are recorded before its items). */
+function mergeStyle(node: MdNode, style: object): void {
+  const styled = node as Styled<object>;
+  styled.mbrStyle = { ...styled.mbrStyle, ...style };
+}
+
+/** Tags `left`/`right` with the `blank` lines between them, which end and start at `line` (see {@link GapStyle}). */
+function tagGap(left: Positioned, right: Positioned, blank: number, line: number): void {
+  const l = left as Styled<GapStyle>;
+  const r = right as Styled<GapStyle>;
+  l.mbrStyle = { ...l.mbrStyle, gapAfter: blank, gapAfterLine: line };
+  r.mbrStyle = { ...r.mbrStyle, gapBeforeLine: line };
+}
+
+/**
+ * Records {@link GapStyle} between the items of a list where it is not what
+ * the printer writes for the whole list — one blank line in a loose list,
+ * none in a tight one. A list with a blank line between two of its items is
+ * loose, and the printer would put one between all of them.
+ */
+function recordItemGaps(list: MdNode & { spread?: boolean | null }): void {
+  const items = (list.children ?? []) as Positioned[];
+  const printed = list.spread ? 1 : 0;
+  for (let i = 0; i < items.length - 1; i++) {
+    const end = (items[i].position?.end as { line?: number } | undefined)?.line;
+    const next = (items[i + 1].position?.start as { line?: number } | undefined)?.line;
+    if (end === undefined || next === undefined || next <= end) continue;
+    const blank = next - end - 1;
+    if (blank !== printed) tagGap(items[i], items[i + 1], blank, end);
+  }
+}
+
+/**
+ * Records {@link GapStyle} on each pair of top-level blocks with other than
+ * one blank line between: none (a list right under a heading) or several.
+ */
 function recordGaps(root: MdNode): void {
   const children = (root.children ?? []) as Positioned[];
   for (let i = 0; i < children.length - 1; i++) {
     const end = (children[i].position?.end as { line?: number } | undefined)?.line;
     const next = (children[i + 1].position?.start as { line?: number } | undefined)?.line;
-    if (end === undefined || next === undefined || next - end - 1 < 2) continue;
-    const left = children[i] as Styled<GapStyle>;
-    const right = children[i + 1] as Styled<GapStyle>;
-    left.mbrStyle = { ...left.mbrStyle, gapAfter: next - end - 1, gapAfterLine: end };
-    right.mbrStyle = { ...right.mbrStyle, gapBeforeLine: end };
+    if (end === undefined || next === undefined || next - end - 1 === 1 || next <= end) continue;
+    const left = children[i];
+    const right = children[i + 1];
+    tagGap(left, right, next - end - 1, end);
   }
 }
 
@@ -615,7 +807,172 @@ const printList: Handle<List> = (node, parent, state, info) => {
   }
   options.listItemIndent = style?.indent ?? 'one';
   options.incrementListMarker = !style?.sameNumber;
+  if (!authoredItemGapsHold(node)) unheldItemGaps.add(node);
   return withOptions(state, options, () => defaultHandlers.list(node, parent, state, info));
+};
+
+/** Lists whose authored item gaps would change whether they are loose (see {@link authoredItemGapsHold}). */
+const unheldItemGaps = new WeakSet<List>();
+
+/** The authored blank lines between `left` and `right` ({@link GapStyle}), if they are still neighbours. */
+function authoredGap(left: unknown, right: unknown): number | undefined {
+  const after = styleOf<GapStyle>(left);
+  const line = after?.gapAfterLine;
+  if (after?.gapAfter === undefined || line === undefined || styleOf<GapStyle>(right)?.gapBeforeLine !== line) {
+    return undefined;
+  }
+  return after.gapAfter;
+}
+
+/**
+ * Whether printing `list`'s items with their authored gaps keeps it as loose
+ * (or tight) as it is: a loose list needs a blank line between two items or
+ * inside one. An edit can remove the item gaps that made it loose (delete the
+ * one item set apart); then every gap is printed as the printer would.
+ */
+function authoredItemGapsHold(list: List): boolean {
+  const items = list.children;
+  let loose = items.some((item) => item.spread && item.children.length > 1);
+  for (let i = 0; i < items.length - 1; i++) {
+    const gap = authoredGap(items[i], items[i + 1]) ?? (list.spread ? 1 : 0);
+    if (gap > 0) loose = true;
+  }
+  return loose === Boolean(list.spread);
+}
+
+/** Milkdown's stand-in for an empty paragraph (`remarkPreserveEmptyLine`). */
+const EMPTY_LINE_PLACEHOLDER = /^<br\s*\/?\s*>$/i;
+
+/**
+ * Whether flow content is empty as far as the source goes: no blocks, or one
+ * paragraph that is empty or only Milkdown's `<br />` placeholder (the editor
+ * puts an empty paragraph in every container it loads empty).
+ */
+function isEmptyFlow(children: readonly RootContent[] | undefined): boolean {
+  if (!children || children.length === 0) return true;
+  if (children.length !== 1 || children[0].type !== 'paragraph') return false;
+  const inline = children[0].children;
+  return (
+    inline.length === 0 ||
+    (inline.length === 1 && inline[0].type === 'html' && EMPTY_LINE_PLACEHOLDER.test(inline[0].value.trim()))
+  );
+}
+
+/** Whether a list item prints as its marker alone. */
+function isEmptyItem(item: ListItem | undefined): boolean {
+  return item !== undefined && item.checked == null && isEmptyFlow(item.children);
+}
+
+/** Columns `text` takes from the start of a line (tab stops every four). */
+export function visualWidth(text: string): number {
+  let column = 0;
+  for (const char of text) column = char === '\t' ? column + 4 - (column % 4) : column + 1;
+  return column;
+}
+
+/**
+ * A list item being printed: `depth`, `state.indexStack.length` when it
+ * started; `lines`, the literal prefix of its lines after the first, when the
+ * whole of it is known (every container around it is a list item, none on its
+ * parent's first line).
+ */
+interface ItemFrame {
+  depth: number;
+  lines: string | undefined;
+}
+
+const itemFrames = new WeakMap<State, ItemFrame[]>();
+
+/** The number each ordered item was printed with, for the next item's. */
+const itemNumbers = new WeakMap<ListItem, number>();
+
+/**
+ * What a list item's lines after the first begin with: `indent` as typed
+ * ({@link ListItemStyle}) when it keeps every block of the item where the
+ * default (`size` spaces) puts it — at least the content column, less than
+ * four columns past it — else the default. Spaces measure the same anywhere;
+ * a tab's width depends on its column, so it is used only where the item's
+ * column is known.
+ */
+function continuationPrefix(indent: string | undefined, size: number, marker: string | undefined): string {
+  const spaces = ' '.repeat(size);
+  if (indent === undefined || indent === spaces || !/^[ \t]+$/.test(indent)) return spaces;
+  let width: number;
+  if (!indent.includes('\t')) width = indent.length;
+  else if (marker !== undefined) width = visualWidth(marker + indent) - visualWidth(marker);
+  else return spaces;
+  return width >= size && width < size + 4 ? indent : spaces;
+}
+
+/**
+ * remark's `listItem` handler (mdast-util-to-markdown), with the item's
+ * authored spelling ({@link ListItemStyle}): an empty item prints as its
+ * marker, and the item's lines after the first start with its `indent`.
+ * `task-markers.ts` (which owns the `listItem` handler) prints through it.
+ */
+export const printListItem: Handle<ListItem> = (node, parent, state, info) => {
+  const style = styleOf<ListItemStyle>(node);
+  let bullet = state.bulletCurrent || state.options.bullet || '*';
+  if (parent && parent.type === 'list' && parent.ordered) {
+    const index = parent.children.indexOf(node);
+    const start = typeof parent.start === 'number' && parent.start > -1 ? parent.start : 1;
+    const previous = index > 0 ? itemNumbers.get(parent.children[index - 1]) : undefined;
+    let number: number;
+    if (previous === undefined) number = start + (state.options.incrementListMarker === false ? 0 : index);
+    else if (style?.number !== undefined && style.number !== previous) {
+      // After the first, a number is only a spelling (CommonMark counts from
+      // the first): as typed. One equal to the previous item's is a copy
+      // (Enter splits an item, attrs and all), so it is counted on.
+      number = style.number;
+    } else number = state.options.incrementListMarker === false ? previous : previous + 1;
+    itemNumbers.set(node, number);
+    bullet = number + bullet;
+  }
+  if (isEmptyItem(node)) return bullet + (style?.empty ?? '');
+  // `- - x`: the editor's empty first paragraph is not in the source.
+  if (style?.leadingBlock && node.children.length > 1 && isEmptyFlow(node.children.slice(0, 1))) {
+    node = { ...node, children: node.children.slice(1) };
+  }
+  // `*  x`: the list's gap after the marker as typed (two to four spaces).
+  const spaces = parent?.type === 'list' ? (styleOf<ListStyle>(parent)?.spaces ?? 1) : 1;
+  let size = bullet.length + spaces;
+  const listItemIndent = state.options.listItemIndent ?? 'one';
+  if (
+    listItemIndent === 'tab' ||
+    (listItemIndent === 'mixed' && ((parent && parent.type === 'list' && parent.spread) || node.spread))
+  ) {
+    size = Math.ceil(size / 4) * 4;
+  }
+
+  // Where this item's marker line starts, as a literal prefix, when known.
+  const frames = itemFrames.get(state) ?? [];
+  itemFrames.set(state, frames);
+  const depth = state.indexStack.length;
+  const outer = frames[frames.length - 1];
+  let marker: string | undefined;
+  if (!outer) {
+    marker = depth === 2 ? '' : undefined; // root → list → this item
+  } else if (depth === outer.depth + 2) {
+    // outer item → list → this item; not on the outer item's first line.
+    const onFirstLine = state.indexStack[outer.depth] === 0 && state.indexStack[outer.depth + 1] === 0;
+    marker = onFirstLine ? undefined : outer.lines;
+  }
+  const prefix = continuationPrefix(style?.indent, size, marker);
+
+  const tracker = state.createTracker(info);
+  tracker.move(bullet + ' '.repeat(size - bullet.length));
+  tracker.shift(prefix.length);
+  const exit = state.enter('listItem');
+  frames.push({ depth, lines: marker === undefined ? undefined : marker + prefix });
+  try {
+    return state.indentLines(state.containerFlow(node, tracker.current()), (line, index, blank) => {
+      if (index) return (blank ? '' : prefix) + line;
+      return (blank ? bullet : bullet + ' '.repeat(size - bullet.length)) + line;
+    });
+  } finally {
+    frames.pop();
+    exit();
+  }
 };
 
 /**
@@ -632,6 +989,22 @@ const printRule: Handle<ThematicBreak> = (node, parent, state) => {
 
 const printHeading: Handle<Heading> = (node, parent, state, info) => {
   const style = styleOf<HeadingStyle>(node);
+  const value = printHeadingAs(style, node, parent, state, info);
+  // Trailing whitespace on the heading's line, which nothing means.
+  const source = style?.source;
+  if (source === undefined || source.includes('\n') || value.includes('\n')) return value;
+  if (/[ \t]$/.test(source) && value === source.replace(/[ \t]+$/, '')) return source;
+  // Spelled differently, read the same (`###  x`, an escape the printer does not write).
+  return source !== value && sameBlockMeaning(state, source, value) ? source : value;
+};
+
+function printHeadingAs(
+  style: HeadingStyle | undefined,
+  node: Heading,
+  parent: Parents | undefined,
+  state: State,
+  info: Info,
+): string {
   const setextChar = node.depth === 1 ? '=' : '-';
   const setext = style?.setext && node.depth <= 2 && style.setext[0] === setextChar;
   const value = minimizeBlockEscapes(
@@ -645,7 +1018,7 @@ const printHeading: Handle<Heading> = (node, parent, state, info) => {
   }
   if (style?.closing && value.startsWith('#') && !value.includes('\n')) return value + style.closing;
   return value;
-};
+}
 
 const printCode: Handle<Code> = (node, parent, state, info) => {
   const style = styleOf<CodeStyle>(node);
@@ -655,13 +1028,20 @@ const printCode: Handle<Code> = (node, parent, state, info) => {
   const value = withOptions(state, { fences: !style?.indented, fence: fenceChar }, () =>
     defaultHandlers.code(withMeta, parent, state, info),
   );
-  const fence = style?.fence;
+  const fenced = withAuthoredFence(value, style?.fence, fenceChar);
+  // A fence never closed, still ending the note: no closing line.
+  const last = parent?.type === 'root' && parent.children[parent.children.length - 1] === node;
+  if (style?.unclosed && last && fenced.startsWith(fenceChar)) return fenced.replace(/\n[`~]{3,}$/, '');
+  return fenced;
+};
+
+/** remark uses the shortest fence that works; the authored one, if longer. */
+function withAuthoredFence(value: string, fence: string | undefined, fenceChar: string): string {
   if (!fence || !value.startsWith(fenceChar)) return value;
-  // remark uses the shortest fence that works; the authored one, if longer.
   const open = /^[`~]+/.exec(value)?.[0] ?? '';
   if (open.length >= fence.length) return value;
   return fence + value.slice(open.length, value.length - open.length) + fence;
-};
+}
 
 const printBreak: Handle<Break> = (node, parent, state, info) => {
   const value = defaultHandlers.break(node, parent, state, info);
@@ -675,13 +1055,16 @@ const printBreak: Handle<Break> = (node, parent, state, info) => {
  * printer — `alerts.ts` prints an alert's body through it.
  */
 export const printBlockquote: Handle<Blockquote> = (node, _parent, state, info) => {
-  const compact = Boolean(styleOf<BlockquoteStyle>(node)?.compact);
+  const style = styleOf<BlockquoteStyle>(node);
+  // An empty quote: as typed, not `> <br />` (Milkdown's empty paragraph).
+  if (isEmptyFlow(node.children)) return `>${style?.empty ?? ''}`;
+  const compact = Boolean(style?.compact);
   const exit = state.enter('blockquote');
   const tracker = state.createTracker(info);
   tracker.move('> ');
   tracker.shift(2);
   const value = state.indentLines(state.containerFlow(node, tracker.current()), (line, _index, blank) => {
-    if (blank) return `>${line}`;
+    if (blank) return `>${style?.blank ?? ''}${line}`;
     return compact && line.startsWith('>') ? `>${line}` : `> ${line}`;
   });
   exit();
@@ -791,19 +1174,79 @@ const printTable: Handle<Table> = (node, parent, state, info) => {
   return [rows[0], delimiterLine, ...rows.slice(1)].join('\n');
 };
 
+/** Whether `node` prints as an ATX heading (one line), not setext. */
+function isAtxHeading(node: RootContent): boolean {
+  if (node.type !== 'heading') return false;
+  const setext = styleOf<HeadingStyle>(node)?.setext;
+  return !(setext && node.depth <= 2 && setext[0] === (node.depth === 1 ? '=' : '-'));
+}
+
+function isFencedCode(node: RootContent): boolean {
+  return node.type === 'code' && !styleOf<CodeStyle>(node)?.indented;
+}
+
+/** Whether `node` prints as indented code (its style, and no language to fence). */
+function isIndentedCode(node: RootContent): boolean {
+  return node.type === 'code' && Boolean(styleOf<CodeStyle>(node)?.indented) && !node.lang;
+}
+
+/** A list that may start right under a paragraph (CommonMark: not empty, an ordered one at 1). */
+function interruptsParagraph(list: List): boolean {
+  if (isEmptyItem(list.children[0])) return false;
+  return !list.ordered || list.start === 1 || list.start == null;
+}
+
+/** A rule that may follow a paragraph line: not `-`, which would underline it as a heading. */
+function ruleAfterParagraph(rule: ThematicBreak): boolean {
+  const source = styleOf<RuleStyle>(rule)?.source ?? HOUSE_STYLE.rule;
+  return !source.startsWith('-');
+}
+
 /**
- * Blank lines between two top-level blocks as authored, where there were
- * more than one ({@link GapStyle}). Never before code: after a list that
- * would be the list's (the default join separates the two with a comment).
+ * Whether `right` printed on the line after `left` (no blank line between)
+ * still starts a block of its own: nothing continues a heading, a rule or a
+ * fenced code block, and only indented code continues indented code; a paragraph, a list's last paragraph or a quote's lazy
+ * paragraph takes in the next line unless that line interrupts a paragraph.
+ * Only the pairs authored that way get here ({@link GapStyle}); this keeps an
+ * edit from making them merge.
+ */
+export function adjacentIsSafe(left: RootContent, right: RootContent): boolean {
+  if (left.type === 'heading' || left.type === 'thematicBreak' || isFencedCode(left)) return true;
+  // Indented code ends at a line indented less; only more indented code would join it.
+  if (left.type === 'code') return !isIndentedCode(right);
+  // An empty last item has no paragraph to continue; a list would continue the list.
+  if (left.type === 'list' && isEmptyItem(left.children[left.children.length - 1])) {
+    return right.type !== 'list' && !isIndentedCode(right);
+  }
+  const interrupts =
+    isAtxHeading(right) ||
+    isFencedCode(right) ||
+    (right.type === 'thematicBreak' && ruleAfterParagraph(right));
+  if (left.type === 'list') return interrupts;
+  if (left.type === 'paragraph' || left.type === 'blockquote') {
+    return interrupts || right.type === 'blockquote' || (right.type === 'list' && interruptsParagraph(right));
+  }
+  return false;
+}
+
+/**
+ * Blank lines between two top-level blocks as authored ({@link GapStyle}).
+ * Never before indented code after a list, which would be the list's (the
+ * default join separates the two with a comment) — unless the list's last
+ * item is empty, which nothing after a blank line continues — or after
+ * indented code, which it would join.
  */
 const joinAuthoredGaps: Join = (left, right, parent) => {
-  if (parent.type !== 'root' || right.type === 'code') return undefined;
-  const after = styleOf<GapStyle>(left);
-  const line = after?.gapAfterLine;
-  if (after?.gapAfter === undefined || line === undefined || styleOf<GapStyle>(right)?.gapBeforeLine !== line) {
-    return undefined;
+  if (parent.type === 'list') return unheldItemGaps.has(parent) ? undefined : authoredGap(left, right);
+  if (parent.type !== 'root') return undefined;
+  const gap = authoredGap(left, right);
+  if (isIndentedCode(right as RootContent)) {
+    if (left.type === 'list') return isEmptyItem(left.children[left.children.length - 1]) ? Math.max(gap ?? 1, 1) : undefined;
+    // Two indented blocks are one, however many blank lines are between.
+    if (left.type === 'code') return undefined;
   }
-  return after.gapAfter;
+  if (gap === 0) return adjacentIsSafe(left as RootContent, right as RootContent) ? 0 : undefined;
+  return gap;
 };
 
 export const authoredStyleToMarkdown: ToMarkdownExtension = {

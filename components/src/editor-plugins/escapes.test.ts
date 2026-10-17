@@ -4,7 +4,7 @@
  */
 import { editorViewCtx } from '@milkdown/kit/core';
 import { afterEach, describe, expect, it } from 'vitest';
-import { destroyEditors, openCrepe, savedFile } from '../editor-test-support.js';
+import { destroyEditors, openCrepe, placeCursor, savedFile, typeText, viewOf } from '../editor-test-support.js';
 
 afterEach(destroyEditors);
 
@@ -40,11 +40,20 @@ describe('the `\\$` escape round-trips', () => {
   });
 });
 
-describe('where decoding is the right reading', () => {
-  it('keeps the decoded value in link destinations (same link)', async () => {
-    // The URL attribute holds `&`, printed as `&` (remark's `\&` is dropped
-    // as unneeded, `minimal-escapes.ts`); it reads back as the same `&`.
-    expect(await savedFile('[l](u?a&amp;b)\n')).toBe('[l](u?a&b)\n');
+describe('link destinations', () => {
+  it('keep an entity as typed while the paragraph reads the same', async () => {
+    // The URL attribute holds `&`, which prints as `&`; the paragraph as
+    // typed parses to the same tree, so it is kept (`keepAuthoredText`).
+    expect(await savedFile('[l](u?a&amp;b)\n')).toBe('[l](u?a&amp;b)\n');
+  });
+
+  it('print the decoded value once the paragraph is edited', async () => {
+    const saved = await savedFile('[l](u?a&amp;b)\n', (crepe) => {
+      const view = viewOf(crepe);
+      placeCursor(view, 'l', 1);
+      typeText(view, 'x');
+    });
+    expect(saved).toBe('[lx](u?a&b)\n');
   });
 });
 

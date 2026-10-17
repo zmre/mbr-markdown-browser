@@ -251,7 +251,8 @@ export const definitionSchema = $nodeSchema('mbr_definition', () => ({
   marks: '',
   code: true,
   defining: true,
-  attrs: { tightNext: { default: false } },
+  // `mbrStyle`: what `authored-style.ts` recorded (blank lines around it).
+  attrs: { tightNext: { default: false }, mbrStyle: { default: null } },
   parseDOM: [
     {
       tag: 'div[data-type="mbr-definition"]',
@@ -275,7 +276,8 @@ export const definitionSchema = $nodeSchema('mbr_definition', () => ({
     runner: (state, node, type) => {
       const data = node.data as { mbrSource?: string; mbrTightNext?: boolean } | undefined;
       const source = data?.mbrSource ?? definitionSource(node as Partial<Definition>);
-      state.addNode(type, { tightNext: data?.mbrTightNext === true }, source ? [type.schema.text(source)] : []);
+      const mbrStyle = (node as { mbrStyle?: unknown }).mbrStyle ?? null;
+      state.addNode(type, { tightNext: data?.mbrTightNext === true, mbrStyle }, source ? [type.schema.text(source)] : []);
     },
   },
   toMarkdown: {
@@ -283,7 +285,10 @@ export const definitionSchema = $nodeSchema('mbr_definition', () => ({
     runner: (state, node) => {
       const source = node.textContent;
       if (!source.trim()) return;
-      state.addNode('mbrDefinition', undefined, source, { data: { mbrTightNext: node.attrs.tightNext === true } });
+      const style: unknown = node.attrs.mbrStyle;
+      const props: Record<string, unknown> = { data: { mbrTightNext: node.attrs.tightNext === true } };
+      if (style != null) props.mbrStyle = style;
+      state.addNode('mbrDefinition', undefined, source, props as never);
     },
   },
 }));

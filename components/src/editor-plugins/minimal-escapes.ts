@@ -183,6 +183,21 @@ export function minimizeBlockEscapes(printed: string, state: State, authored?: s
 }
 
 /**
+ * Whether two spellings of the block being printed in `state` (a paragraph,
+ * a heading) parse to the same tree in its context — the same wrap as
+ * {@link minimizeBlockEscapes}. `false` without the plugin, unless equal.
+ */
+export function sameBlockMeaning(state: State, a: string, b: string): boolean {
+  if (a === b) return true;
+  const canonical = (state.options as MinimizeOptions).mbrCanonical;
+  if (!canonical) return false;
+  const definitions = definitionsByState.get(state) ?? '';
+  const wrap = containerWrap(state);
+  const suffix = definitions ? `\n\n${definitions}\n` : '\n';
+  return canonical(wrap(a) + suffix) === canonical(wrap(b) + suffix);
+}
+
+/**
  * Whether two printings of a phrasing block read the same (`a\|b` and `a|b`
  * outside a table, `AT\&T` and `AT&T`). `false` without the plugin, unless
  * the strings are equal.

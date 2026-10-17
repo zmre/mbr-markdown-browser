@@ -196,11 +196,23 @@ function editedHead(doc: OpenedDocument, yaml: string): string {
  * its line endings). Edited frontmatter is {@link recombine}d into the
  * normalized `---` form, which {@link frontmatterRewrites} names at open; the
  * blank lines separating it from the body are kept. A byte-order mark is kept
- * either way.
+ * either way. The body ends as the loaded one did ({@link withAuthoredEnd}).
  */
 export function documentToSave(doc: OpenedDocument, yaml: string, body: string): string {
   const head = frontmatterUnchanged(doc, yaml) ? doc.head : editedHead(doc, yaml);
-  return head + withLineEnding(body, doc.lineEnding);
+  return head + withLineEnding(withAuthoredEnd(body, doc.body), doc.lineEnding);
+}
+
+/**
+ * `body`, a serialization ending in one line break (the printer's), ending
+ * the way `original` (the body as loaded, LF) did: without a final line
+ * break, or with the blank lines after its last line. A body ending any
+ * other way (the safety net already kept the loaded end) is left alone.
+ */
+export function withAuthoredEnd(body: string, original: string): string {
+  if (!body.endsWith('\n') || body.endsWith('\n\n') || original === '') return body;
+  const end = /\n[ \t\n]*$/.exec(original)?.[0];
+  return body.slice(0, -1) + (end ?? '');
 }
 
 /**

@@ -7,14 +7,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { serializeBody } from '../editor-crepe.js';
 import { destroyEditors, openCrepe, placeCursor, press, typeText, viewOf } from '../editor-test-support.js';
+import type { RootContent } from 'mdast';
 import {
+  adjacentIsSafe,
   authoredLines,
   contentKey,
   headingStyleFrom,
   keepAuthoredLines,
+  listItemStyleFrom,
   listStyleFrom,
   rowCells,
   tableStyleFrom,
+  visualWidth,
 } from './authored-style.js';
 import type { MdNode } from './remark-support.js';
 
@@ -171,8 +175,8 @@ describe('recording', () => {
     expect(listStyleFrom('* a\n* b\n', list(4))).toEqual({ marker: '*' });
     expect(listStyleFrom('3) a\n3) b\n', list(5))).toEqual({ marker: ')', sameNumber: true });
     expect(listStyleFrom('-   a\n', list(0))).toEqual({ marker: '-', indent: 'tab' });
-    // Three spaces after `-` is not a tab stop: printed with one.
-    expect(listStyleFrom('-  a\n', list(0))).toEqual({ marker: '-' });
+    // Two spaces after `-` is not a tab stop: kept as typed.
+    expect(listStyleFrom('-  a\n', list(0))).toEqual({ marker: '-', spaces: 2 });
   });
 
   it('reads headings', () => {
@@ -249,5 +253,138 @@ describe('recording', () => {
     const source = '> | a |\n> | - |\n> | 1 |';
     const table = { type: 'table', position: { start: { offset: 2, column: 3 }, end: { offset: source.length } } };
     expect(tableStyleFrom(source, table)).toEqual({ rows: ['| a |', '| - |', '| 1 |'] });
+  });
+});
+
+/** Opens `source`, deletes the `n`th list item (document order), returns what a save writes. */
+async function afterDeletingItem(source: string, n: number): Promise<string> {
+  const crepe = await openCrepe(source);
+  const view = viewOf(crepe);
+  let found: { from: number; to: number } | undefined;
+  let seen = 0;
+  view.state.doc.descendants((node, pos) => {
+    if (found) return false;
+    if (node.type.name === 'list_item' && seen++ === n) found = { from: pos, to: pos + node.nodeSize };
+    return true;
+  });
+  if (!found) throw new Error(`no list item ${n}`);
+  view.dispatch(view.state.tr.delete(found.from, found.to));
+  return serializeBody(crepe);
+}
+
+describe('found by roundtrip-check (the rt-* fixtures hold the untouched round trips)', () => {
+  it('a tab-indented nested list keeps its tabs when an item is edited', async () => {
+    expect(await afterTyping('* a\n\t* b\n\t\t* c\n', 'b', 1, 'X')).toBe('* a\n\t* bX\n\t\t* c\n');
+  });
+
+  it('a four-space nested list keeps its indentation for a new item', async () => {
+    expect(await afterEnter('* a\n    * b\n* c\n', 'b', 'n')).toBe('* a\n    * b\n    * n\n* c\n');
+  });
+
+  it('an empty item stays its marker alone', async () => {
+    expect(await afterTyping('- one\n-\n- three\n', 'one', 3, 'X')).toBe('- oneX\n-\n- three\n');
+  });
+
+  it('an item that starts with a list gets no `<br />` line', async () => {
+    expect(await afterTyping('- - x\n  - y\n', 'y', 1, 'Z')).toBe('- - x\n  - yZ\n');
+  });
+
+  it('ordered numbers stay as typed; a new item is counted on from the one before', async () => {
+    expect(await afterTyping('1. a\n3. b\n7. c\n', 'b', 1, 'X')).toBe('1. a\n3. bX\n7. c\n');
+    expect(await afterEnter('1. a\n3. b\n7. c\n', 'a', 'n')).toBe('1. a\n2. n\n3. b\n7. c\n');
+  });
+
+  it('a list right under a heading stays there; a block put between gets blank lines', async () => {
+    expect(await afterTyping('# Title\n- a\n', 'Title', 5, 'X')).toBe('# TitleX\n- a\n');
+    expect(await afterEnter('# Title\n- a\n', 'Title', 'p')).toBe('# Title\n\np\n\n- a\n');
+  });
+
+  it('heading trailing spaces stay until the heading is edited', async () => {
+    expect(await afterTyping('# Title  \n\nText\n', 'Text', 4, '!')).toBe('# Title  \n\nText!\n');
+    expect(await afterTyping('# Title  \n\nText\n', 'Title', 5, 'X')).toBe('# TitleX\n\nText\n');
+  });
+
+  it('a loose list keeps its own gaps between items', async () => {
+    expect(await afterTyping('* a\n* b\n\n* c\n* d\n', 'd', 1, 'X')).toBe('* a\n* b\n\n* c\n* dX\n');
+  });
+
+  it('a loose list whose only gap is deleted is printed loose, as the editor still has it', async () => {
+    // Deleting `c` leaves no authored blank line between items; the list is
+    // still loose in the editor, so every gap is the printer's.
+    expect(await afterDeletingItem('* a\n* b\n\n* c\n', 2)).toBe('* a\n\n* b\n');
+  });
+
+  it('a paragraph spelled differently but read the same keeps its spelling until edited', async () => {
+    expect(await afterTyping('AT\\&T ~x~\n\nOther\n', 'Other', 5, '!')).toBe('AT\\&T ~x~\n\nOther!\n');
+    expect(await afterTyping('AT\\&T ~x~\n\nOther\n', 'AT', 2, 'X')).toBe('ATX&T ~~x~~\n\nOther\n');
+  });
+
+  it('a quote keeps `> ` on its blank lines', async () => {
+    expect(await afterTyping('> a\n> \n> b\n', 'b', 1, 'X')).toBe('> a\n> \n> bX\n');
+  });
+});
+
+describe('recording list items', () => {
+  const item = (start: number, end: number, children: number[] = []) => ({
+    type: 'listItem',
+    position: { start: { offset: start }, end: { offset: end } },
+    children: children.map((offset, i) => ({
+      type: i === 0 ? 'paragraph' : 'list',
+      position: { start: { offset }, end: { offset } },
+    })),
+  });
+
+  it('reads an empty item and its trailing space', () => {
+    expect(listItemStyleFrom('- \n', item(0, 2), '').style).toEqual({ empty: ' ' });
+    expect(listItemStyleFrom('3)\n', item(0, 2), '').style).toEqual({ empty: '', number: 3 });
+  });
+
+  it('reads the indentation of an item\'s lines after the first, relative to its parent', () => {
+    const source = '* a\n\t* b\n';
+    expect(listItemStyleFrom(source, item(0, 9, [2, 5]), '')).toEqual({ style: { indent: '\t' }, linePrefix: '\t' });
+  });
+
+  it('gives up on a lazy line, or an item indented past its parent', () => {
+    const lazy = '* a\n    * b\nlazy\n';
+    expect(listItemStyleFrom(lazy, item(0, 17, [2, 8]), '').style?.indent).toBeUndefined();
+    const indented = ' * a\n     * b\n';
+    expect(listItemStyleFrom(indented, item(1, 14, [3, 10]), '').style?.indent).toBeUndefined();
+  });
+
+  it('measures tabs to the next stop of four', () => {
+    expect(visualWidth('\t')).toBe(4);
+    expect(visualWidth('  \t')).toBe(4);
+    expect(visualWidth('\t  \t')).toBe(8);
+  });
+});
+
+describe('blocks with no blank line between them', () => {
+  const node = (type: string, extra: object = {}) => ({ type, children: [], ...extra }) as unknown as RootContent;
+  const item = (children: unknown[] = [{ type: 'paragraph', children: [{ type: 'text', value: 'x' }] }]) => ({
+    type: 'listItem',
+    children,
+  });
+
+  it('may follow a heading, a rule or a fence', () => {
+    expect(adjacentIsSafe(node('heading', { depth: 1 }), node('paragraph'))).toBe(true);
+    expect(adjacentIsSafe(node('thematicBreak'), node('list', { children: [item()] }))).toBe(true);
+    expect(adjacentIsSafe(node('code', { value: 'x' }), node('paragraph'))).toBe(true);
+  });
+
+  it('may follow a paragraph only where a paragraph is interrupted', () => {
+    const para = node('paragraph');
+    expect(adjacentIsSafe(para, node('list', { ordered: false, children: [item()] }))).toBe(true);
+    expect(adjacentIsSafe(para, node('list', { ordered: true, start: 2, children: [item()] }))).toBe(false);
+    expect(adjacentIsSafe(para, node('list', { ordered: false, children: [item([])] }))).toBe(false);
+    // A `---` rule (the house rule) would underline the paragraph as a heading.
+    expect(adjacentIsSafe(para, node('thematicBreak'))).toBe(false);
+    expect(adjacentIsSafe(para, node('paragraph'))).toBe(false);
+  });
+
+  it('may follow a list whose last item is empty, unless it would join the list', () => {
+    const list = node('list', { children: [item(), item([])] });
+    expect(adjacentIsSafe(list, node('paragraph'))).toBe(true);
+    expect(adjacentIsSafe(list, node('list', { children: [item()] }))).toBe(false);
+    expect(adjacentIsSafe(node('list', { children: [item()] }), node('paragraph'))).toBe(false);
   });
 });

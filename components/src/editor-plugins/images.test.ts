@@ -6,7 +6,7 @@
 import { editorViewCtx } from '@milkdown/kit/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { destroyEditors, savedFile } from '../editor-test-support.js';
-import { ratioFromAlt } from './images.js';
+import { ratioFromAlt, restoreImageBlockPositions } from './images.js';
 
 afterEach(destroyEditors);
 
@@ -51,5 +51,27 @@ describe('ratioFromAlt', () => {
     expect(ratioFromAlt('A diagram')).toBe(1);
     expect(ratioFromAlt('')).toBe(1);
     expect(ratioFromAlt('0')).toBe(1);
+  });
+});
+
+describe('image-block positions', () => {
+  const at = (line: number) => ({ start: { line, column: 1, offset: 0 }, end: { line, column: 1, offset: 0 } });
+
+  it('gives each image-block the position of the paragraph it replaced, in order', () => {
+    const blocks = [{ type: 'image-block' }, { type: 'image-block' }] as { type: string; position?: unknown }[];
+    const tree = { type: 'root', children: blocks, data: { mbrImageBlockPositions: [at(2), at(5)] } };
+    restoreImageBlockPositions(tree);
+    expect(blocks.map((block) => block.position)).toEqual([at(2), at(5)]);
+  });
+
+  it('guesses nothing when the counts differ', () => {
+    const blocks = [{ type: 'image-block' }] as { type: string; position?: unknown }[];
+    restoreImageBlockPositions({ type: 'root', children: blocks, data: { mbrImageBlockPositions: [at(2), at(5)] } });
+    expect(blocks[0].position).toBeUndefined();
+  });
+
+  it('keeps a rule right above a lone image', async () => {
+    const source = '---\n![](a.png)\n';
+    expect(await savedFile(source)).toBe(source);
   });
 });

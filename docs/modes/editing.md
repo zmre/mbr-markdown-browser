@@ -97,16 +97,23 @@ construct back the way it was typed:
 - **Entities** (`&amp;`, `&nbsp;`, `&copy;`) and `\$` stay as typed.
 
 It also keeps the author's spelling of plain markdown: `-`, `*` or `+`
-bullets, `1.` or `1)` numbering (and `1. 1. 1.`), the spacing after a list
-marker, `---`/`***`/`___` rules, setext (`===`) headings and closing `#`s,
-indented code and `~~~` fences (and a fence's info string), two-space line
-breaks, `>>>` marginalia, table layout, and the backslash escapes you wrote —
-without adding escapes nothing needs (`2 * 3` stays `2 * 3`). New lists get `*`
-bullets and new rules `---`. A definition (`: …`) is written exactly as typed
-until you edit it — the spacing after the `:`, unindented continuation lines,
-a list indented further than it needs, the blank lines inside it, trailing
-spaces — and so are indented paragraphs and questions, and two or more blank
-lines between top-level blocks.
+bullets, `1.` or `1)` numbering (`1. 1. 1.`, and numbers that skip), the
+spacing after a list marker, nested lists indented with a tab or four spaces,
+empty list items and quotes, `---`/`***`/`___` rules, setext (`===`) headings,
+closing `#`s and trailing spaces, indented code and `~~~` fences (and a
+fence's info string, and a fence left unclosed at the end of the note),
+two-space line breaks, `>>>` marginalia and `> ` on a quote's blank lines,
+table layout, bare URLs (`https://…`, `www.…`, addresses — never turned into
+`<…>` links), and the backslash escapes you wrote — without adding escapes
+nothing needs (`2 * 3` stays `2 * 3`). New lists get `*` bullets and new
+rules `---`. A definition (`: …`) is written exactly as typed until you edit
+it — the spacing after the `:`, unindented continuation lines, a list
+indented further than it needs, the blank lines inside it, trailing spaces —
+and so are indented paragraphs and questions, a paragraph or heading spelled
+another way that reads the same (`AT\&T`, `~x~`, a link written out for an
+address), the blank lines between blocks (none under a heading, two or more
+anywhere, a blank line between only some items of a list), and the end of
+the note (no final line break, or blank lines after the last line).
 
 ### What a save writes
 

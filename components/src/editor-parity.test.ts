@@ -43,8 +43,9 @@
  * heading attributes had no structure (`heading-attrs.ts`); wikilinks were
  * escaped (`wikilinks.ts`); backslash escapes inside `$…$`/`$$…$$` were
  * consumed (`math.ts`); `&amp;`/`&nbsp;` were decoded and `\$` lost its
- * backslash (`escapes.ts` — still decoded, same meaning, in link destinations
- * and alt text); `[text][ref]` was inlined and its definition deleted
+ * backslash (`escapes.ts`; in link destinations and alt text they are kept
+ * while the block reads the same, `keepAuthoredText`, and decoded once it
+ * is edited); `[text][ref]` was inlined and its definition deleted
  * (`references.ts`); untitled images were deleted and a standalone image's
  * alt became Crepe's ratio `![1.00](src)` (`images.ts`). CRLF files were
  * rewritten as LF (`openEditor`/`savedFile` now keep the file's ending).
@@ -56,8 +57,6 @@
  * frontmatter by the renderer's rule (`frontmatterCloseLine`).
  *
  * Cosmetic (same structure — item 6), still normalized:
- * - A paragraph directly under a heading gets a blank line between, and so
- *   does a rule directly under a rule (`frontmatter-empty`).
  * - A lazy continuation line in a list item or block quote is indented
  *   (`deflist-edge`); in a definition it is kept.
  * - A definition, once edited, is printed `: ` + two-space continuations.
@@ -77,6 +76,20 @@
  * trailing spaces — `deflist-spelling`), indented paragraphs and terms and
  * two or more blank lines between top-level blocks (`deflist-indented-terms`).
  *
+ * Fixed from `roundtrip-check` over a real 3,153-note corpus (2026-10-16,
+ * the `rt-*` fixtures): bare URLs became `<url>` autolinks
+ * (`autolink-literals.ts`); nested lists indented with a tab or four spaces
+ * were re-indented two (`ListItemStyle.indent`); an empty item or quote
+ * became `* <br />` / `> <br />`; trailing spaces after a heading were
+ * dropped; a block directly under a heading, rule or paragraph got a blank
+ * line (`GapStyle` of 0, where `adjacentIsSafe`), blank lines before link
+ * definitions and at the end of the file were dropped, and a final line
+ * break was added (`withAuthoredEnd`); a loose list got a blank line
+ * between every item (per-item `GapStyle`); a lone image lost the blank
+ * lines around it (`images.ts`). Structural: indented code after an
+ * empty list item was split in two by micromark and saved that way, which
+ * any save rewrote (`indented-code.ts`).
+ *
  * Survive untouched: `==mark==`, `~~strike~~`, footnotes, `{{ vid(...) }}`,
  * raw HTML blocks and inline HTML, ```` ```chat ```` fences,
  * `TODO:`/`TK`/`FIXME`/`XXX` markers, task annotations (`@due(...)`,
@@ -84,23 +97,20 @@
  * lists in house style (`: ` + two-space continuations), the damaged T1-B11
  * included.
  *
- * Structure only (bytes survive, outline differs): a standalone image
- * (Crepe's image-block has no source position).
+ * Structure only (bytes survive, outline differs): none known. (A
+ * standalone image was: Crepe's image-block had no source position;
+ * `images.ts` restores it.)
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { EDITOR_FIXTURES, destroyEditors, editorOutline, savedFile } from './editor-test-support.js';
 
 /** Fixtures whose untouched save is not byte-identical today, and why. */
 const ROUND_TRIP_FAILS: Record<string, string> = {
-  'deflist-edge':
-    'item 6: a blank line added after a heading; a `:` lazy line in a list item or quote indented and escaped',
-  'frontmatter-empty': 'item 6: a blank line added between two rules with none between them',
+  'deflist-edge': 'item 6: a `:` lazy line in a list item or quote indented and escaped',
 };
 
 /** Fixtures whose editor outline disagrees with the renderer's today, and why. */
-const OUTLINE_FAILS: Record<string, string> = {
-  images: "Crepe's image-block (a lone image) carries no source position, so the outline cannot place it",
-};
+const OUTLINE_FAILS: Record<string, string> = {};
 
 const names = Object.keys(EDITOR_FIXTURES);
 
