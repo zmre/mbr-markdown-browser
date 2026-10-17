@@ -38,6 +38,7 @@ import {
 import { alerts } from './editor-plugins/alerts.js';
 import { authoredStylePlugin } from './editor-plugins/authored-style.js';
 import { autolinkLiteralsPlugin } from './editor-plugins/autolink-literals.js';
+import { linkEdgesPlugin } from './editor-plugins/link-spaces.js';
 import { indentedCodePlugin } from './editor-plugins/indented-code.js';
 import { canonicalOf, minimalEscapesPlugin, type Parser } from './editor-plugins/minimal-escapes.js';
 import { taskMarkers } from './editor-plugins/task-markers.js';
@@ -151,6 +152,7 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   imagesPlugin,
   definitionListPlugins,
   autolinkLiteralsPlugin,
+  linkEdgesPlugin,
   // Before authored-style, which records the merged block's spelling.
   indentedCodePlugin,
   authoredStylePlugin,

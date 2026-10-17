@@ -1,0 +1,15 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"paragraph","lines":[5,5]},
+  {"depth":0,"kind":"paragraph","lines":[7,8]},
+  {"depth":0,"kind":"paragraph","lines":[10,11]},
+  {"depth":0,"kind":"paragraph","lines":[13,13]},
+  {"depth":0,"kind":"paragraph","lines":[15,15]},
+  {"depth":0,"kind":"list","lines":[17,20],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[17,17]},
+  {"depth":2,"kind":"paragraph","lines":[17,17]},
+  {"depth":1,"kind":"item","lines":[18,20]},
+  {"depth":2,"kind":"paragraph","lines":[18,20]},
+  {"depth":0,"kind":"paragraph","lines":[22,22]}
+]

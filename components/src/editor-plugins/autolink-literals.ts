@@ -21,11 +21,13 @@ import type { Mark, Node as ProseNode } from '@milkdown/kit/prose/model';
 import { linkSchema } from '@milkdown/kit/preset/commonmark';
 import type { MarkSchema, ParserState, SerializerState } from '@milkdown/kit/transformer';
 import { $remark } from '@milkdown/kit/utils';
+import { keepLinkEdgeSpaces } from './link-spaces.js';
 import { addRemarkExtensions, type MdNode } from './remark-support.js';
 
-/** A link typed as a bare URL (a GFM autolink literal). */
+/** A link typed as a bare URL (a GFM autolink literal); `at`, where it was parsed (see `link-spaces.ts`). */
 export interface LinkStyle {
-  literal: true;
+  literal?: true;
+  at?: number;
 }
 
 type Positioned = MdNode & { position?: { start: { offset?: number } }; mbrStyle?: unknown };
@@ -35,7 +37,10 @@ export function recordLiteralLinks(tree: MdNode, source: string): void {
   const visit = (node: Positioned): void => {
     if (node.type === 'link') {
       const at = node.position?.start.offset;
-      if (at !== undefined && source[at] !== '<' && source[at] !== '[') node.mbrStyle = { literal: true } satisfies LinkStyle;
+      if (at !== undefined) {
+        const literal = source[at] !== '<' && source[at] !== '[';
+        node.mbrStyle = (literal ? { literal: true, at } : { at }) satisfies LinkStyle;
+      }
     }
     for (const child of node.children ?? []) visit(child as Positioned);
   };
@@ -99,6 +104,7 @@ export const literalLinkSchema = linkSchema.extendSchema((prev) => (ctx) => {
     toMarkdown: {
       match: base.toMarkdown.match,
       runner: (state: SerializerState, mark: Mark, node: ProseNode) => {
+        keepLinkEdgeSpaces(state);
         const style: unknown = mark.attrs.mbrStyle;
         let result: void | boolean = undefined;
         const run = () => {

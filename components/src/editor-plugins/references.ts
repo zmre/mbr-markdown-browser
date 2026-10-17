@@ -28,6 +28,7 @@ import { createVirtualCursor } from 'prosemirror-virtual-cursor';
 import type { Definition, Literal } from 'mdast';
 import type { CompileContext, Token } from 'mdast-util-from-markdown';
 import type { Join } from 'mdast-util-to-markdown';
+import { keepLinkEdgeSpaces, sourceAt } from './link-spaces.js';
 import { $syntax } from './syntax-extension.js';
 
 /**
@@ -128,6 +129,9 @@ export const linkReferenceSchema = $markSchema('mbr_link_ref', () => ({
     identifier: { default: '' },
     label: { default: '' },
     referenceType: { default: 'full' },
+    // `{ at }`, where the reference was parsed: keeps two adjacent references
+    // to one definition (`[a][r][b][r]`) two marks, not one (see `link-spaces.ts`).
+    mbrStyle: { default: null },
   },
   inclusive: false,
   // Opened before other marks when a run starts (Milkdown's serializer opens
@@ -163,6 +167,7 @@ export const linkReferenceSchema = $markSchema('mbr_link_ref', () => ({
         identifier: String(node.identifier ?? ''),
         label: String(node.label ?? node.identifier ?? ''),
         referenceType: referenceType(node.referenceType),
+        mbrStyle: sourceAt(node),
       });
       state.next(node.children as never);
       state.closeMark(markType);
@@ -171,10 +176,12 @@ export const linkReferenceSchema = $markSchema('mbr_link_ref', () => ({
   toMarkdown: {
     match: (mark) => mark.type.name === 'mbr_link_ref',
     runner: (state, mark) => {
+      keepLinkEdgeSpaces(state);
       state.withMark(mark, 'linkReference', undefined, {
         identifier: mark.attrs.identifier,
         label: mark.attrs.label,
         referenceType: mark.attrs.referenceType,
+        ...(mark.attrs.mbrStyle ? { mbrStyle: mark.attrs.mbrStyle } : {}),
       });
     },
   },

@@ -39,13 +39,13 @@ describe('literalText', () => {
 });
 
 describe('recordLiteralLinks', () => {
-  it('marks only links typed bare', () => {
+  it('marks only links typed bare, and where each link was parsed', () => {
     const source = 'a https://x.com <https://y.com> [z](https://z.com)';
     const at = (offset: number) => ({ start: { offset } });
     const links = [4, 16, 32].map((offset) => ({ ...link('u', 'u'), position: at(offset) }));
     const tree = { type: 'root', children: [{ type: 'paragraph', children: links }] } as unknown as MdNode;
     recordLiteralLinks(tree, source);
-    expect(links.map((l) => (l as { mbrStyle?: unknown }).mbrStyle)).toEqual([{ literal: true }, undefined, undefined]);
+    expect(links.map((l) => (l as { mbrStyle?: unknown }).mbrStyle)).toEqual([{ literal: true, at: 4 }, { at: 16 }, { at: 32 }]);
   });
 });
 

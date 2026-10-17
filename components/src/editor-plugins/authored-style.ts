@@ -1506,13 +1506,38 @@ export const remarkAuthoredStyle = $remark('mbrAuthoredStyle', () => function au
 });
 
 /**
+ * Milkdown's paragraph drops a trailing hard break (the editor's Shift+Enter
+ * at the end of a line), but one inside a link is the link's text —
+ * `[a  ⏎](url)`, or a link that is only a break, which went with it.
+ */
+const paragraphKeepingLinkedBreak = paragraphSchema.extendSchema((prev) => (ctx) => {
+  const base: NodeSchema = prev(ctx);
+  return {
+    ...base,
+    toMarkdown: {
+      match: base.toMarkdown.match,
+      runner: (state, node: ProseNode) => {
+        const last = node.lastChild;
+        if (last?.type.name !== 'hardbreak' || !last.marks.some((mark) => mark.type.name === 'link')) {
+          base.toMarkdown.runner(state, node);
+          return;
+        }
+        state.openNode('paragraph');
+        state.next(node.content);
+        state.closeNode();
+      },
+    },
+  };
+});
+
+/**
  * Every schema this module carries a style on. `blockquote` is not here:
  * alerts extends it too, and two extensions of one node replace each other,
  * so `alerts.ts` applies {@link carryAuthoredStyle} to its own and prints
  * through {@link printBlockquote} (it owns the `blockquote` handler).
  */
 export const authoredStyleSchemas = [
-  carryAuthoredStyle(paragraphSchema),
+  carryAuthoredStyle(paragraphKeepingLinkedBreak),
   carryAuthoredStyle(bulletListSchema),
   carryAuthoredStyle(orderedListSchema),
   carryAuthoredStyle(hrSchema),
