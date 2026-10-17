@@ -110,7 +110,8 @@ export interface CodeStyle {
 
 /** What a code block compares by: its language and text (`meta` is kept apart, and Milkdown has no other field). */
 function codeKey(code: Code): string {
-  return JSON.stringify([code.lang || '', code.value]);
+  // An empty block's `value` is missing on the serialized side.
+  return JSON.stringify([code.lang || '', code.value ?? '']);
 }
 
 /**
@@ -749,6 +750,8 @@ export function blockSourceFrom(source: string, block: Positioned, lazyOk: boole
   const start = block.position?.start.offset;
   let end = block.position?.end.offset;
   if (start === undefined || end === undefined) return undefined;
+  // A fence left open runs to the end of the note, past its last line break.
+  if (end > start && source[end - 1] === '\n') end -= source[end - 2] === '\r' ? 2 : 1;
   const lead = source.slice(lineStartOf(source, start), start);
   if (!/^[ \t>]*$/.test(lead)) return undefined;
   end += /^[ \t]*(?=\r?\n|$)/.exec(source.slice(end))?.[0].length ?? 0;

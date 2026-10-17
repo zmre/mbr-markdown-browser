@@ -107,6 +107,10 @@ describe('code blocks', () => {
     expect(await afterTyping('``` js\nx\n```  \n\nT\n', 'x', 1, 'y')).toBe('```js\nxy\n```\n\nT\n');
   });
 
+  it('an empty or unclosed fence at the end is printed as typed too', async () => {
+    for (const source of ['``` js\n', 'T\n\n```  x\n\n```\n']) expect(serializeBody(await openCrepe(source))).toBe(source);
+  });
+
   it('a rule keeps the spaces after it', async () => {
     expect(await afterTyping('---  \n\nT\n', 'T', 1, '!')).toBe('---  \n\nT!\n');
   });
