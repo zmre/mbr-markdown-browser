@@ -94,6 +94,7 @@ import { markdownSpace } from 'micromark-util-character';
 import { minimizeBlockEscapes } from './minimal-escapes.js';
 import {
   absorbsIndentedParagraph,
+  mayIndentAfter,
   contentKey,
   keepAuthoredText,
   type DefinitionStyle,
@@ -635,7 +636,8 @@ const paragraphHandler: Handle = (node: Paragraph, parent, state: ToMarkdownStat
   // Only a top-level paragraph has an indentation of its own to keep (one in
   // a container is recorded relative to it, see `authoredLines`).
   const siblings = (parent?.children ?? []) as Nodes[];
-  const indentFirst = parent?.type === 'root' && !absorbsIndentedParagraph(siblings[siblings.indexOf(node) - 1]);
+  const firstIndent = /^[ \t]*/.exec(style?.lines?.[0] ?? '')?.[0] ?? '';
+  const indentFirst = parent?.type === 'root' && mayIndentAfter(siblings[siblings.indexOf(node) - 1], firstIndent);
   return keepAuthoredText(printed, style?.lines, indentFirst, state);
 };
 

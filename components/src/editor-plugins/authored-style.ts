@@ -89,6 +89,8 @@ export interface HeadingStyle {
   fit?: boolean;
   /** An ATX heading's closing sequence with the space before it (` ##`). */
   closing?: string;
+  /** A top-level ATX heading's own indentation (one to three spaces). */
+  indent?: string;
 }
 
 export interface CodeStyle {
@@ -297,9 +299,17 @@ export function listStyleFrom(source: string, list: Positioned): ListStyle | und
 }
 
 /** Setext underline or ATX closing sequence, and the source. */
-export function headingStyleFrom(source: string, heading: Positioned): HeadingStyle | undefined {
+export function headingStyleFrom(source: string, heading: Positioned, inContainer = false): HeadingStyle | undefined {
   const text = sliceOf(heading, source);
   if (text === undefined) return undefined;
+  if (/^#/.test(text) && !inContainer) {
+    // ` # x`: the heading's own indentation, outside any container.
+    const start = heading.position?.start.offset ?? 0;
+    const indent = source.slice(lineStartOf(source, start), start);
+    const style = headingStyleFrom(source, heading, true);
+    if (/^ {1,3}$/.test(indent) && style) return { ...style, indent };
+    return style;
+  }
   if (!/^#/.test(text)) {
     const lines = text.split('\n');
     const underline = /([=-]+)[ \t]*$/.exec(lines[lines.length - 1] ?? '')?.[1];
@@ -1359,6 +1369,23 @@ const printRule: Handle<ThematicBreak> = (node, parent, state) => {
 };
 
 const printHeading: Handle<Heading> = (node, parent, state, info) => {
+  const value = printHeadingAsTyped(node, parent, state, info);
+  const indent = styleOf<HeadingStyle>(node)?.indent;
+  if (!indent || parent?.type !== 'root' || !value.startsWith('#')) return value;
+  const siblings = parent.children as RootContent[];
+  return mayIndentAfter(siblings[siblings.indexOf(node) - 1], indent) ? indent + value : value;
+};
+
+/**
+ * Whether a top-level block may start indented by `indent` after `previous`:
+ * anywhere but after a list or definition list (whose last item would take
+ * it in), and there too by one space, which no item's content column is.
+ */
+export function mayIndentAfter(previous: { type: string } | undefined, indent: string): boolean {
+  return !absorbsIndentedParagraph(previous) || indent === ' ';
+}
+
+const printHeadingAsTyped: Handle<Heading> = (node, parent, state, info) => {
   const style = styleOf<HeadingStyle>(node);
   const value = printHeadingAs(style, node, parent, state, info);
   // Trailing whitespace on the heading's line, which nothing means.

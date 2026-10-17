@@ -163,6 +163,13 @@ describe('paragraph lines and top-level gaps', () => {
     expect(await afterTyping('  one\n  two\n', 'two', 3, '!')).toBe('one\ntwo!\n');
   });
 
+  it('keeps one space of indentation after a list, which no item takes in, and a heading\'s own', async () => {
+    expect(await afterTyping('- a\n\n x y\n', 'a', 1, '!')).toBe('- a!\n\n x y\n');
+    expect(await afterTyping(' # Title\n\n- a\n\n # Next\n', 'a', 1, '!')).toBe(' # Title\n\n- a!\n\n # Next\n');
+    // A heading keeps it when edited too: it is one line, and it says nothing.
+    expect(await afterTyping(' # Title\n\nT\n', 'Title', 5, '!')).toBe(' # Title!\n\nT\n');
+  });
+
   it('drops a first-line indentation that would join the list above', async () => {
     const crepe = await openCrepe('* a\n\n# H\n\n  para\n');
     const view = viewOf(crepe);
