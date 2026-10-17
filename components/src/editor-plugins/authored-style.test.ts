@@ -360,6 +360,14 @@ describe('found by roundtrip-check (the rt-* fixtures hold the untouched round t
     expect(await afterTyping(source, 'Text', 4, '!')).toBe('Text!.\n\n![a b](https://x.y/p?a=b&c=d)\n');
   });
 
+  it('a paragraph whose lines start with `[-]` keeps them, however many', async () => {
+    // Its first line's `[-] ` is not a task box (only a task item's paragraph has one), and
+    // past the escape limit only the meaning check can keep the lines as typed.
+    const lines = Array.from({ length: 40 }, (_, i) => `[-] item ${i}: done!`).join('\n');
+    expect(await afterTyping(`${lines}\n\nOther\n`, 'Other', 5, '!')).toBe(`${lines}\n\nOther!\n`);
+    expect(await afterTyping('- [-] a task\n  more\n- b\n', 'b', 1, '!')).toBe('- [-] a task\n  more\n- b!\n');
+  });
+
   it('a quote is printed as typed until it is edited', async () => {
     const source = ' > p\n > * a\n >\n> b\n> \n> c\nlazy\n';
     expect(serializeBody(await openCrepe(source))).toBe(source);

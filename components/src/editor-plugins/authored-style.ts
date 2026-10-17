@@ -375,8 +375,6 @@ export function paragraphStyleFrom(
   if (text.includes('\\')) style.source = text;
   const prefix = inContainer && linePrefix !== undefined ? linePrefix : prefixOf(paragraph, inContainer);
   const lines = authoredLines(source, paragraph, prefix, inContainer && lazyLines);
-  // A task item's box is in its paragraph's source but printed by the item.
-  if (lines && /^\[[ \txX>-]\][ \t]/.test(lines[0])) lines[0] = lines[0].replace(/^\[.\][ \t]+/, '');
   if (lines) style.lines = lines;
   return style.source === undefined && style.lines === undefined ? undefined : style;
 }
@@ -821,7 +819,7 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
   // `prefix`: the literal prefix of the lines `node` is printed under, when
   // known — `''` at the top level, a list item's for its paragraphs and lists.
   // `lazyLines`: every container so far prints lazy lines as typed (list items, quotes).
-  const visit = (node: MdNode, inContainer: boolean, prefix: string | undefined, lazyLines: boolean): void => {
+  const visit = (node: MdNode, inContainer: boolean, prefix: string | undefined, lazyLines: boolean, parent?: MdNode): void => {
     let childPrefix: string | undefined;
     if (node.type === 'listItem') {
       const { style, linePrefix } = listItemStyleFrom(source, node as Positioned, prefix);
@@ -833,7 +831,7 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
       const record = RECORDERS[node.type];
       if (record) {
         const style = record(source, node as Positioned, inContainer, prefix, lazyLines);
-        if (style) mergeStyle(node, style);
+        if (style) mergeStyle(node, withoutTaskBox(style, node, parent));
       }
       childPrefix = node.type === 'root' || node.type === 'list' ? prefix : undefined;
       if (node.type === 'blockquote') {
@@ -844,11 +842,23 @@ export function recordAuthoredStyles(tree: MdNode, source: string): void {
     if (node.type === 'list') recordItemGaps(node as MdNode & { spread?: boolean | null }, lines);
     const nested = inContainer || CONTAINERS.has(node.type);
     const lazy = lazyLines && (!CONTAINERS.has(node.type) || node.type === 'listItem' || node.type === 'blockquote');
-    for (const child of node.children ?? []) visit(child, nested, childPrefix, lazy);
+    for (const child of node.children ?? []) visit(child, nested, childPrefix, lazy, node);
   };
   const lines: SourceLines = { text: source, lines: source.split('\n') };
   visit(tree, false, '', true);
   recordGaps(tree);
+}
+
+/**
+ * A task item's box is in its first paragraph's source but printed by the
+ * item: `style` without it there — and only there, since a paragraph that
+ * merely starts with `[-] ` keeps it.
+ */
+function withoutTaskBox(style: object, node: MdNode, parent: MdNode | undefined): object {
+  const lines = (style as ParagraphStyle).lines;
+  const task = parent?.type === 'listItem' && typeof (parent as { checked?: unknown }).checked === 'boolean';
+  if (!lines || node.type !== 'paragraph' || !task || parent?.children?.[0] !== node) return style;
+  return { ...style, lines: [lines[0].replace(/^\[.\][ \t]+/, ''), ...lines.slice(1)] };
 }
 
 /** Adds `style` to what is recorded on `node` (a list's item gaps are recorded before its items). */
