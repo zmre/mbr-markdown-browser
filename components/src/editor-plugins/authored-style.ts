@@ -559,7 +559,8 @@ export function codeStyleFrom(source: string, code: Positioned & { meta?: string
     const lines = (sliceOf(code, source) ?? '').split('\n').map((line, i) => (i === 0 ? line : line.slice(column)));
     if (column === 0 && lines.every((line) => line.trim() === '' || line.startsWith('\t'))) style.tab = true;
   }
-  else if (fence !== '```') style.fence = fence;
+  // Every fence, ``` too: remark may print a longer one ({@link withAuthoredFence}).
+  else style.fence = fence;
   if (fence) {
     const lines = (sliceOf(code, source) ?? '').replace(/\r?\n$/, '').split('\n');
     const closing = new RegExp(`^[ \\t]*${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \\t]*\\r?$`);
@@ -1331,12 +1332,23 @@ const printCode: Handle<Code> = (node, parent, state, info) => {
   return fenced;
 };
 
-/** remark uses the shortest fence that works; the authored one, if longer. */
+/**
+ * The authored fence: when longer than remark's (the shortest that works),
+ * and when shorter, as long as no line of the code would close it — remark
+ * lengthens a fence for a line that only starts with backticks (```` ```x` ````),
+ * which cannot close one.
+ */
 function withAuthoredFence(value: string, fence: string | undefined, fenceChar: string): string {
   if (!fence || !value.startsWith(fenceChar)) return value;
   const open = /^[`~]+/.exec(value)?.[0] ?? '';
-  if (open.length >= fence.length) return value;
-  return fence + value.slice(open.length, value.length - open.length) + fence;
+  if (open.length === fence.length || !value.endsWith(open)) return value;
+  const inner = value.slice(open.length, value.length - open.length);
+  if (open.length > fence.length) {
+    const closes = new RegExp(`^ {0,3}\\${fenceChar}{${fence.length},}[ \\t]*$`, 'm');
+    // The info string line is the first; a closing fence is a later line.
+    if (closes.test(inner.slice(inner.indexOf('\n') + 1))) return value;
+  }
+  return fence + inner + fence;
 }
 
 const printBreak: Handle<Break> = (node, parent, state, info) => {

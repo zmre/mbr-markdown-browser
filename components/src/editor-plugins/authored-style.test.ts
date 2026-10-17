@@ -99,6 +99,13 @@ describe('code blocks', () => {
     expect(await afterTyping('~~~js title="a"\nx\n~~~\n', 'x', 1, 'y')).toBe('~~~js title="a"\nxy\n~~~\n');
     expect(await afterTyping('````\nx\n````\n', 'x', 1, 'y')).toBe('````\nxy\n````\n');
   });
+
+  it('a fence stays as short as typed while no line of the code could close it', async () => {
+    // remark lengthens the fence for any line starting with backticks.
+    expect(await afterTyping('```\n```x` y\n```\n', 'y', 1, 'z')).toBe('```\n```x` yz\n```\n');
+    // A line that would close it makes the printer's longer fence necessary.
+    expect(await afterTyping('```\n``x\n```\n', '``x', 3, '\n```')).toBe('````\n``x\n```\n````\n');
+  });
 });
 
 describe('breaks, rules, quotes', () => {
