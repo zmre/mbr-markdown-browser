@@ -7,9 +7,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { RoundTripChecker, type RoundTrip } from './checker.js';
-import { ANON_OUT_OF_TIME, ANON_REPRODUCES, ANON_SEE, ANON_TOO_LARGE, runRoundTripCheck } from './runner.js';
+import { ANON_OUT_OF_TIME, ANON_REPRODUCES, ANON_SEE, ANON_TOO_LARGE, cell, runRoundTripCheck } from './runner.js';
 
 /**
  * The real editor, plus a rewrite of its own that does not depend on what the
@@ -104,3 +104,12 @@ it('always minimizes a note any save rewrites, and marks it in the index', async
   expect(index).toMatch(/\| 0002 \| b\.md \|.*\| rewritten \|\n/);
   expect(index).toMatch(/\| 0001 \| a\.md \|.*\|  \|\n/);
 }, 60_000);
+
+describe('index table cells', () => {
+  it('escape backslashes before pipes, so a trailing backslash cannot unescape the pipe', () => {
+    expect(cell('a|b')).toBe('a\\|b');
+    expect(cell('a\\|b')).toBe('a\\\\\\|b');
+    expect(cell('x\\')).toBe('x\\\\');
+    expect(cell('one\r\ntwo')).toBe('one two');
+  });
+});

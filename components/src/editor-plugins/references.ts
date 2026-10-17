@@ -81,10 +81,10 @@ function renameReferences(tree: PositionedNode): void {
 }
 
 /** `[label]: url "title"` from a definition's fields, for one without source. */
-function definitionSource(node: Partial<Definition>): string {
+export function definitionSource(node: Partial<Definition>): string {
   const url = node.url ?? '';
   const destination = url === '' || /[\s<>]/.test(url) ? `<${url}>` : url;
-  const title = node.title ? ` "${node.title.replace(/"/g, '\\"')}"` : '';
+  const title = node.title ? ` "${node.title.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : '';
   return `[${node.label ?? node.identifier ?? ''}]: ${destination}${title}`;
 }
 

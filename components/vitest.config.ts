@@ -59,6 +59,9 @@ export default defineConfig({
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
     __MBR_APP_BRIDGE_SWIFT__: JSON.stringify(readRepoFile('../apple/ios/MBRMobile/Web/AppBridge.swift')),
     __MBR_EDITOR_FIXTURES__: JSON.stringify(readEditorFixtures()),
+    // Shared with mbr-core's `editor_math_parity`; under tests/fixtures/ so the
+    // Nix test sandbox (flake.nix's source filter) has it too.
+    __MBR_EDITOR_MATH_CASES__: JSON.stringify(readRepoFile('../tests/fixtures/editor-math-cases.json')),
   },
   test: {
     environment: 'happy-dom',

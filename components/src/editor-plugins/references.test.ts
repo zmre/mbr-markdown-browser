@@ -6,6 +6,7 @@ import { editorViewCtx } from '@milkdown/kit/core';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { afterEach, describe, expect, it } from 'vitest';
 import { serializeBody } from '../editor-crepe.js';
+import { definitionSource } from './references.js';
 import { destroyEditors, openCrepe, placeCursor, press, savedFile, typeText, viewOf } from '../editor-test-support.js';
 
 afterEach(destroyEditors);
@@ -109,5 +110,13 @@ describe('the caret at a reference link\'s edges', () => {
     placeCursor(view, 'docs', 0);
     typeText(view, 'X');
     expect(serializeBody(crepe)).toBe('See X[docs][d] now.\n\n[d]: /d\n');
+  });
+});
+
+describe('definitionSource', () => {
+  it('escapes backslashes in a title before its quotes', () => {
+    expect(definitionSource({ label: 'r', url: 'u', title: 'say "hi"' })).toBe('[r]: u "say \\"hi\\""');
+    expect(definitionSource({ label: 'r', url: 'u', title: 'a\\' })).toBe('[r]: u "a\\\\"');
+    expect(definitionSource({ label: 'r', url: 'u', title: 'a\\"b' })).toBe('[r]: u "a\\\\\\"b"');
   });
 });

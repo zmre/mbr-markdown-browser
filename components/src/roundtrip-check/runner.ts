@@ -217,9 +217,9 @@ export async function runRoundTripCheck(options: RunOptions): Promise<RunSummary
   return summary;
 }
 
-/** A markdown table cell: no pipes or line breaks. */
-function cell(text: string): string {
-  return text.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+/** A markdown table cell: backslashes and pipes escaped, no line breaks. */
+export function cell(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
 }
 
 /** Causes named per note in the index. */

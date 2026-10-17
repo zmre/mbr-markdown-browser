@@ -1,7 +1,7 @@
 /**
  * The editor's math plugin against the renderer's math semantics.
  *
- * `math-cases.json` is the shared table: mbr-core's `editor_math_parity` test
+ * `tests/fixtures/editor-math-cases.json` is the shared table: mbr-core's `editor_math_parity` test
  * holds pulldown-cmark (the renderer) to it, and this file holds the editor's
  * parse to it — so the two agree on what is math, case by case. Each case is
  * also saved untouched and must come back byte for byte, which is what the
@@ -22,14 +22,9 @@ interface MathCase {
   math: MathSpan[];
 }
 
-const CASES = JSON.parse(
-  Object.values(
-    import.meta.glob('./math-cases.json', { query: '?raw', import: 'default', eager: true }) as Record<
-      string,
-      string
-    >,
-  )[0],
-) as MathCase[];
+declare const __MBR_EDITOR_MATH_CASES__: string;
+
+const CASES = JSON.parse(__MBR_EDITOR_MATH_CASES__) as MathCase[];
 
 /**
  * Saves that differ for reasons that are not math (item 6 cosmetics: `-` →
@@ -69,7 +64,7 @@ async function editorMath(source: string): Promise<MathSpan[]> {
 
 afterEach(destroyEditors);
 
-describe('editor math matches the renderer (math-cases.json)', () => {
+describe('editor math matches the renderer (editor-math-cases.json)', () => {
   it('has the shared table', () => {
     expect(CASES.length).toBeGreaterThan(20);
   });
