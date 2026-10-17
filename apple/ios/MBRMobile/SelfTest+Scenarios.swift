@@ -97,7 +97,57 @@ extension SelfTest {
         return `location=${location.pathname}`;
         """) + " (expected \(home))")
         self.log("single.grant", "Grant Folder Access offered=\(session.isSingleFile) root=\(session.app.rootPath())")
+        // The file the session holds open (`rootPath` is its folder).
+        let file = session.access.url
+        let start = await PickerStart.resolve(file: file)
+        let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+        let sameFolder = start.url.resolvingSymlinksInPath().standardizedFileURL.path == folder.path
+        self.log(
+            "single.pickerStart",
+            "\(sameFolder ? "PASS" : "FAIL") \(start.url.path(percentEncoded: false)) "
+                + "label=\"\(start.label)\""
+        )
+        self.checkPickerLabels()
         self.log("done", "single")
+    }
+
+    /// `PickerStart.label` on the paths a device hands out.
+    private static func checkPickerLabels() {
+        let own = AppPaths.documents.appending(path: "Test", directoryHint: .isDirectory)
+        let cases: [PickerLabelCase] = [
+            PickerLabelCase(
+                path: "/private/var/mobile/Library/CloudStorage/0F9A1C2E-3B4D-4E5F-8A6B-7C8D9E0F1A2B/Dev/elovation/",
+                provider: "Dropbox",
+                expected: "Dropbox › Dev › elovation"
+            ),
+            PickerLabelCase(
+                path: "/private/var/mobile/Library/CloudStorage/0F9A1C2E-3B4D-4E5F-8A6B-7C8D9E0F1A2B/Dev/elovation/",
+                provider: nil,
+                expected: "Dev › elovation"
+            ),
+            PickerLabelCase(
+                path: "/Users/x/Library/CloudStorage/GoogleDrive-x@example.com/My Drive/notes/",
+                provider: nil,
+                expected: "GoogleDrive › My Drive › notes"
+            ),
+            PickerLabelCase(
+                path: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Notes/",
+                provider: nil,
+                expected: "iCloud Drive › Notes"
+            ),
+            PickerLabelCase(
+                path: "/private/var/mobile/Library/Mobile Documents/iCloud~md~obsidian/Documents/Vault/",
+                provider: "Obsidian",
+                expected: "iCloud Drive › Obsidian › Vault"
+            ),
+            PickerLabelCase(path: own.path(percentEncoded: false), provider: nil, expected: "On My iPhone › MBR › Test")
+        ]
+        for test in cases {
+            let folder = URL(filePath: test.path, directoryHint: .isDirectory)
+            let got = PickerStart.label(for: folder, provider: test.provider)
+            let verdict = got == test.expected ? "PASS" : "FAIL"
+            self.log("single.pickerLabel", "\(verdict) \"\(got)\" (expected \"\(test.expected)\")")
+        }
     }
 
     // MARK: config
@@ -349,4 +399,12 @@ extension SelfTest {
         self.log("mbr-reload.bar", "title=\(session.web.info.title)")
         self.log("done", "mbr-reload")
     }
+}
+
+/// One `PickerStart.label` check: a folder, the provider's name if known,
+/// and the label expected.
+private struct PickerLabelCase {
+    let path: String
+    let provider: String?
+    let expected: String
 }
