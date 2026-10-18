@@ -2,6 +2,10 @@
 
 ## What's Next
 
+* [pico.css](https://picocss.com/docs/maintenance) is no longer maintained
+  * Super sad. The argument is that AI can do it now.  But they're going to leave up the CDN and there are community forks.
+  * I like how minimal it is, how nice the defaults look, the themes, forms, and extensibility.
+  * As of 2026-10-15, I think we keep using it.  I've never run into a bug of any note, but if we do, we can just edit the files directly now.
 * **Quicklook**
   * Lets setup the thumbnail generation, too
 * **GUI**

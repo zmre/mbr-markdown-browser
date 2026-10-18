@@ -45,13 +45,26 @@ impl<'a> MakeWriter<'a> for SharedBuffer {
 /// (`tracing::subscriber::with_default`), so tests running in parallel do not
 /// capture each other's output. `body` must therefore do its logging on this
 /// thread: synchronous code, or an async block driven to completion here.
+///
+/// # The interest cache
+///
+/// `tracing` caches, per callsite and process-wide, whether any subscriber is
+/// interested in it. A test running in parallel on a thread with no subscriber
+/// can register a callsite while this one is being installed and leave it
+/// cached as "never", after which this thread's subscriber silently misses it
+/// (seen in CI: a capped-warnings test captured its summary line but none of
+/// the 20 individual lines from the other callsite). Rebuilding the cache once
+/// the subscriber is in place makes every already-registered callsite ask again.
 pub(crate) fn capture_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
     let buffer = SharedBuffer(Arc::new(Mutex::new(Vec::new())));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(buffer.clone())
         .with_ansi(false)
         .finish();
-    let value = tracing::subscriber::with_default(subscriber, body);
+    let value = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        body()
+    });
     let logs =
         String::from_utf8_lossy(&buffer.0.lock().expect("log buffer mutex poisoned")).into_owned();
     (value, logs)

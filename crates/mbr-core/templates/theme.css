@@ -255,6 +255,27 @@ body > footer {
     top: 0;
   }
 
+  /* An inline gutter for the three `.container` children of the grid.
+   *
+   * Pico's `.container` has no padding at or above 576px: it relies on its
+   * `max-width` being narrower than the viewport, so `margin-inline: auto`
+   * leaves slack on either side. In this grid the column is narrower than
+   * that max-width (1000px at a 1280px viewport, against Pico's 1200px), so the
+   * container fills the column exactly and there is no slack at all. Two things
+   * depend on there being some:
+   *   - Pico's `nav ul:first-child` / `nav ul:last-child` pull outward by
+   *     `--pico-nav-element-spacing-horizontal` (a negative margin), so the
+   *     header's last `<ul>` ran 10px past the viewport on every page;
+   *   - the marginalia indicator (`blockquote blockquote blockquote`) sits at
+   *     `left: 100%`, i.e. in the right-hand gutter.
+   * `--pico-spacing` is the gutter Pico itself gives `.container` on narrow
+   * screens, so this is also what the content looks like there. */
+  body.mbr-has-sidebar > header,
+  body.mbr-has-sidebar > main,
+  body.mbr-has-sidebar > footer {
+    padding-inline: var(--pico-spacing);
+  }
+
   body.mbr-has-sidebar > main {
     grid-area: main;
   }
@@ -816,7 +837,12 @@ blockquote blockquote blockquote::before {
   font-weight: 700;
   font-size: 1.5em;
   cursor: pointer;
-  padding: 0 4px;
+  /* 3px, not more: the indicator hangs in the right-hand gutter (`left: 100%`
+   * above), and the narrowest gutter it gets there is `--pico-spacing` (16px),
+   * in the sidebar layout. At 4px a side the box was 17-18px wide and scrolled
+   * the page sideways by the difference. (On a phone it moves inside the
+   * quote instead; see "Narrow Screens: Overflow".) */
+  padding: 0 3px;
   border-radius: var(--pico-border-radius);
 }
 
@@ -880,10 +906,46 @@ blockquote blockquote blockquote p::after {
  *
  * `screen and` for the same WebKit reason as the sidebar block above, and here
  * it changes printed output: the print block resets these paragraphs' position,
- * transform and max-width but NOT their `width`, so on a Safari window ≥2000px
- * an unqualified query left `width: calc(100vw - 40px)` -- a *window*-relative
- * width in WebKit -- applied to every margin note on paper. */
-@media screen and (min-width: 2000px) {
+ * transform and max-width but NOT their `width`, so on a wide Safari window an
+ * unqualified query left `width: calc(100vw - 40px)` -- a *window*-relative
+ * width in WebKit -- applied to every margin note on paper.
+ *
+ * The thresholds are where a 250px note first fits in the right-hand gutter
+ * without scrolling the page sideways. Above 1536px Pico caps `.container`
+ * at 1450px, so the gutter is half of whatever is left: without the docked
+ * sidebar that clears the note from about 2040px, and with it -- the grid
+ * column is `--mbr-sidebar-width` narrower -- only from about 2280px. (Both
+ * used to share 2000px, which overflowed by 18px and 158px respectively.)
+ * Below its threshold a note keeps the hover/click popover. The two blocks are
+ * the same rules; only their scope differs, and `:where()` keeps that scope
+ * from adding specificity, which would let these beat the later `p + p` reset. */
+@media screen and (min-width: 2080px) {
+  :where(body:not(.mbr-has-sidebar)) blockquote blockquote blockquote::before {
+    content: "";
+  }
+
+  :where(body:not(.mbr-has-sidebar)) blockquote blockquote blockquote p {
+    left: calc(100% + 5px);
+    width: calc(100vw - 40px);
+    transform: translateY(-50%);
+    max-width: 250px;
+    display: block;
+    border: none;
+    box-shadow: none;
+    background: none;
+    border-radius: 0;
+  }
+
+  :where(body:not(.mbr-has-sidebar)) blockquote blockquote blockquote p::before,
+  :where(body:not(.mbr-has-sidebar)) blockquote blockquote blockquote p::after {
+    left: auto;
+    right: 20px;
+    border: none;
+    transform: none;
+  }
+}
+
+@media screen and (min-width: 2320px) {
   blockquote blockquote blockquote::before {
     content: "";
   }

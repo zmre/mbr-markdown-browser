@@ -190,6 +190,32 @@ Benchmarks are automatically captured during the release process (`scripts/bump-
 
 Skip benchmarks during a release with `SKIP_BENCHMARKS=1 ./scripts/bump-version.sh 0.5.0`.
 
+## Checking for Horizontal Overflow
+
+A page that scrolls sideways is easy to cause and hard to notice on a wide
+monitor. `components/scripts/check-overflow.sh` opens every page listed in
+`/.mbr/site.json` in headless Chromium and reports each one whose
+`scrollWidth` exceeds its `clientWidth`, naming the elements where the overflow
+starts. It needs [`agent-browser`](https://github.com/vercel-labs/agent-browser),
+`curl` and `jq` on `PATH`, and a running server:
+
+```bash
+cargo run -- -s -p 5220 docs/ &
+components/scripts/check-overflow.sh http://127.0.0.1:5220
+# Narrow the sweep: widths, then color schemes
+components/scripts/check-overflow.sh http://127.0.0.1:5220 "390 768" light
+```
+
+By default it checks widths 2400, 1280, 1024, 768 and 390 in light and dark
+(2400 is wide enough for margin notes to sit in the gutter, with or without the
+docked sidebar), and at widths where the docked sidebar is shown it checks each
+page a second time without it. The exit status is the number of overflowing
+combinations (capped at 125). It drives Chromium only; Safari and the GUI's
+WebKit can differ, so check a layout change there by hand. It is not part of
+CI, since it needs a browser; run it after layout or `theme.css` changes. The
+rules it guards are also pinned by `components/src/overflow.test.ts`, which
+does run in CI.
+
 ## Build Commands
 
 ```bash
