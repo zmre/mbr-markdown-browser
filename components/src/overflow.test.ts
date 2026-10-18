@@ -15,9 +15,10 @@ interface Rule {
 /**
  * A just-enough CSS reader for theme.css: comments removed, then every style
  * rule with the `@media`/`@supports` blocks around it. happy-dom does no
- * layout, so the narrow-screen overflow fixes are pinned as the rules that
- * carry them; a substring check alone could match a comment that merely
- * mentions a rule.
+ * layout, so the overflow fixes are pinned as the rules that carry them; a
+ * substring check alone could match a comment that merely mentions a rule.
+ * The overflow itself is measured in a browser by
+ * `components/scripts/check-overflow.sh` (docs/reference/development.md).
  */
 function parseRules(css: string): Rule[] {
   const source = css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -83,7 +84,7 @@ function declaration(rule: Rule, property: string): string | undefined {
 
 const NARROW = 'screen and (max-width: 600px)'
 
-describe('theme.css narrow-screen overflow', () => {
+describe('theme.css: nothing widens the page', () => {
   it('parses the stylesheet into rules (guards the reader itself)', () => {
     expect(rules.length).toBeGreaterThan(200)
     expect(rulesFor('.mbr-table-scroll').length).toBeGreaterThan(0)
@@ -110,6 +111,49 @@ describe('theme.css narrow-screen overflow', () => {
     // and the page scrolled sideways instead of the table's wrapper.
     const grid = rulesFor('body.mbr-has-sidebar').find((r) => declaration(r, 'grid-template-columns'))
     expect(grid && declaration(grid, 'grid-template-columns')).toBe('var(--mbr-sidebar-width) minmax(0, 1fr)')
+  })
+
+  it("gives the docked sidebar layout an inline gutter for Pico's negative nav margins", () => {
+    // Without it the grid's containers fill their column exactly, and the
+    // header's last `<ul>` (Pico's `nav ul:last-child` margin) and the
+    // marginalia dagger (`left: 100%`) hang past the viewport at 1280px.
+    for (const child of ['header', 'main', 'footer']) {
+      const selector = `body.mbr-has-sidebar > ${child}`
+      const gutter = rulesFor(selector).find((r) => declaration(r, 'padding-inline'))
+      expect(gutter && declaration(gutter, 'padding-inline'), selector).toBe('var(--pico-spacing)')
+      expect(gutter?.conditions, selector).toEqual(['@media screen and (min-width: 1024px)'])
+    }
+  })
+
+  it('keeps the marginalia dagger narrower than the 16px sidebar gutter', () => {
+    const dagger = rulesFor('blockquote blockquote blockquote::before').find(
+      (r) => r.conditions.length === 0 && declaration(r, 'padding')
+    )
+    const padding = /^0\s+(\d+)px$/.exec(dagger ? (declaration(dagger, 'padding') ?? '') : '')
+    expect(padding).not.toBeNull()
+    expect(Number(padding?.[1])).toBeLessThanOrEqual(3)
+  })
+
+  it('moves margin notes into the gutter only once a 250px note fits there', () => {
+    // 2000px overflowed by 18px without the sidebar and 158px with it.
+    expect(rules.some((r) => r.conditions.some((c) => c.includes('min-width: 2000px')))).toBe(false)
+    const NO_SIDEBAR = ':where(body:not(.mbr-has-sidebar)) blockquote blockquote blockquote p'
+    const narrow = rulesFor(NO_SIDEBAR)
+    expect(narrow).toHaveLength(1)
+    expect(narrow[0].conditions).toEqual(['@media screen and (min-width: 2080px)'])
+    expect(declaration(narrow[0], 'max-width')).toBe('250px')
+    const wide = rulesFor('blockquote blockquote blockquote p').find((r) =>
+      r.conditions.includes('@media screen and (min-width: 2320px)')
+    )
+    expect(wide && declaration(wide, 'max-width')).toBe('250px')
+    // `screen and` on both: a window-relative `width: calc(100vw - 40px)`
+    // must never reach a printed page (WebKit evaluates width queries against
+    // the window while printing).
+    for (const rule of rules) {
+      for (const c of rule.conditions) {
+        if (/min-width: 2(080|320)px/.test(c)) expect(c).toMatch(/^@media screen and /)
+      }
+    }
   })
 
   it('lets a printed table run to full width', () => {
