@@ -40,6 +40,9 @@ declare global {
 /** Debounce before a keystroke in the filter field becomes a request. */
 const FILTER_DEBOUNCE_MS = 150
 
+/** Appended to a conflict notice: the panel has re-queried the changed note. */
+export const PANEL_REFRESHED = 'The list has been refreshed — try again.'
+
 /** Cap on returned tasks; mirrors `task_query::DEFAULT_TASK_LIMIT`. */
 const TASK_LIMIT = 500
 
@@ -682,7 +685,12 @@ export class MbrTasksPanelElement extends LitElement {
         await this._runQuery({ keepFocus: true })
         return
       }
-      this._notice = outcome.message
+      // In the panel "reload" is a fresh query: its lines and statuses come
+      // from the server, and the toggle has already dropped the stale source,
+      // so the next click works on the note as it is now. Reloading the page
+      // would close the overlay and lose the reader's filters.
+      this._notice =
+        outcome.kind === 'conflict' ? `${outcome.message} ${PANEL_REFRESHED}` : outcome.message
       if (outcome.kind === 'conflict') {
         await this._runQuery({ keepFocus: true })
       }

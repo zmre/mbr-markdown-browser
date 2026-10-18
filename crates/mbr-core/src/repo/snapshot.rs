@@ -83,6 +83,12 @@ pub struct RepoDiff {
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
     pub evicted: Vec<PathBuf>,
+    /// Folders the listing could not enter because a file provider has not
+    /// fetched their contents yet (iCloud Drive on iOS), by canonical key.
+    /// Their download was requested; their files are not in `deleted` — they
+    /// were never listed — and turn up as `created` in the first diff that
+    /// lists them. Not a change: [`RepoDiff::is_empty`] ignores it.
+    pub not_downloaded_folders: Vec<PathBuf>,
     /// The stamps the listing produced for every created, modified and
     /// evicted file; [`Repo::record_diff`] stores them.
     stamps: Vec<(PathBuf, FileStamp)>,
@@ -366,6 +372,11 @@ impl Repo {
     /// ignore rules and compares every file with its recorded stamp. Reads no
     /// file contents. Blocking.
     ///
+    /// A folder whose listing is not downloaded (see
+    /// [`RepoDiff::not_downloaded_folders`]) is requested from the vault on
+    /// every diff until it lists; the files the index already has under it
+    /// are kept, not deleted.
+    ///
     /// Without change tracking every listed file is "created" — the diff of a
     /// repository that recorded nothing.
     pub fn diff_vault(&self) -> RepoDiff {
@@ -376,7 +387,21 @@ impl Repo {
         for (vault, overlay) in std::iter::once((&self.vault, false))
             .chain(self.static_vault.as_ref().map(|v| (v, true)))
         {
-            for entry in self.listed_files(vault.as_ref()) {
+            let walk = self.listed_files(vault.as_ref());
+            tracing::info!(
+                "Refresh listed {} folders, {} files under {}",
+                walk.dirs_listed,
+                walk.files.len(),
+                vault.root().display()
+            );
+            if !walk.not_downloaded_dirs.is_empty() {
+                // Asked for again on every diff until they are listed: a
+                // provider may drop a request, and asking is idempotent.
+                vault.request_download(&walk.not_downloaded_dirs);
+                diff.not_downloaded_folders
+                    .extend(walk.not_downloaded_dirs.iter().map(|d| vault.key(d)));
+            }
+            for entry in walk.files {
                 let key = vault.key(&entry.path);
                 // Markdown in an external overlay has no URL; the scan skips it.
                 if overlay
@@ -409,22 +434,41 @@ impl Repo {
                 seen.insert(key);
             }
         }
+        // A file under a folder that could not be listed was not seen, but it
+        // is not gone either: the provider took the folder's listing back
+        // (or never had it). Keep what the index knows until it lists again.
+        let unlisted = &diff.not_downloaded_folders;
         diff.deleted = stamps
             .iter()
             .map(|(key, _)| key)
             .filter(|key| !seen.contains(*key))
+            .filter(|key| !unlisted.iter().any(|dir| key.starts_with(dir)))
             .cloned()
             .collect();
         diff.created.sort_unstable();
         diff.modified.sort_unstable();
         diff.deleted.sort_unstable();
         diff.evicted.sort_unstable();
+        diff.not_downloaded_folders.sort_unstable();
+        if !diff.not_downloaded_folders.is_empty() {
+            tracing::info!(
+                "{} folder(s) not downloaded yet; requested them",
+                diff.not_downloaded_folders.len()
+            );
+        }
         diff
     }
 
     /// Stores the stamps of a diff once its events have been applied, so the
     /// same changes are not reported again. A no-op without change tracking.
     pub fn record_diff(&self, diff: &RepoDiff) {
+        {
+            let folders = self.not_downloaded_folders.pin();
+            folders.clear();
+            for key in &diff.not_downloaded_folders {
+                folders.insert(key.clone());
+            }
+        }
         let Some(stamps) = &self.stamps else {
             return;
         };
@@ -440,7 +484,7 @@ impl Repo {
     /// Every file of `vault` the scan would index, by the scan's own rules:
     /// hidden entries, `ignore_dirs` and `ignore_globs` are skipped, judged on
     /// the same keys the scan builds.
-    fn listed_files(&self, vault: &dyn Vault) -> Vec<Entry> {
+    fn listed_files(&self, vault: &dyn Vault) -> crate::vault::VaultWalk {
         let ignored = |entry: &Entry| {
             should_ignore_compiled(
                 &vault.key(&entry.path),
@@ -450,10 +494,17 @@ impl Repo {
                 &self.exempt_hidden_dirs,
             )
         };
-        crate::vault::walk_files(vault, |dir| !ignored(dir))
-            .into_iter()
-            .filter(|entry| !ignored(entry))
-            .collect()
+        let mut walk =
+            crate::vault::walk_vault_under(vault, &VaultPath::root(), |dir| !ignored(dir));
+        walk.files.retain(|entry| !ignored(entry));
+        walk
+    }
+
+    /// How many folders could not be listed because their contents are not
+    /// downloaded yet, as of the last scan or [`Repo::record_diff`]. Their
+    /// download has been requested; a later [`Repo::diff_vault`] lists them.
+    pub fn not_downloaded_folder_count(&self) -> usize {
+        self.not_downloaded_folders.len()
     }
 }
 
@@ -517,6 +568,99 @@ mod tests {
         let diff = repo.diff_vault();
         assert_eq!(diff, RepoDiff::default(), "{diff:?}");
         assert!(diff.is_empty());
+    }
+
+    /// The iOS iCloud Drive report: a folder copied into iCloud lists its
+    /// subfolders, but each one's own listing is not on the device, so the
+    /// scan found no notes in any of them — and a refresh never asked for
+    /// them, so they never appeared.
+    fn icloud_vault() -> Arc<MemVault> {
+        let vault = Arc::new(
+            MemVault::new()
+                .with_file("top.md", "# Top\n")
+                .with_file("trips/rome.md", "# Rome\n")
+                .with_file("trips/2024/oslo.md", "# Oslo\n")
+                .with_file("recipes/soup.md", "# Soup\n"),
+        );
+        vault.set_dir_availability("trips", Availability::NotDownloaded);
+        vault.set_dir_availability("recipes", Availability::NotDownloaded);
+        vault
+    }
+
+    fn markdown_keys(repo: &Repo, root: &Path) -> Vec<String> {
+        let mut keys: Vec<String> = repo
+            .markdown_files
+            .pin()
+            .keys()
+            .map(|k| crate::url_path::path_to_url(k.strip_prefix(root).unwrap()))
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn scan_requests_folders_whose_listing_is_not_downloaded() {
+        let vault = icloud_vault();
+        let repo = scanned(Arc::clone(&vault));
+        let root = vault.root().to_path_buf();
+        assert_eq!(markdown_keys(&repo, &root), ["top.md"]);
+        assert_eq!(repo.not_downloaded_folder_count(), 2);
+        let mut requested: Vec<String> = vault
+            .download_requests()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        requested.sort();
+        assert_eq!(requested, ["recipes", "trips"]);
+    }
+
+    #[test]
+    fn refresh_indexes_a_folder_once_its_listing_arrives() {
+        let vault = icloud_vault();
+        let repo = scanned(Arc::clone(&vault));
+        let root = vault.root().to_path_buf();
+
+        // Still not listed: nothing changed, but the folders are reported and
+        // requested again.
+        let diff = repo.diff_vault();
+        assert!(diff.is_empty(), "{diff:?}");
+        assert_eq!(
+            keys(&diff.not_downloaded_folders, &root),
+            ["recipes", "trips"]
+        );
+        repo.record_diff(&diff);
+        assert_eq!(repo.not_downloaded_folder_count(), 2);
+
+        // The provider lists `trips` (one level only: `trips/2024` was never
+        // marked, so it lists too) and the next refresh picks it up.
+        vault.set_dir_availability("trips", Availability::Local);
+        let diff = repo.diff_vault();
+        assert_eq!(
+            keys(&diff.created, &root),
+            ["trips/2024/oslo.md", "trips/rome.md"]
+        );
+        assert_eq!(keys(&diff.not_downloaded_folders, &root), ["recipes"]);
+        for event in diff.events(&root) {
+            repo.invalidate_file(Path::new(&event.path), &event.event);
+        }
+        repo.record_diff(&diff);
+        assert_eq!(repo.not_downloaded_folder_count(), 1);
+        assert_eq!(
+            markdown_keys(&repo, &root),
+            ["top.md", "trips/2024/oslo.md", "trips/rome.md"]
+        );
+    }
+
+    #[test]
+    fn a_folder_whose_listing_goes_away_keeps_its_files() {
+        let vault = vault();
+        let repo = scanned(Arc::clone(&vault));
+        let root = vault.root().to_path_buf();
+        vault.set_dir_availability("docs", Availability::NotDownloaded);
+        let diff = repo.diff_vault();
+        assert!(diff.deleted.is_empty(), "{diff:?}");
+        assert!(diff.is_empty());
+        assert_eq!(keys(&diff.not_downloaded_folders, &root), ["docs"]);
     }
 
     #[test]

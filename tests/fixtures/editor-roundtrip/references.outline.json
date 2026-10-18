@@ -1,0 +1,7 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"paragraph","lines":[3,4]},
+  {"depth":0,"kind":"blockquote","lines":[6,8]},
+  {"depth":1,"kind":"paragraph","lines":[6,6]},
+  {"depth":0,"kind":"paragraph","lines":[18,18]}
+]

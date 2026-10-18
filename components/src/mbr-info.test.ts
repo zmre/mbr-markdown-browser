@@ -159,6 +159,13 @@ describe('MbrInfoElement metadata on contact pages', () => {
     expect(text).not.toContain('VP')
   })
 
+  it("never shows the page's internal fields, such as the source fingerprint", async () => {
+    const text = await metadataText({ title: 'Note', markdown_source: 'note.md', markdown_source_hash: 'abc123def' })
+    expect(text).toContain('Note')
+    expect(text).not.toContain('note.md')
+    expect(text).not.toContain('abc123def')
+  })
+
   it('shows everything on other note types', async () => {
     const text = await metadataText({ type: 'event', ...fields })
     expect(text).toContain('jane@abc.example')

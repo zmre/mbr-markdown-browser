@@ -233,3 +233,51 @@ async fn a_real_render_failure_still_logs_an_error() {
         "the backlink index still warns about a file it cannot read"
     );
 }
+
+/// The edit endpoints' read of a not-downloaded note (a task toggle after an
+/// edit on another device) answers 503 and, like a page, logs it at DEBUG.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_read_of_a_not_downloaded_note_logs_nothing_above_debug() {
+    let vault = Arc::new(
+        MemVault::new()
+            .with_file("index.md", "# Home\n")
+            .with_file("tamarind-pending.md", "- [ ] one\n"),
+    );
+    logs();
+    let mut config = ServerConfig::from(&Config::default());
+    config.base_dir = vault.root().to_path_buf();
+    config.oembed_timeout_ms = 0;
+    config.edit_enabled = true;
+    config.embedded = Some(EmbeddedStorage {
+        vault: Arc::clone(&vault) as Arc<dyn Vault>,
+        snapshot: None,
+    });
+    let server = Server::init(config).expect("init");
+    server.repo().wait_for_media().await;
+    vault.set_availability("tamarind-pending.md", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+
+    let mut request = Request::get("/.mbr/raw/tamarind-pending.md")
+        .header(header::HOST, "localhost")
+        .header("X-MBR-Edit", "1")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    let response = server.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let lines = lines_about("tamarind-pending");
+    assert!(
+        at_level(&lines, "DEBUG")
+            .iter()
+            .any(|line| line.contains("not downloaded after")),
+        "{lines:#?}"
+    );
+    assert_eq!(at_level(&lines, "ERROR"), Vec::<String>::new());
+    assert_eq!(at_level(&lines, "WARN"), Vec::<String>::new());
+}

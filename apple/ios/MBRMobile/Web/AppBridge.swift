@@ -129,18 +129,45 @@ enum AppBridge {
     /// Runs at document start in the main frame: `app-bridge.ts`'s
     /// `isEmbedded()` reads the global, and theme.css hides mbr's own header
     /// and breadcrumbs under the class.
-    static let embeddedScript = """
-    window.__MBR_EMBEDDED__ = true;
-    document.documentElement.classList.add('mbr-embedded');
-    """
+    /// `offline` adds `mbr-offline`, which only the Downloading page reads
+    /// (see `NetworkStatus`).
+    static func embeddedScript(offline: Bool) -> String {
+        """
+        window.__MBR_EMBEDDED__ = true;
+        document.documentElement.classList.add('mbr-embedded');
+        document.documentElement.classList.toggle('mbr-offline', \(offline));
+        """
+    }
 
     @MainActor
-    static func install(in configuration: inout WebPage.Configuration, info: PageInfo) {
+    static func install(in configuration: inout WebPage.Configuration, info: PageInfo, offline: Bool) {
         let controller = configuration.userContentController
-        controller.addUserScript(WKUserScript(
-            source: self.embeddedScript, injectionTime: .atDocumentStart, forMainFrameOnly: true
-        ))
+        self.addDocumentStartScript(to: controller, offline: offline)
         controller.add(MessageReceiver(info: info), name: self.messageHandler)
+    }
+
+    /// Network state changed: later documents start with the new class (the
+    /// script is replaced; message handlers are untouched), and the page on
+    /// screen switches now.
+    @MainActor
+    static func setOffline(_ offline: Bool, controller: WKUserContentController, page: WebPage) async {
+        controller.removeAllUserScripts()
+        self.addDocumentStartScript(to: controller, offline: offline)
+        do {
+            _ = try await page.callJavaScript(
+                "document.documentElement.classList.toggle('mbr-offline', offline)",
+                arguments: ["offline": offline]
+            )
+        } catch {
+            Log.info("bridge: offline=\(offline) not applied to the page: \(error)")
+        }
+    }
+
+    @MainActor
+    private static func addDocumentStartScript(to controller: WKUserContentController, offline: Bool) {
+        controller.addUserScript(WKUserScript(
+            source: self.embeddedScript(offline: offline), injectionTime: .atDocumentStart, forMainFrameOnly: true
+        ))
     }
 
     /// Asks the page to open `action` through `window.mbrApp.open`, the same

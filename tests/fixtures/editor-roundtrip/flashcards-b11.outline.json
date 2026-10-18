@@ -1,0 +1,23 @@
+[
+  {"depth":0,"kind":"paragraph","lines":[5,5]},
+  {"depth":0,"kind":"dl","lines":[7,18],"tight":true},
+  {"depth":1,"kind":"dt","lines":[7,10]},
+  {"depth":1,"kind":"dd","lines":[11,11]},
+  {"depth":2,"kind":"paragraph","lines":[11,11]},
+  {"depth":1,"kind":"dd","lines":[12,12]},
+  {"depth":2,"kind":"paragraph","lines":[12,12]},
+  {"depth":1,"kind":"dd","lines":[13,13]},
+  {"depth":2,"kind":"paragraph","lines":[13,13]},
+  {"depth":1,"kind":"dd","lines":[14,16]},
+  {"depth":2,"kind":"paragraph","lines":[14,14]},
+  {"depth":2,"kind":"list","lines":[15,16],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[15,15]},
+  {"depth":4,"kind":"paragraph","lines":[15,15]},
+  {"depth":3,"kind":"item","lines":[16,16]},
+  {"depth":4,"kind":"paragraph","lines":[16,16]},
+  {"depth":1,"kind":"dd","lines":[17,18]},
+  {"depth":2,"kind":"paragraph","lines":[17,17]},
+  {"depth":2,"kind":"list","lines":[18,18],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[18,18]},
+  {"depth":4,"kind":"paragraph","lines":[18,18]}
+]

@@ -9098,6 +9098,119 @@ async fn test_task_toggle_stale_expected_returns_409() {
     );
 }
 
+/// The `markdown_source_hash` a rendered page carries in `window.frontmatter`.
+fn page_source_hash(html: &str) -> String {
+    let key = "\"markdown_source_hash\":\"";
+    let at = html
+        .find(key)
+        .unwrap_or_else(|| panic!("no markdown_source_hash on the page: {html}"));
+    let rest = &html[at + key.len()..];
+    rest[..rest.find('"').expect("closing quote")].to_string()
+}
+
+#[tokio::test]
+async fn test_page_carries_the_fingerprint_of_the_source_it_rendered() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/notes/").await;
+    assert_eq!(
+        page_source_hash(&html),
+        mbr::edit_auth::content_hash(TOGGLE_SOURCE.as_bytes()),
+        "the page's fingerprint is the one `/.mbr/raw` and the write endpoints use"
+    );
+}
+
+/// The data-loss scenario `base_hash` exists for: the page is rendered, the
+/// note gains lines above its tasks elsewhere, and a click aims at the line
+/// number the page knows. The line there now reads exactly like the one
+/// clicked — `expected` matches — but it is a different task.
+#[tokio::test]
+async fn test_task_toggle_from_a_page_rendered_before_an_external_edit_returns_409() {
+    let repo = TestRepo::new();
+    let original = "# Calls\n\n- [ ] call back\n- [ ] call back\n";
+    let file = repo.create_markdown("calls.md", original);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/calls/").await;
+    let rendered = page_source_hash(&html);
+    assert!(html.contains("id=\"mbr-task-3\""), "{html}");
+
+    // Elsewhere: a task inserted above. Line 3 still reads `- [ ] call back`.
+    let edited = "# Calls\n\n- [ ] call back\n- [ ] call back\n- [ ] call back\n";
+    std::fs::write(&file, edited).expect("rewrite");
+
+    let body = serde_json::json!({
+        "path": "calls.md", "line": 3, "expected": "- [ ] call back", "to": "done",
+        "base_hash": rendered,
+    });
+    let resp = edit_post(&server, "/.mbr/task", body).await;
+    assert_eq!(resp.status(), 409, "a stale page must not toggle anything");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        edited,
+        "a rejected toggle must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn test_task_toggle_base_hash_chains_and_absent_keeps_line_check() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", TOGGLE_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+        config.tasks_stamp_done = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    // A matching hash writes, and the response names the new version.
+    let mut body = toggle_body("done");
+    body["base_hash"] = serde_json::json!(mbr::edit_auth::content_hash(TOGGLE_SOURCE.as_bytes()));
+    let resp = edit_post(&server, "/.mbr/task", body).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        json["hash"],
+        serde_json::json!(mbr::edit_auth::content_hash(written.as_bytes()))
+    );
+
+    // The old version is now stale, even though line 4 is untouched.
+    let stale = serde_json::json!({
+        "path": "notes.md", "line": 4, "expected": "- [ ] second", "to": "done",
+        "base_hash": mbr::edit_auth::content_hash(TOGGLE_SOURCE.as_bytes()),
+    });
+    assert_eq!(edit_post(&server, "/.mbr/task", stale).await.status(), 409);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+
+    // The returned one chains.
+    let chained = serde_json::json!({
+        "path": "notes.md", "line": 4, "expected": "- [ ] second", "to": "done",
+        "base_hash": json["hash"],
+    });
+    assert_eq!(
+        edit_post(&server, "/.mbr/task", chained).await.status(),
+        200
+    );
+
+    // No hash at all: only the line is checked, as before.
+    let unhashed = serde_json::json!({
+        "path": "notes.md", "line": 4, "expected": "- [x] second", "to": "open",
+    });
+    assert_eq!(
+        edit_post(&server, "/.mbr/task", unhashed).await.status(),
+        200
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# Notes\n\n- [x] write the report !!\n- [ ] second\n"
+    );
+}
+
 #[tokio::test]
 async fn test_task_toggle_rejects_a_line_that_is_not_a_task() {
     let repo = TestRepo::new();
@@ -9818,6 +9931,52 @@ async fn test_flashcard_review_stale_or_wrong_line_returns_409() {
         assert_eq!(resp.status(), 409, "{body}");
     }
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+#[tokio::test]
+async fn test_flashcard_review_base_hash_match_mismatch_and_absent() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let rendered = page_source_hash(&server.get_text("/deck/").await);
+    assert_eq!(
+        rendered,
+        mbr::edit_auth::content_hash(DECK_SOURCE.as_bytes())
+    );
+
+    // Matching: written, and the response carries the new version.
+    let mut body = review_body(5, "Capital of France?", "good");
+    body["base_hash"] = serde_json::json!(rendered);
+    let resp = edit_post(&server, "/.mbr/flashcard-review", body).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON");
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        json["hash"],
+        serde_json::json!(mbr::edit_auth::content_hash(after.as_bytes()))
+    );
+
+    // The pre-write version is stale now, though the term's line still matches.
+    let mut stale = review_body(5, "Capital of France?", "good");
+    stale["base_hash"] = serde_json::json!(rendered);
+    assert_eq!(
+        edit_post(&server, "/.mbr/flashcard-review", stale)
+            .await
+            .status(),
+        409
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), after);
+
+    // Absent: the line check alone, as before.
+    let resp = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(5, "Capital of France?", "easy"),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]

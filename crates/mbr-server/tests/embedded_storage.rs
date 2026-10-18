@@ -186,6 +186,13 @@ async fn not_downloaded_files_get_a_retry_answer_and_a_download_request() {
     assert!(page.contains("class=\"mbr-downloading\""), "{page}");
     assert!(page.contains("<progress"), "{page}");
     assert!(page.contains("mbr-downloading-name\">cloud<"), "{page}");
+    // The offline variant ships hidden; only the iOS app's `html.mbr-offline`
+    // shows it.
+    assert!(
+        page.contains("class=\"mbr-downloading-title mbr-downloading-offline\""),
+        "{page}"
+    );
+    assert!(page.contains("back online"), "{page}");
     assert!(!page.contains("<h1>503</h1>"), "{page}");
 
     let (status, headers, _) = send(&server, get("/media/far.png")).await;
@@ -239,6 +246,36 @@ async fn refresh_applies_what_changed_in_the_vault() {
     );
     assert!(!site.contains("/docs/guide/"), "deleted note dropped");
     assert!(server.refresh().await.is_empty(), "applied once");
+}
+
+/// iCloud Drive on iOS: a folder copied in from another device lists its
+/// subfolders, but each subfolder's own listing is not on the device until
+/// something asks. The scan and every refresh ask, and the refresh after the
+/// listing arrives indexes the folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn folders_whose_listing_is_not_downloaded_are_requested_and_indexed_on_arrival() {
+    let vault = vault();
+    vault.insert_file("trips/rome.md", "---\ntitle: Roman Holiday\n---\n");
+    vault.set_dir_availability("trips", Availability::NotDownloaded);
+    let server = server(&vault).await;
+
+    let trips = VaultPath::new("trips").unwrap();
+    assert!(vault.download_requests().contains(&trips), "the scan asked");
+    assert_eq!(server.repo().not_downloaded_folder_count(), 1);
+    let (_, _, body) = send(&server, get("/.mbr/site.json")).await;
+    assert!(!String::from_utf8(body).unwrap().contains("Roman Holiday"));
+
+    let diff = server.refresh().await;
+    assert!(diff.is_empty(), "{diff:?}");
+    assert_eq!(diff.not_downloaded_folders.len(), 1);
+
+    vault.set_dir_availability("trips", Availability::Local);
+    let diff = server.refresh().await;
+    assert_eq!(diff.created.len(), 1, "{diff:?}");
+    assert!(diff.not_downloaded_folders.is_empty());
+    assert_eq!(server.repo().not_downloaded_folder_count(), 0);
+    let (_, _, body) = send(&server, get("/.mbr/site.json")).await;
+    assert!(String::from_utf8(body).unwrap().contains("Roman Holiday"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -571,4 +608,166 @@ async fn a_local_mbr_asset_is_served_without_waiting() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"body { color: teal }");
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// A deck-and-tasks note for the edit endpoints below.
+const EDITABLE: &str = "# Notes\n\n- [ ] one\n\nQ1?\n: A1\n";
+
+/// A server with editing on over `vault`, which holds [`EDITABLE`] as
+/// `notes.md`.
+async fn editing_server(vault: &Arc<MemVault>) -> Server {
+    let mut config = config(vault, None);
+    config.edit_enabled = true;
+    let server = Server::init(config).expect("init");
+    server.repo().wait_for_media().await;
+    server
+}
+
+/// A request an edit endpoint accepts: loopback peer, local `Host`, the
+/// CSRF header.
+fn edit_request(method: &str, uri: &str, json: Option<String>) -> Request<Body> {
+    let builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::HOST, "localhost")
+        .header("X-MBR-Edit", "1");
+    let mut request = match json {
+        Some(json) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json)),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    request
+}
+
+/// Every endpoint that reads a note before handing it out or patching it.
+fn every_edit_read(base_hash: &str) -> Vec<(&'static str, Request<Body>)> {
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    vec![
+        ("raw", edit_request("GET", "/.mbr/raw/notes.md", None)),
+        (
+            "edit",
+            edit_request(
+                "POST",
+                "/.mbr/edit/notes.md",
+                Some(
+                    serde_json::json!({"content": "# Replaced\n", "base_hash": base_hash})
+                        .to_string(),
+                ),
+            ),
+        ),
+        (
+            "task",
+            edit_request(
+                "POST",
+                "/.mbr/task",
+                Some(
+                    serde_json::json!({"path": "notes.md", "line": 3, "expected": "- [ ] one", "to": "done"})
+                        .to_string(),
+                ),
+            ),
+        ),
+        (
+            "flashcard-review",
+            edit_request(
+                "POST",
+                "/.mbr/flashcard-review",
+                Some(
+                    serde_json::json!({"path": "notes.md", "line": 5, "expected": "Q1?", "rating": "good", "at": at})
+                        .to_string(),
+                ),
+            ),
+        ),
+    ]
+}
+
+/// Regression (iPhone, iCloud vault): a task line edited on the Mac made the
+/// phone's copy dataless, and tapping its checkbox read `/.mbr/raw` → `404`
+/// "File not found" — the page said it could not read the file. A note that
+/// is not downloaded is now requested and, when it does not arrive in time,
+/// answered `503` + `Retry-After` by every edit endpoint, with nothing
+/// written.
+#[tokio::test(flavor = "multi_thread")]
+async fn edit_endpoints_answer_retry_for_a_note_that_is_not_downloaded() {
+    let vault = Arc::new(MemVault::new().with_file("notes.md", EDITABLE));
+    let server = editing_server(&vault).await;
+    vault.set_availability("notes.md", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+
+    let base_hash = mbr_core::edit_auth::content_hash(EDITABLE.as_bytes());
+    let started = std::time::Instant::now();
+    let answers = futures::future::join_all(every_edit_read(&base_hash).into_iter().map(
+        |(name, request)| {
+            let server = &server;
+            async move { (name, send(server, request).await) }
+        },
+    ))
+    .await;
+    for (name, (status, headers, body)) in answers {
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{name}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(headers[header::RETRY_AFTER], "2", "{name}");
+    }
+    assert!(
+        started.elapsed() >= Duration::from_millis(2500),
+        "waited for the download first: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        vault
+            .download_requests()
+            .contains(&VaultPath::new("notes.md").unwrap())
+    );
+    assert_eq!(vault.contents("notes.md").unwrap(), EDITABLE.as_bytes());
+}
+
+/// The same note once the download arrives while the request waits: each
+/// endpoint sees the bytes, and every one of them succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn edit_endpoints_read_a_note_that_arrives_on_request() {
+    let base_hash = mbr_core::edit_auth::content_hash(EDITABLE.as_bytes());
+    for (name, request) in every_edit_read(&base_hash) {
+        let vault = Arc::new(MemVault::new().with_file("notes.md", EDITABLE));
+        let server = editing_server(&vault).await;
+        vault.set_availability("notes.md", Availability::NotDownloaded);
+        let (status, _, body) = send(&server, request).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{name}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// The device scenario end to end: the line was changed on another device,
+/// so once the new version arrives the toggle is a `409` (the page then
+/// offers to reload), never a write over the other device's edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_changed_on_another_device_downloads_then_conflicts() {
+    let vault = Arc::new(MemVault::new().with_file("notes.md", EDITABLE));
+    let server = editing_server(&vault).await;
+    let changed = EDITABLE.replace("- [ ] one", "- [ ] one, edited on the Mac");
+    vault.insert_file("notes.md", &changed);
+    vault.set_availability("notes.md", Availability::NotDownloaded);
+
+    let toggle = every_edit_read("")
+        .into_iter()
+        .find(|(name, _)| *name == "task")
+        .unwrap()
+        .1;
+    let (status, _, _) = send(&server, toggle).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(vault.contents("notes.md").unwrap(), changed.as_bytes());
 }

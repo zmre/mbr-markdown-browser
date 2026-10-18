@@ -513,6 +513,10 @@ Second question?
 : Second answer.
 ```
 
+An empty answer (a `:` with nothing after it) followed by a blank line ends
+the whole list, as an empty list item does: the next question starts a new
+list, and a `:` line right after the blank line is plain text.
+
 ### Behavior
 
 - **Click a question, or Tab to it,** to reveal its answer. For keyboard users

@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 import WebKit
 
 /// One open vault or file: the web view, plus the native bits around it.
@@ -11,8 +10,15 @@ struct VaultScreen: View {
     @AppStorage("showTimingBar") private var showTimingBar = true
     @State private var session: VaultSession?
     @State private var error: String?
-    @State private var picking = false
+    /// Grant Folder Access's picker is up: where it should open, holding the
+    /// file's security scope until it goes.
+    @State private var grantStart: PickerStart?
+    /// The folder the last Grant Folder Access was for, in words, for the
+    /// notice when it came back empty.
+    @State private var grantLabel: String?
     @State private var configNoticeDismissed = false
+    /// Grant Folder Access came back without a folder.
+    @State private var noFolderGranted = false
     @State private var searching = false
     /// Counts edge swipes that opened something, to drive their haptic.
     @State private var edgeSwipes = 0
@@ -41,11 +47,6 @@ struct VaultScreen: View {
             // page, whose page message brings the bar back.
             .toolbar(self.editorOpen || self.slidesPlaying ? .hidden : .automatic, for: .navigationBar)
             .statusBarHidden(self.slidesPlaying)
-            .fileImporter(isPresented: self.$picking, allowedContentTypes: [.folder]) { result in
-                guard case let .success(folder) = result else { return }
-                Task { await self.picked(folder) }
-            }
-            .fileDialogDefaultDirectory(self.pickerStart)
             .sheet(isPresented: self.$searching) {
                 if let session { SearchSheet(session: session) }
             }
@@ -75,8 +76,20 @@ struct VaultScreen: View {
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 .ignoresSafeArea(edges: .bottom)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    if let configError = session.configError, !configNoticeDismissed {
-                        ConfigNotice(message: configError) { self.configNoticeDismissed = true }
+                    VStack(spacing: 0) {
+                        if let configError = session.configError, !configNoticeDismissed {
+                            ConfigNotice(message: configError) { self.configNoticeDismissed = true }
+                        }
+                        if let grantStart {
+                            FolderPickerHint(label: grantStart.label)
+                        }
+                        if self.noFolderGranted {
+                            NoFolderNotice(
+                                folder: self.grantLabel,
+                                retry: { Task { await self.grantFolderAccess() } },
+                                dismiss: { self.noFolderGranted = false }
+                            )
+                        }
                     }
                 }
                 // A config that broke (or broke differently) on a refresh is
@@ -101,7 +114,7 @@ struct VaultScreen: View {
                 Text(error)
             } actions: {
                 if case .vault = self.route {
-                    Button("Re-pick Folder…") { self.picking = true }
+                    Button("Re-pick Folder…") { self.presentPicker(start: nil) }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -145,8 +158,10 @@ struct VaultScreen: View {
                 // A capsule of its own: it is about the file, not the page.
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Grant Folder Access…", systemImage: "folder.badge.plus") { self.picking = true }
-                        .help("Open the folder around this file, so its links and images work")
+                    Button("Grant Folder Access…", systemImage: "folder.badge.plus") {
+                        Task { await self.grantFolderAccess() }
+                    }
+                    .help("Open the folder around this file, so its links and images work")
                 }
             }
         }
@@ -189,11 +204,34 @@ struct VaultScreen: View {
         }
     }
 
-    /// Where the folder picker starts: the opened file's folder, for "Grant
-    /// folder access…".
-    private var pickerStart: URL? {
-        if case let .file(url) = route { return url.deletingLastPathComponent() }
-        return nil
+    /// Grant Folder Access: the picker, opening in the file's folder.
+    private func grantFolderAccess() async {
+        guard case let .file(file) = route else { return }
+        let start = await PickerStart.resolve(file: file)
+        self.grantLabel = start.label
+        self.noFolderGranted = false
+        // The hint first, on its own for a moment: the full-height picker
+        // covers it, and it may open far from this folder.
+        self.grantStart = start
+        try? await Task.sleep(for: Self.hintLead)
+        self.presentPicker(start: start)
+    }
+
+    /// How long the folder hint shows before the picker covers it.
+    private static let hintLead: Duration = .milliseconds(1200)
+
+    /// The folder picker, for Grant Folder Access (`start`) or a re-pick.
+    private func presentPicker(start: PickerStart?) {
+        self.grantStart = start
+        FolderPicker.present(start: start?.url) { folder in
+            self.grantStart = nil
+            if let folder {
+                self.noFolderGranted = false
+                Task { await self.picked(folder) }
+            } else if case .file = self.route {
+                self.noFolderGranted = true
+            }
+        }
     }
 
     private func dialogBinding(_ dialogs: DialogModel) -> Binding<Bool> {
@@ -227,6 +265,7 @@ struct VaultScreen: View {
             if case let .vault(_, path) = route { start = path }
             await opened.start(at: start)
             await SelfTest.sessionStarted(opened, model: self.model)
+            if SelfTest.opensGrantPicker, opened.isSingleFile { await self.grantFolderAccess() }
         } catch {
             self.error = error.localizedDescription
             Log.info("open failed: \(error)")
@@ -239,9 +278,11 @@ struct VaultScreen: View {
     private func picked(_ folder: URL) async {
         switch self.route {
         case let .vault(id, start):
+            // Only offered while the open failed, so there is no session;
+            // the route is unchanged, so nothing would re-run the open.
             if await self.store.repick(id, folder: folder) {
-                self.session = nil
-                self.model.path = [.vault(id, start: start)]
+                Log.info("repick: reopening at \(start ?? "/")")
+                await self.open()
             }
         case let .file(file):
             guard let vault = await store.add(folder: folder) else { return }
@@ -287,6 +328,41 @@ private struct ConfigNotice: View {
         }
         .padding(10)
         .background(.yellow.opacity(0.15))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Grant Folder Access came back empty. Usually the provider: Google Drive,
+/// OneDrive and Sync.com let other apps open single files but not folders,
+/// so their folders cannot be picked (Open stays dimmed).
+private struct NoFolderNotice: View {
+    /// The folder to pick, in words (`Dropbox › Dev › elovation`).
+    let folder: String?
+    let retry: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle.fill").foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No folder opened").font(.footnote.bold())
+                if let folder {
+                    Text("The folder: \(folder)").font(.caption.bold())
+                }
+                Text("Some providers (Google Drive, OneDrive, Sync.com) share single files with other apps, "
+                    + "never folders, so Open stays dimmed in their folders. This file stays open on its own.")
+                    .font(.caption)
+                Button("Try Again", action: self.retry)
+                    .font(.caption.bold())
+                    .buttonStyle(.borderless)
+            }
+            Spacer(minLength: 0)
+            Button("Dismiss", systemImage: "xmark", action: self.dismiss)
+                .labelStyle(.iconOnly)
+                .font(.footnote)
+        }
+        .padding(10)
+        .background(.blue.opacity(0.12))
         .accessibilityElement(children: .combine)
     }
 }

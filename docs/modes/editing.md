@@ -58,6 +58,168 @@ the formatting tools that are not in Crepe's own menus: **Footnote** and
 **Media**. On a phone the editor fills the screen, and the path pickers open as
 sheets from the bottom.
 
+### mbr syntax in the editor
+
+The editor reads mbr's markdown with the renderer's rules, so what you see
+while editing is the structure the page will have, and it writes each
+construct back the way it was typed:
+
+- **Definition lists** (flashcards, FAQs): `Term` then `: definition`, with
+  nested lists, code and further paragraphs indented two spaces. They stay
+  expanded while editing. **Enter** in a term starts its first definition;
+  **Enter** in a definition starts the next one, and on an empty last
+  definition leaves the list. **Backspace** at the start of a definition
+  merges it back into the definition or term above. Typing `: ` at the start
+  of a paragraph after another paragraph makes that paragraph the term, and
+  the `/` menu has a **Definition list** entry.
+- **Tasks** with every mbr marker: `[ ]` open, `[x]` done, `[-]` cancelled,
+  `[>]` deferred. Click a box to complete or reopen it, right-click to cancel
+  it — the same as on the page. **Enter** in a task starts a new open task.
+  Annotations (`@due(…)`, `@done(…)`, `#tag`, `!!`) are plain text.
+- **Alerts** (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`,
+  `[!CAUTION]`) show as callouts. Typing `[!note] ` at the start of a quote
+  makes it one; **Backspace** at its start turns it back into a plain quote.
+- **Wikilinks** (`[[Note]]`, `[[Note|text]]`, `[[Note#Heading]]`, `![[file]]`)
+  show as link chips. Double-click one to edit its source (clear it to remove
+  the link). Typing the closing `]]` of a `[[…]]` turns it into a chip, and
+  the `[[` page autocomplete inserts one.
+- **Section attributes** (`--- {#id .class key=value}`) show as a rule with
+  the attributes on a chip. Click the chip to edit them; clearing them leaves
+  a plain rule.
+- **Heading attributes** (`# Title {#id .class}`) stay visible as text in the
+  heading.
+- **Math** (`$…$`, `$$…$$`) is edited as its LaTeX source, in monospace
+  between its delimiters; backslashes inside are never touched.
+- **Reference links** (`[text][ref]`, `[text][]`, `[ref]`, `![alt][ref]`) stay
+  references, and their `[ref]: …` definitions stay where they were (shown in
+  monospace and edited as text). Typing right after a link's text goes
+  outside the link; press **←** first to type inside it.
+- **Entities** (`&amp;`, `&nbsp;`, `&copy;`) and `\$` stay as typed.
+
+It also keeps the author's spelling of plain markdown: `-`, `*` or `+`
+bullets, `1.` or `1)` numbering (`1. 1. 1.`, and numbers that skip), the
+spacing after a list marker, nested lists indented with a tab or four spaces
+(and an item whose content starts on the line after its marker), empty list
+items and quotes, lazy continuation lines (a list item's or quote's paragraph
+continued on an unindented line), `---`/`***`/`___` rules, setext (`===`) headings,
+closing `#`s and trailing spaces, indented code (with tabs, if you used
+them) and `~~~` fences (and a
+fence's info string, and a fence left unclosed at the end of the note),
+two-space line breaks, `>>>` marginalia and `> ` on a quote's blank lines,
+table layout, bare URLs (`https://…`, `www.…`, addresses — never turned into
+`<…>` links), and the backslash escapes you wrote — without adding escapes
+nothing needs (`2 * 3` stays `2 * 3`). New lists get `*` bullets and new
+rules `---`. A definition (`: …`) is written exactly as typed until you edit
+it — the spacing after the `:`, unindented continuation lines, a list
+indented further than it needs, the blank lines inside it, trailing spaces —
+and so is each list item (a tab before one nested item and four spaces
+before the next, a tab after the marker, a repeated number, an empty task's
+trailing space; editing an item rewrites that item, not its untouched
+neighbours or nested items), each quote (`>` and `> ` mixed on blank lines,
+its own indentation) and each code block (a space before the info string,
+spaces after a fence, an indented fence). Links keep the spaces at the edges
+of their text (`[docs ](…)`, a spacer link `[ ](…)`), a link with no text,
+and two links side by side to the same page; bold or strike around a link
+stays outside it (`~~[x](…)~~`), and emphasis inside emphasis (`*a _b_ c*`)
+keeps the outer emphasis to its end. So are indented paragraphs and questions, a paragraph or heading spelled
+another way that reads the same (`AT\&T`, `~x~`, a link written out for an
+address), the blank lines between blocks (none under a heading, two or more
+anywhere, a blank line between only some items of a list, spaces on a blank
+line), and the end of the note (no final line break, or blank lines after the
+last line).
+
+### What a save writes
+
+A save rewrites only the blocks you changed. Every other top-level block —
+paragraph, list, table, code block, definition list — is written back exactly
+as it was in the file, including anything the editor would spell differently.
+Editing only the frontmatter leaves the body untouched, and saving without
+changes writes nothing.
+
+Frontmatter you did not touch is written back byte for byte: its `---` (or
+`...`) fences, blank lines at its end, the blank lines between it and the body,
+its line endings. Once you edit it, it is saved as `---`, your YAML without
+trailing blank lines, `---`; the blank lines before the body are kept. When
+that would change more than your edit (a `...` closer, say, or blank lines at
+the end of the block), the notice above the editor says so. The editor finds
+frontmatter exactly as the page does: a `---`/`---` pair with nothing between,
+or a `---` followed by a blank line, is not frontmatter (the page shows rules)
+and is edited as part of the body.
+
+When a note contains markdown the editor would write differently, a notice
+above the editor names those lines. They are kept as written unless you edit
+them; if you do, that block is saved the editor's way (same meaning — for
+example a definition written `:no space` is saved as `: no space`). In the
+rare case that the unchanged blocks cannot be kept separately (an unclosed
+code fence at the end of the file swallows anything added after it, for
+instance), the editor asks before saving the whole note in its own spelling,
+listing the lines that would change.
+
+### Checking your own notes
+
+To find out, ahead of time, which of your notes the editor would rewrite, run
+the round-trip checker from a checkout of mbr (it needs [bun](https://bun.sh)):
+
+```bash
+cd components
+bun install
+bun run roundtrip-check ~/notes --out /tmp/mbr-roundtrip
+```
+
+It opens and re-saves every `.md`/`.markdown` note under the folder exactly as
+the editor does — the same code, run in a headless DOM — without writing to
+your notes. Hidden folders (`.git`, `.obsidian`, `.mbr`) are skipped. The
+terminal shows only counts (notes checked, unchanged, would change, errors,
+causes, time) and the report's path, never a note's name or text, so the
+output is safe to paste into an issue. Checking takes a few tens of
+milliseconds a note; shrinking reproductions is what costs, so it is bounded:
+
+| Option | Default | What it bounds |
+|--------|---------|----------------|
+| `--samples-per-cause N` | 3 | A note is shrunk only if one of its causes (below) has fewer than N reproductions so far |
+| `--minimize-seconds N` | 2 | Time spent shrinking one note |
+| `--minimize-total-seconds N` | 300 | Time spent shrinking, all notes together |
+
+Notes over 200 kB are never shrunk.
+
+The report folder holds `index.md` and a numbered folder for each note that
+would change. `index.md` starts with a ranked table of **causes**: each is the
+shape of a line the round trip removes or adds — its indentation (tabs, or how
+many spaces), block prefix (`#`, `>`, a list marker, a task box, a fence),
+whether it holds a bare URL, an `<autolink>`, a `<br />` or an escape, and its
+trailing whitespace — with how many notes show it. Shapes keep no letters or
+digits, so the table can be shared as is. Then a table of the notes (their
+path, how many lines change, a guess at the markdown involved, whether the
+anonymized reproduction still reproduces — or `see <id>` for a note whose
+causes already have reproductions — its causes, and `rewritten` under "any
+save" for a note the safety net cannot keep, which any save rewrites; those
+are always shrunk). Each folder holds
+`diff.patch`; the notes that were shrunk also hold the rest:
+
+| File | What it is |
+|------|------------|
+| `diff.patch` | The note → what saving it in the editor's spelling writes, after the lines the notice lists |
+| `repro.md` | A minimal reproduction: just the blocks that change (plus the frontmatter and definitions they need), shrunk while the editor still rewrites it the same way |
+| `repro.anon.md` | The reproduction with every letter replaced by `x`/`X` and every digit by `0`, keeping the markdown syntax and the words mbr reads (`TODO`, `[!NOTE]`, `@due(...)`, review ratings, `type: flashcard`, …) |
+| `repro.diff.patch`, `repro.anon.diff.patch` | What the editor does to each reproduction |
+
+To turn a finding into a test case for mbr:
+
+1. Read `repro.anon.md`. Anonymization is automatic and keeps punctuation,
+   numbers in list markers and dates, URL schemes and HTML tag names, so
+   check that nothing you would not publish survives, and redact by hand if
+   it does. If the index says `differs (review repro.md manually)`, the
+   anonymized file no longer shows the problem; write a small example by hand
+   from `repro.md` instead.
+2. Copy the approved file to `tests/fixtures/editor-roundtrip/<name>.md`.
+3. From the repository root, generate its renderer outline with
+   `MBR_UPDATE_OUTLINES=1 cargo test -p mbr-core editor_parity`, and review
+   the new `<name>.outline.json`.
+4. `cd components && bun run test`: the parity harness now holds the editor
+   to the fixture. Until the editor handles it, list it in
+   `ROUND_TRIP_FAILS` in `components/src/editor-parity.test.ts` with the
+   reason.
+
 ### Starting a new note
 
 In the editor, ⋯ → **New note…** asks for a path, prefilled with the note's own
@@ -97,7 +259,8 @@ embed is the current target it reads **Edit media** instead of **Media**.
 |--------|---------|
 | Authentication required | A token is required (an `edit_token_hash` is configured, the caller is remote, or `edit_require_token_on_loopback`). Enter it and retry. |
 | Editing is disabled or blocked | Editing is off, or the request failed the CSRF/same-origin/`Host` check. |
-| File changed on disk | The file was modified since you loaded it (e.g. by the watcher or another editor). Reload the page before saving. |
+| Changed somewhere else | The file was modified since you loaded it (another editor, another device). Nothing was saved: copy your changes, then reload the page. |
+| Still downloading | The note is a cloud placeholder (the iOS app over iCloud) that has not arrived yet; the server asked for it. Try again in a moment. |
 
 ## Creating, renaming, and moving files
 
@@ -157,19 +320,36 @@ the same from the keyboard). Flipping one patches the single line it came from:
 It answers to `edit_enabled`, not to `tasks_enabled` — in-document checkboxes
 exist whether or not the [task browser](../reference/configuration.md#task-settings)
 does — and it carries the same headers and token as every other write endpoint.
-On success it returns `{ "line": 42, "text": "…" }` with the line's new text.
+On success it returns `{ "line": 42, "text": "…", "hash": "…" }` with the
+line's new text and the file's new fingerprint.
 
-`expected` is the line-sized version of `/.mbr/edit`'s `base_hash`: it must
-still match the file on disk (ignoring the line terminator) or the request is
-rejected with `409`. Matching one line rather than the whole file means somebody
-else editing a different part of the document does not spuriously fail your
-click, while an edit to *that* line — the only case where flipping its marker
-could clobber something — still does.
+`expected` must still match the file on disk (ignoring the line terminator) or
+the request is rejected with `409`. On its own that only proves the line reads
+the same, not that it is the same task: if lines were added above it elsewhere,
+another `- [ ] call back` may now sit on line 42. So the request may also carry
+`base_hash`, the fingerprint (`/.mbr/edit`'s SHA-256, as `/.mbr/raw` reports it
+in `X-MBR-Content-Hash`) of the version its line numbers come from, and any
+other version on disk is a `409` too. A rendered page carries the fingerprint of
+the source it was rendered from (`window.frontmatter.markdown_source_hash`), and
+its checkboxes and flashcard reviews send it, then the `hash` each write answers
+with — so a note changed anywhere since the page was rendered refuses the click
+and the page offers to reload, rather than flipping a different task. Without
+`base_hash` only the line is checked, as in earlier versions.
 
 Only the marker byte and the `@done(...)` annotation change; indentation, bullet
 style, spacing, other annotations, the line's terminator (a CRLF file stays
 CRLF) and the presence or absence of a trailing newline are all preserved. See
 [`tasks_stamp_done`](../reference/configuration.md#task-settings) for the stamp.
+
+Every edit endpoint (`/.mbr/raw`, `/.mbr/edit`, `/.mbr/task`,
+`/.mbr/flashcard-review`) reads the note first. When the vault reports the note
+not downloaded — a cloud provider's placeholder, as on the iOS app after the
+note was edited on another device — the server asks the provider for it and
+waits up to three seconds; if it has still not arrived the answer is `503` with
+`Retry-After`, never `404`. Once it arrives the request sees the new version, so
+a toggle of a line that changed elsewhere is a `409` and the page offers to
+reload. On the desktop nothing here costs anything: a local file is always
+downloaded.
 
 A toggle deliberately does **not** live-reload the page. The marker byte and the
 `@done(...)` stamp are the only things a status change alters, so the page
@@ -191,7 +371,8 @@ appended to the card's `___Review History___` in the note itself:
 It is gated and authenticated exactly like `POST /.mbr/task`, and `expected`
 plays the same role: it is the card's **term** line, which must still match the
 file, or the request is rejected with `409` (as it is when the line is no longer
-a top-level definition-list term). `at` is the reviewer's local wall-clock
+a top-level definition-list term), and so is `base_hash`, which is optional and
+checked the same way; a success answers with the file's new `hash`. `at` is the reviewer's local wall-clock
 time, and it is what the entry records: the deck replays history in the
 browser's time zone, so the server's own clock would be wrong whenever the two
 zones differ. It is required, must be exactly `YYYY-MM-DD HH:MM`, and must lie
@@ -223,6 +404,17 @@ itself.
 edit_enabled = true
 edit_token_hash = "$argon2id$v=19$m=19456,t=2,p=1$...."
 ```
+
+To keep the hash out of the repository, set it in the environment instead
+(single quotes, since the hash contains `$`). Environment variables override
+`.mbr/config.toml`:
+
+```bash
+MBR_EDIT_TOKEN_HASH='$argon2id$v=19$m=19456,t=2,p=1$....' mbr -s --edit --host 0.0.0.0 ~/notes
+```
+
+Without a hash, `--edit` on a non-loopback host refuses to start and exits
+with status 1, explaining why on stderr.
 
 ### Entering the token
 

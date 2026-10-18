@@ -20,6 +20,14 @@
 //! lists those and [`MbrStamp::request_downloads`] asks for them, at open and
 //! on every refresh until they arrive; their arrival is a change like any
 //! other.
+//!
+//! A change is acted on only once its bytes are on the device
+//! ([`MbrStamp::settle`]). An edit made on another device reaches an iCloud
+//! Drive vault as a *dataless* file — new size and time, contents still in the
+//! cloud — and reading it on mbr's fail-fast threads gives `EDEADLK`. Acting
+//! on it then turned a perfectly good `config.toml` into "could not be read"
+//! and the defaults. So a changed file that is not downloaded keeps its last
+//! stamp until it arrives, and its arrival is the change.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -67,6 +75,19 @@ pub(crate) struct MbrStamp {
     /// [`Self::request_downloads`] asks the provider for. Nothing else would:
     /// the scan skips hidden folders, so no page load ever reads them.
     not_downloaded: Vec<VaultPath>,
+}
+
+/// What a refresh may act on now: see [`MbrStamp::settle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Settled {
+    /// The next "last look": the stamp taken, except that what changed but
+    /// is not on the device yet keeps the earlier stamp, so its arrival is
+    /// still a change.
+    pub(crate) stamp: MbrStamp,
+    /// What changed and can be acted on.
+    pub(crate) changes: MbrChanges,
+    /// Something changed that is not downloaded yet and was held back.
+    pub(crate) waiting: bool,
 }
 
 /// Which kinds of file changed between two stamps.
@@ -135,6 +156,74 @@ impl MbrStamp {
         }
     }
 
+    /// What can be acted on since `seen` (the stamp last acted on), holding
+    /// back what is not on the device yet:
+    ///
+    /// - **`config.toml` and templates** are read server-side, together (a
+    ///   rebuild reads both), so while any of them is not downloaded neither
+    ///   kind moves: a refresh would otherwise read `EDEADLK` (a "broken"
+    ///   configuration, a missing template) for a file that is merely in the
+    ///   cloud.
+    /// - **Assets** are held file by file: a changed `user.css` still in the
+    ///   cloud keeps its earlier stamp, so the page is reloaded when it
+    ///   arrives rather than before. An evicted file (same size and time,
+    ///   no longer downloaded) is held the same way, and is no change at all
+    ///   once it is back.
+    ///
+    /// A file that was already not downloaded at the last look and still is
+    /// is no change, held or not.
+    pub(crate) fn settle(&self, seen: &Self) -> Settled {
+        let reads_pending = self.config.is_some_and(|c| !c.downloaded)
+            || self.templates.values().any(|t| !t.downloaded);
+        let (config, templates) = if reads_pending {
+            (seen.config, seen.templates.clone())
+        } else {
+            (self.config, self.templates.clone())
+        };
+        let assets = self
+            .assets
+            .iter()
+            .filter_map(|(path, stamp)| {
+                let earlier = seen.assets.get(path);
+                if stamp.downloaded || earlier == Some(stamp) {
+                    Some((path.clone(), *stamp))
+                } else {
+                    earlier.map(|earlier| (path.clone(), *earlier))
+                }
+            })
+            .collect();
+        let stamp = Self {
+            config,
+            templates,
+            assets,
+            not_downloaded: self.not_downloaded.clone(),
+        };
+        let waiting = stamp.config != self.config
+            || stamp.templates != self.templates
+            || stamp.assets != self.assets;
+        Settled {
+            changes: stamp.changes_since(seen),
+            stamp,
+            waiting,
+        }
+    }
+
+    /// This stamp with `seen`'s configuration and templates: for when a
+    /// rebuild found `config.toml` not downloaded after all (it was evicted
+    /// between the stamp and the read), so the next refresh tries again.
+    pub(crate) fn with_reads_from(&self, seen: &Self) -> Self {
+        Self {
+            config: seen.config,
+            templates: seen.templates.clone(),
+            ..self.clone()
+        }
+    }
+
+    /// How many files this stamp found not downloaded.
+    pub(crate) fn not_downloaded_count(&self) -> u32 {
+        u32::try_from(self.not_downloaded.len()).unwrap_or(u32::MAX)
+    }
+
     /// Asks `vault` to download every file this stamp found not downloaded,
     /// and returns how many that was. Once they arrive, the next stamp
     /// differs and a refresh acts on it (reloads the templates, rebuilds for
@@ -144,7 +233,7 @@ impl MbrStamp {
             return 0;
         }
         vault.request_download(&self.not_downloaded);
-        let count = u32::try_from(self.not_downloaded.len()).unwrap_or(u32::MAX);
+        let count = self.not_downloaded_count();
         tracing::info!(
             "Requested download of {count} not-downloaded file(s) in {}",
             vault.root().join(".mbr").display()
@@ -354,6 +443,132 @@ mod tests {
                 config: true,
                 templates: true,
                 assets: true,
+            }
+        );
+    }
+
+    /// A remote edit, as an iCloud Drive vault on iOS sees it: new size and
+    /// time, contents still in the cloud.
+    fn edit_remotely(vault: &MemVault, path: &str, text: &str) {
+        vault.insert_file(path, text);
+        vault.set_modified(path, SystemTime::now() + std::time::Duration::from_secs(5));
+        vault.set_availability(path, Availability::NotDownloaded);
+    }
+
+    fn local_mbr() -> MemVault {
+        MemVault::new()
+            .with_file(".mbr/config.toml", "title_prefix = \"OLD \"\n")
+            .with_file(".mbr/index.html", "<html></html>")
+            .with_file(".mbr/user.css", "body {}")
+            .with_file(".mbr/theme.css", "html {}")
+    }
+
+    /// Regression (iPhone, iCloud vault): `config.toml` edited on a Mac was
+    /// acted on while dataless, read as `EDEADLK`, and the vault fell back to
+    /// the defaults with a "could not be read" notice. It is held until it
+    /// arrives, and its arrival is the change.
+    #[test]
+    fn a_changed_config_still_in_the_cloud_is_held_until_it_arrives() {
+        let vault = local_mbr();
+        vault.hold_downloads(true);
+        let seen = MbrStamp::take(&vault, None);
+        edit_remotely(&vault, ".mbr/config.toml", "title_prefix = \"TEST \"\n");
+
+        let pending = MbrStamp::take(&vault, None).settle(&seen);
+        assert!(pending.waiting);
+        assert_eq!(pending.changes, MbrChanges::default(), "nothing to act on");
+        assert_eq!(pending.stamp.config, seen.config, "the last look stays");
+        assert_eq!(pending.stamp.not_downloaded_count(), 1, "still requested");
+
+        // A later refresh, still pending, is the same.
+        let again = MbrStamp::take(&vault, None).settle(&pending.stamp);
+        assert!(again.waiting && !again.changes.any());
+
+        vault.set_availability(".mbr/config.toml", Availability::Local);
+        let arrived = MbrStamp::take(&vault, None).settle(&again.stamp);
+        assert!(!arrived.waiting);
+        assert_eq!(
+            arrived.changes,
+            MbrChanges {
+                config: true,
+                ..MbrChanges::default()
+            }
+        );
+        assert_eq!(arrived.stamp.not_downloaded_count(), 0);
+    }
+
+    /// A rebuild reads the templates as well as the configuration, so a
+    /// template still in the cloud holds a configuration change too.
+    #[test]
+    fn a_template_in_the_cloud_holds_the_configuration_back_too() {
+        let vault = local_mbr();
+        let seen = MbrStamp::take(&vault, None);
+        edit_remotely(&vault, ".mbr/index.html", "<html>new</html>");
+        vault.insert_file(".mbr/config.toml", "title_prefix = \"NEW \"\n");
+        vault.set_modified(
+            ".mbr/config.toml",
+            SystemTime::now() + std::time::Duration::from_secs(5),
+        );
+        let pending = MbrStamp::take(&vault, None).settle(&seen);
+        assert!(pending.waiting);
+        assert!(!pending.changes.config && !pending.changes.templates);
+
+        vault.set_availability(".mbr/index.html", Availability::Local);
+        let arrived = MbrStamp::take(&vault, None).settle(&pending.stamp);
+        assert!(arrived.changes.config && arrived.changes.templates);
+    }
+
+    /// Assets are held one by one: a downloaded `theme.css` edit is acted on
+    /// while a `user.css` edit waits for its bytes.
+    #[test]
+    fn assets_are_held_file_by_file() {
+        let vault = local_mbr();
+        let seen = MbrStamp::take(&vault, None);
+        edit_remotely(&vault, ".mbr/user.css", "main h1 { color: red }");
+        vault.insert_file(".mbr/theme.css", "html { color: blue }");
+        let first = MbrStamp::take(&vault, None).settle(&seen);
+        assert!(first.waiting);
+        assert!(first.changes.assets, "theme.css is here");
+        assert!(!first.changes.config && !first.changes.templates);
+
+        let nothing_new = MbrStamp::take(&vault, None).settle(&first.stamp);
+        assert!(nothing_new.waiting && !nothing_new.changes.any());
+
+        vault.set_availability(".mbr/user.css", Availability::Local);
+        let arrived = MbrStamp::take(&vault, None).settle(&nothing_new.stamp);
+        assert!(!arrived.waiting && arrived.changes.assets);
+    }
+
+    /// An evicted file (same size and time, bytes gone) is waited for, and is
+    /// no change once it is back.
+    #[test]
+    fn an_eviction_is_no_change() {
+        let vault = local_mbr();
+        let seen = MbrStamp::take(&vault, None);
+        vault.set_availability(".mbr/user.css", Availability::NotDownloaded);
+        vault.set_availability(".mbr/config.toml", Availability::NotDownloaded);
+        let evicted = MbrStamp::take(&vault, None).settle(&seen);
+        assert!(!evicted.changes.any());
+        vault.set_availability(".mbr/user.css", Availability::Local);
+        vault.set_availability(".mbr/config.toml", Availability::Local);
+        let back = MbrStamp::take(&vault, None).settle(&evicted.stamp);
+        assert!(!back.waiting && !back.changes.any(), "{back:?}");
+    }
+
+    #[test]
+    fn with_reads_from_restores_only_config_and_templates() {
+        let vault = local_mbr();
+        let seen = MbrStamp::take(&vault, None);
+        vault.insert_file(".mbr/config.toml", "title_prefix = \"X \"\n");
+        vault.insert_file(".mbr/index.html", "<html>x</html>");
+        vault.insert_file(".mbr/user.css", "body { x: y }");
+        let now = MbrStamp::take(&vault, None);
+        let reverted = now.with_reads_from(&seen);
+        assert_eq!(
+            reverted.changes_since(&seen),
+            MbrChanges {
+                assets: true,
+                ..MbrChanges::default()
             }
         );
     }

@@ -189,8 +189,12 @@ place:
 
 The card or checkbox moves immediately and the change is written to the file
 behind it. If the write is refused, it moves back and tells you why — most
-usefully when the line has changed on disk since the page was rendered, in which
-case nothing is written and the panel refreshes itself.
+usefully when the note has changed somewhere else since the page was rendered
+(on disk, in another editor, or on another device — anywhere in the note, since
+an added line moves every task below it), in which case nothing is written: a checkbox in the document offers to reload the page for the latest
+version, and the panel refreshes its list so you can try again. On a vault the
+server has to fetch from the cloud first (the iOS app over iCloud), a note that
+is still downloading says so; try again in a moment.
 
 The page does **not** reload for your own toggle. A `@done(...)` chip appears
 (or disappears) in place, your scroll position and the panel's filters survive,

@@ -13,7 +13,11 @@ enum Log {
 
     static func info(_ message: String) {
         self.logger.notice("\(message, privacy: .public)")
-        FileHandle.standardError.write(Data("[mbr] \(message)\n".utf8))
+        // The throwing `write(contentsOf:)`, never `write(_:)`: that one raises an
+        // Objective-C exception on any error, and stderr becomes a closed pipe
+        // when an attached console (`devicectl … --console`) goes away — the
+        // phone sleeping was enough to abort the app on its next log line.
+        try? FileHandle.standardError.write(contentsOf: Data("[mbr] \(message)\n".utf8))
     }
 }
 

@@ -12,6 +12,7 @@ import WebKit
 /// | `-mbrSelfTest config` | a vault whose `.mbr/config.toml` is broken |
 /// | `-mbrSelfTest refresh` | opens the sample vault and waits (the host edits files while backgrounded) |
 /// | `-mbrSelfTest download` | a legacy `.Name.md.icloud` placeholder: the Downloading page and its retries |
+/// | `-mbrSelfTest switch` | a document opened over the sample vault, its folder granted, then Back |
 /// | `-mbrSelfTest screens` | steps through screens, logging `SCREEN <name>` for screenshots |
 ///
 /// A file opened with `simctl openurl` while `single` is active is checked
@@ -25,6 +26,13 @@ enum SelfTest {
 
     static var isActive: Bool {
         mode != nil
+    }
+
+    /// `-mbrGrantPicker YES`: a single file's screen opens Grant Folder
+    /// Access's picker once its page is up, for a screenshot of where the
+    /// picker starts.
+    static var opensGrantPicker: Bool {
+        isActive && UserDefaults.standard.bool(forKey: "mbrGrantPicker")
     }
 
     static let fixtureFolder = "selftest"
@@ -55,16 +63,25 @@ enum SelfTest {
         }
     }
 
+    /// The modes whose checks need only the session.
+    private static let sessionScenarios: [String: @MainActor (VaultSession) async -> Void] = [
+        "full": runFull,
+        "single": runSingle,
+        "config": runConfig,
+        "download": runDownload,
+        "deep": runDeep,
+        "mbr-reload": runMbrReload
+    ]
+
     /// A session finished loading its first page.
     static func sessionStarted(_ session: VaultSession, model: AppModel) async {
         guard let mode else { return }
+        if let scenario = sessionScenarios[mode] {
+            await scenario(session)
+            return
+        }
         switch mode {
-        case "full": await self.runFull(session)
-        case "single": await self.runSingle(session)
-        case "config": await self.runConfig(session)
-        case "download": await self.runDownload(session)
-        case "deep": await self.runDeep(session)
-        case "mbr-reload": await self.runMbrReload(session)
+        case "switch": self.runSwitch(session, model: model)
         case "screens":
             // Unstructured: the sequence leaves the vault screen, which
             // cancels the task that called this.
@@ -169,6 +186,7 @@ enum SelfTest {
         await record("taskToggle", self.taskToggle(session))
         await record("flashcardReview", self.flashcardReview(session))
         await record("videoSeek", self.videoSeek(session))
+        await record("providerRefresh", self.providerRefresh(session))
 
         // A slashless URL: mbr answers 301 to /modes/, which WebKit would not
         // follow from a scheme handler; the transport replays it in the page.

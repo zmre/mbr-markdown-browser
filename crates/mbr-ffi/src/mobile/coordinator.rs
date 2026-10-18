@@ -35,6 +35,12 @@ pub trait FileCoordinator: Send + Sync {
     /// third-party provider (Dropbox, Working Copy), a coordinated read on a
     /// background queue, which is what makes those materialize. Completion
     /// needs no answer: the files simply become readable.
+    ///
+    /// A path may also be a **folder** whose listing is not on the device (a
+    /// *dataless* iCloud Drive folder fails `readdir` on mbr's threads, see
+    /// `iopolicy`): list it, recursively, on a thread allowed to wait. That
+    /// fetches names and sizes only, never a file's contents; the next
+    /// refresh indexes what it lists.
     fn request_download(&self, paths: Vec<String>);
 }
 

@@ -1,0 +1,22 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"blockquote","lines":[3,7]},
+  {"depth":1,"kind":"paragraph","lines":[3,3]},
+  {"depth":1,"kind":"paragraph","lines":[5,5]},
+  {"depth":1,"kind":"paragraph","lines":[7,7]},
+  {"depth":0,"kind":"blockquote","lines":[9,11]},
+  {"depth":1,"kind":"paragraph","lines":[9,9]},
+  {"depth":1,"kind":"list","lines":[10,11],"ordered":false,"tight":true},
+  {"depth":2,"kind":"item","lines":[10,10]},
+  {"depth":3,"kind":"paragraph","lines":[10,10]},
+  {"depth":2,"kind":"item","lines":[11,11]},
+  {"depth":3,"kind":"paragraph","lines":[11,11]},
+  {"depth":0,"kind":"blockquote","lines":[13,14]},
+  {"depth":1,"kind":"paragraph","lines":[13,14]},
+  {"depth":0,"kind":"list","lines":[16,20],"ordered":false,"tight":false},
+  {"depth":1,"kind":"item","lines":[16,20]},
+  {"depth":2,"kind":"paragraph","lines":[16,16]},
+  {"depth":2,"kind":"blockquote","lines":[18,20]},
+  {"depth":3,"kind":"paragraph","lines":[18,18]},
+  {"depth":3,"kind":"paragraph","lines":[20,20]}
+]

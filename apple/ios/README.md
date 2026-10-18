@@ -69,7 +69,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 |------|------|
 | `project.yml` | XcodeGen project: iOS 26, team X2SAY6ACE6, `com.zmre.mbr.ios`, a markdown document type for opening files in place, and the repository's `docs/` bundled as the sample vault |
 | `MBRMobile/MBRMobileApp.swift` | App entry. Scene-phase hooks (refresh on foreground, flush on background), `onOpenURL` for documents, and the web view prewarm |
-| `MBRMobile/Model/AppModel.swift` | Navigation, the open session (one at a time), lifecycle, and the dataless-files toggle |
+| `MBRMobile/Model/AppModel.swift` | Navigation, the open session (one at a time), and lifecycle |
 | `MBRMobile/Model/VaultStore.swift` | Vault list in `UserDefaults`: add, rename, remove, re-pick. Plain `bookmarkData()`, resolved off the main thread and re-saved when stale. `FolderAccess` holds the security scope; `AppPaths` has the per-vault cache folders |
 | `MBRMobile/Model/VaultSession.swift` | One open vault or file: `MbrApp.open`/`openFile`, timings, `refresh()` with reload, `flushIndex()`, WebContent crash recovery, and the Downloading-page watchdog |
 | `MBRMobile/Web/MbrSchemeHandler.swift` | `mbr://` handler. Pull-based: each `next()` is one `MbrResponse.nextChunk()`, so media streams with Rust's bounded buffer. Logs one line per request |
@@ -79,6 +79,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `MBRMobile/Assets.xcassets` | The app icon: one opaque 1024×1024 PNG, the macOS icon's tree cropped full-bleed |
 | `MBRMobileUITests/` | UI tests for what only a tap opens (the bar's menus, the home-screen icon); each state prints `SHOT <name>` and is kept as an attachment |
 | `MBRMobile/Support/FileCoordinatorBridge.swift` | mbr's `FileCoordinator`: `NSFileCoordinator` writes (`.forReplacing`, item-replacement directory plus `replaceItemAt`, with an in-place fallback), mkdir, move, remove, and download requests |
+| `MBRMobile/Support/NetworkStatus.swift` | `NWPathMonitor`: sets `html.mbr-offline` in every page (document-start script, replaced on change) so the Downloading page says "You're offline." instead of spinning; logs `network: offline\|online` |
 | `MBRMobile/Support/Log.swift` | Unified log (subsystem `com.zmre.mbr.ios`) plus stderr |
 | `MBRMobile/Views/` | Vault list, vault screen (web view, config notice, the native bar), settings, onboarding |
 | `MBRMobile/SelfTest*.swift` | Simulator self-test (below) |
@@ -96,7 +97,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `refresh()` → `RefreshSummary` | Foreground and the Refresh menu item. The page reloads when it is in `changedPages`, when anything was added or removed, or when `.mbr/` changed (`configReloaded`, `templatesReloaded`, `assetsChanged`). `configError` updates the notice |
 | `flushIndex()` | Background, inside `beginBackgroundTask` |
 | `indexCachePath()` | Settings and the `ready:` line |
-| `setMaterializeDatalessFiles(_:)` | Settings → "Download files on read" (off by default, matching Rust) |
+| `setMaterializeDatalessFiles(_:)` | Not called by the app, which always runs with Rust's default (off: reading a not-downloaded file fails fast and the page says Downloading). The Settings toggle was removed because, turned on, opening a 2.3 GB iCloud vault downloaded the whole vault and the scan had not finished after 5+ minutes. Still exported for tests |
 | `FileCoordinator` | `FileCoordinatorBridge`, passed to every open |
 
 Pages must be loaded from `mbr://localhost/`. Rust derives `Host` from the URL
@@ -238,11 +239,12 @@ xcrun simctl launch --console-pty --terminate-running-process "iPhone 17" com.zm
 
 | Mode | Checks |
 |------|--------|
-| `full` | On the sample vault, with fixtures written to `selftest/`: open timings and `fromCache`, viewport/desktop layout, localStorage across launches, components, no live-reload socket, mermaid, lazy `import()`, `POST /.mbr/search`, `Range: bytes=0-99` → 206 + 100 bytes, a task toggle and a flashcard review through the real UI and the `FileCoordinator` (each verified on disk), `<video>` seek, and a slashless URL landing on its canonical page |
-| `single` | A file from `simctl openurl file://…` (or `-mbrOpenFile <path under Documents>`): it renders, `/` lands on it, and Grant Folder Access is offered |
+| `full` | On the sample vault, with fixtures written to `selftest/`: open timings and `fromCache`, viewport/desktop layout, localStorage across launches, components, no live-reload socket, mermaid, lazy `import()`, `POST /.mbr/search`, `Range: bytes=0-99` → 206 + 100 bytes, a task toggle and a flashcard review through the real UI and the `FileCoordinator` (each verified on disk), `<video>` seek, the pre-refresh provider request's mechanics (`providerRefresh`: presenters + coordinated read, idle cost = budget, a change ends the wait early), and a slashless URL landing on its canonical page |
+| `single` | A file from `simctl openurl file://…` (or `-mbrOpenFile <path under Documents>`): it renders, `/` lands on it, Grant Folder Access is offered, its picker start is the file's folder (`single.pickerStart`), and the folder hint names device paths right (`single.pickerLabel`). Add `-mbrGrantPicker YES` to open the picker itself |
+| `switch` | Over the open sample vault, a document is handed to the app (what Share → MBR does): the file opens as a single page in a new screen and the vault's session closes (`switch.document`); its folder is then granted as a vault and opens at the same note (`switch.granted`); Back reaches the list with no session left open (`switch.back`) |
 | `config` | A vault with a broken `.mbr/config.toml` opens, reports the error, and `errors.json` carries `config_parse_error` |
 | `refresh` | Opens the sample vault and waits. Background the app, edit a file in its container, then bring it back: `refresh (foreground)` reports the change and the page reloads |
-| `download` | A legacy `.pending.md.icloud` placeholder: the Downloading page (a 503 underneath, drawn as a progress bar and the note's name), whether WebKit honours `Refresh`, and the page once the real file appears |
+| `download` | A legacy `.pending.md.icloud` placeholder: the Downloading page (a 503 underneath, drawn as a progress bar and the note's name), its offline variant with the network forced off (switching at once, kept across a `Refresh` reload, and back), whether WebKit honours `Refresh`, and the page once the real file appears |
 | `screens` | Steps through page, search, deck, the editor and the tasks overlay (both opened through the bridge), list and settings, writing `SCREEN <name>` to stderr for screenshots |
 | `mbr-reload` | Opens the sample vault and waits. Background the app, edit `.mbr/user.css` and `.mbr/config.toml` in its container, then bring it back: the refresh reports a config reload and the page shows both changes (`mbr-reload.after: PASS …`) |
 | `deep` | Writes and opens a page four folders down with a long title, and logs what the native bar got (`deep.bar`) and that the web header is collapsed (`deep.page`). The UI tests use it |

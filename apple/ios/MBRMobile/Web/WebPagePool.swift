@@ -14,6 +14,9 @@ final class MbrWebPage {
     let dialogs: DialogModel
     let info: PageInfo
     private let decider: LinkPolicy
+    /// The page's scripts, kept to replace the document-start script when the
+    /// network state changes (`NetworkStatus`).
+    private let contentController: WKUserContentController
 
     init() {
         let target = SchemeTarget()
@@ -22,7 +25,8 @@ final class MbrWebPage {
         var configuration = WebPage.Configuration()
         configuration.urlSchemeHandlers[URLScheme(MbrSchemeHandler.scheme)!] = MbrSchemeHandler(target: target)
         let info = PageInfo()
-        AppBridge.install(in: &configuration, info: info)
+        AppBridge.install(in: &configuration, info: info, offline: NetworkStatus.shared.isOffline)
+        self.contentController = configuration.userContentController
         // Videos play in the page rather than jumping to fullscreen.
         configuration.mediaPlaybackBehavior = .allowsInlinePlayback
         self.page = WebPage(configuration: configuration, navigationDecider: decider, dialogPresenter: dialogs)
@@ -34,6 +38,15 @@ final class MbrWebPage {
         self.dialogs = dialogs
         self.decider = decider
         self.info = info
+        NetworkStatus.shared.register(self)
+    }
+
+    /// Shows or hides the Downloading page's offline variant, now and on
+    /// every later load.
+    func setOffline(_ offline: Bool) {
+        Task {
+            await AppBridge.setOffline(offline, controller: self.contentController, page: self.page)
+        }
     }
 }
 

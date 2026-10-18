@@ -292,7 +292,16 @@ export const DECK_CSS = `
   border-color: var(--mbr-fc-rating, var(--pico-muted-border-color));
   font-weight: 600;
 }
-.mbr-fc-ratings button:hover:not(:disabled),
+/* Hover only where a pointer really hovers: a touch screen keeps :hover on
+   whatever sits under the last tap, so the next card's rating button there
+   looked pre-selected. Touch gets the fill while pressed (:active). */
+@media (hover: hover) {
+  .mbr-fc-ratings button:hover:not(:disabled) {
+    background: var(--mbr-fc-rating, var(--pico-primary));
+    color: var(--pico-background-color, #fff);
+  }
+}
+.mbr-fc-ratings button:active:not(:disabled),
 .mbr-fc-ratings button.is-pending {
   background: var(--mbr-fc-rating, var(--pico-primary));
   color: var(--pico-background-color, #fff);

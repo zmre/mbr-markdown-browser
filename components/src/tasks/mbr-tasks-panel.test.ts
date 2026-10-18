@@ -1067,6 +1067,9 @@ describe('MbrTasksPanelElement', () => {
       expect(element.shadowRoot!.querySelector('.results-notice')?.textContent).toContain(
         'changed on disk'
       )
+      expect(element.shadowRoot!.querySelector('.results-notice')?.textContent).toContain(
+        'list has been refreshed'
+      )
       expect(checkboxes(element)[0].dataset.mbrTaskStatus).toBe('open')
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })

@@ -36,7 +36,13 @@ struct MemState {
     files: BTreeMap<VaultPath, MemFile>,
     /// Every directory, including the root and every ancestor of every file.
     dirs: BTreeSet<VaultPath>,
+    /// Directories whose listing is not on the device: listed by their
+    /// parent, but `list_dir` fails `NotDownloaded`.
+    unlisted_dirs: BTreeSet<VaultPath>,
     downloads: Vec<VaultPath>,
+    /// When set, [`Vault::request_download`] only records the request: the
+    /// provider never delivers (offline, or a slow download).
+    downloads_held: bool,
 }
 
 impl MemState {
@@ -157,6 +163,26 @@ impl MemVault {
         file.availability = availability;
     }
 
+    /// Marks a directory as one whose *listing* is not downloaded (or back):
+    /// its parent lists it, `stat` finds it, but [`Vault::list_dir`] fails
+    /// [`VaultError::NotDownloaded`] — an iCloud Drive folder on iOS that
+    /// nothing has listed yet. Unlike a file's, a directory's listing does not
+    /// arrive on [`Vault::request_download`]: the request is recorded and the
+    /// test makes it arrive, as the provider would, some time later.
+    ///
+    /// # Panics
+    ///
+    /// When there is no such directory.
+    pub fn set_dir_availability(&self, path: &str, availability: Availability) {
+        let path = fixture_path(path);
+        let mut state = self.state.write();
+        assert!(state.dirs.contains(&path), "no MemVault directory {path}");
+        match availability {
+            Availability::NotDownloaded => state.unlisted_dirs.insert(path),
+            Availability::Local | Availability::Unknown => state.unlisted_dirs.remove(&path),
+        };
+    }
+
     /// Sets a file's modification time.
     ///
     /// # Panics
@@ -176,6 +202,12 @@ impl MemVault {
     pub fn contents(&self, path: &str) -> Option<Vec<u8>> {
         let path = VaultPath::new(path).ok()?;
         self.state.read().files.get(&path).map(|f| f.bytes.to_vec())
+    }
+
+    /// Whether a requested download stays pending (`true`) or completes at
+    /// once (`false`, the default). Models a provider that is offline or slow.
+    pub fn hold_downloads(&self, held: bool) {
+        self.state.write().downloads_held = held;
     }
 
     /// Every path passed to [`Vault::request_download`] so far, in order.
@@ -246,6 +278,11 @@ impl Vault for MemVault {
                 }
             } else {
                 VaultError::not_found(dir)
+            });
+        }
+        if state.unlisted_dirs.contains(dir) {
+            return Err(VaultError::NotDownloaded {
+                path: dir.to_string(),
             });
         }
         let is_child = |p: &VaultPath| p.parent().as_ref() == Some(dir);
@@ -356,8 +393,9 @@ impl Vault for MemVault {
 
     fn request_download(&self, paths: &[VaultPath]) {
         let mut state = self.state.write();
+        let deliver = !state.downloads_held;
         for path in paths {
-            if let Some(file) = state.files.get_mut(path) {
+            if let Some(file) = state.files.get_mut(path).filter(|_| deliver) {
                 file.availability = Availability::Local;
             }
             state.downloads.push(path.clone());
@@ -432,6 +470,22 @@ mod tests {
         ));
         vault.request_download(&[vp("cloud.md")]);
         assert_eq!(vault.download_requests(), vec![vp("cloud.md")]);
+        assert_eq!(vault.read(&vp("cloud.md")).unwrap(), b"# Cloud");
+    }
+
+    #[test]
+    fn held_downloads_are_recorded_but_never_delivered() {
+        let vault = MemVault::new().with_file("cloud.md", "# Cloud");
+        vault.set_availability("cloud.md", Availability::NotDownloaded);
+        vault.hold_downloads(true);
+        vault.request_download(&[vp("cloud.md")]);
+        assert_eq!(vault.download_requests(), vec![vp("cloud.md")]);
+        assert!(matches!(
+            vault.read(&vp("cloud.md")),
+            Err(VaultError::NotDownloaded { .. })
+        ));
+        vault.hold_downloads(false);
+        vault.request_download(&[vp("cloud.md")]);
         assert_eq!(vault.read(&vp("cloud.md")).unwrap(), b"# Cloud");
     }
 

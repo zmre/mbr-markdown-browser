@@ -165,6 +165,9 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 keywords = ["markdown", "gui", "cli", "productivity", "static"]
+# Two bins (`mbr`, `uniffi-bindgen`): without this, `cargo run -- …` refuses
+# to guess. `uniffi-bindgen` is still run with `--bin uniffi-bindgen`.
+default-run = "mbr"
 categories = ["command-line-utilities", "gui", "template-engine"]
 autobenches = false
 

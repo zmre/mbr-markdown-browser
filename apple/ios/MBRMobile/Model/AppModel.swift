@@ -28,14 +28,22 @@ final class AppModel {
     private var wasInBackground = false
 
     init() {
-        self.applyDatalessPolicy()
+        // "Download files on read" was a Settings toggle until 2026-10-15; drop
+        // its stored value. The app always runs with Rust's default (dataless
+        // files fail fast → Downloading page): turned on, opening a 2.3 GB
+        // iCloud vault downloaded the whole vault and the scan had not
+        // finished after 5+ minutes. `setMaterializeDatalessFiles` stays
+        // exported for tests.
+        UserDefaults.standard.removeObject(forKey: "materializeDatalessFiles")
     }
 
     // MARK: Sessions
 
     func open(_ route: Route) async throws -> VaultSession {
-        self.session?.close()
-        self.session = nil
+        if let previous = session {
+            self.session = nil
+            Self.retire(previous)
+        }
         let opened: VaultSession
         switch route {
         case let .vault(id, _):
@@ -55,13 +63,26 @@ final class AppModel {
 
     func close(_ closing: VaultSession) {
         guard self.session === closing else { return }
-        closing.close()
         self.session = nil
+        Self.retire(closing)
         // Warm a page for the next vault.
         self.pool.prewarm()
     }
 
-    /// A file handed to the app (Files "Open in", the share sheet).
+    /// Stops a session that is leaving the screen, saving a vault's index
+    /// first: what was learned since the last save (edits, refreshes) would
+    /// otherwise be rescanned on its next open. The flush holds the session,
+    /// so its `MbrApp` lives until the save is done.
+    private static func retire(_ session: VaultSession) {
+        session.close()
+        guard !session.isSingleFile else { return }
+        Task { await session.flush() }
+    }
+
+    /// A file handed to the app (Files "Open in", the share sheet), over
+    /// whatever is on screen: the vault list, a vault, another file. The
+    /// screen is keyed by its route (`RootView`), so this is a new screen
+    /// whose open closes the current session.
     func openDocument(_ url: URL) {
         Log.info("document: open \(url.path(percentEncoded: false))")
         self.path = [.file(url)]
@@ -95,20 +116,6 @@ final class AppModel {
         guard self.wasInBackground else { return }
         self.wasInBackground = false
         guard let session else { return }
-        Task { await session.refresh(reason: "foreground") }
-    }
-
-    // MARK: Settings
-
-    static let materializeKey = "materializeDatalessFiles"
-
-    /// Whether mbr's threads wait for not-downloaded files (the debug toggle).
-    /// Off by default: reads of dataless files fail fast and the page says
-    /// "Downloading". Takes effect for the next vault opened (and for the
-    /// scan's thread pool, from the next launch).
-    func applyDatalessPolicy() {
-        let materialize = UserDefaults.standard.bool(forKey: Self.materializeKey)
-        setMaterializeDatalessFiles(materialize: materialize)
-        Log.info("iopolicy: materialize dataless files = \(materializesDatalessFiles())")
+        Task { await session.refresh(reason: "foreground", askProvider: true) }
     }
 }

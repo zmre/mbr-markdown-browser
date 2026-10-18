@@ -1,0 +1,16 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"list","lines":[3,5],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[3,3]},
+  {"depth":2,"kind":"paragraph","lines":[3,3]},
+  {"depth":1,"kind":"item","lines":[4,5]},
+  {"depth":2,"kind":"paragraph","lines":[4,4]},
+  {"depth":2,"kind":"list","lines":[5,5],"ordered":false,"tight":true},
+  {"depth":3,"kind":"item","lines":[5,5]},
+  {"depth":4,"kind":"paragraph","lines":[5,5]},
+  {"depth":0,"kind":"list","lines":[7,8],"ordered":false,"tight":true},
+  {"depth":1,"kind":"item","lines":[7,7]},
+  {"depth":2,"kind":"paragraph","lines":[7,7]},
+  {"depth":1,"kind":"item","lines":[8,8]},
+  {"depth":2,"kind":"paragraph","lines":[8,8]}
+]

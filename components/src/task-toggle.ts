@@ -19,6 +19,29 @@
  * no second fetch. A `409` drops the file entirely, since the copy we hold is
  * provably wrong.
  *
+ * # Which version of the file
+ *
+ * `expected` proves the line still *reads* the same, not that it is the same
+ * task: a line added above a run of identical `- [ ] call back` items moves a
+ * different one onto the number the page knows. So every write also sends
+ * `base_hash`, the fingerprint of the version its line numbers come from, and
+ * the server refuses any other version with a `409`.
+ *
+ * - For the page's own note (`markdown_source`) the line numbers come from the
+ *   *render*, which carries its fingerprint (`markdown_source_hash`). The
+ *   first `/.mbr/raw` read is checked against it, and a different version is a
+ *   conflict at once, before anything is sent: the lines just read are not the
+ *   ones the page numbered.
+ * - For any other file (the task panel's) the line numbers come from a query
+ *   newer than any render, so the first read is trusted as before; its
+ *   fingerprint then guards every later write from this page.
+ *
+ * Each successful write answers with the new fingerprint, which replaces the
+ * held one, so a page's own consecutive writes — task toggles and flashcard
+ * reviews alike — chain. Writes to one file are serialized ({@link
+ * serializeWrite}): two quick clicks would otherwise both send the version
+ * before either write, and the second would be refused.
+ *
  * # Live reload
  *
  * A successful write makes the server broadcast a file change, and
@@ -37,8 +60,9 @@
  * of a task's markup a status change alters beyond the box itself.
  */
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
+import { NOTE_CHANGED_MESSAGE, staleKindForRead, staleKindForWrite, staleNoteMessage } from './stale-note.js'
 import { syncDoneChip } from './task-chips.js'
-import type { TaskStatus, TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
+import type { TaskStatus, TaskToggleFailure, TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
 /** Endpoint for a single-line task patch (`server.rs::task_toggle_handler`). */
 const TASK_ENDPOINT = '/.mbr/task'
@@ -72,11 +96,39 @@ const SELF_WRITE_TTL_MS = 1500
 
 export type { TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
-/** Cached source lines per repo-relative path, without line terminators. */
-const lineCache = new Map<string, string[]>()
+/** Response header carrying a file's fingerprint (`server.rs::raw_markdown_handler`). */
+const HASH_HEADER = 'x-mbr-content-hash'
 
-/** The outcome of reading a file's source, with the status when it failed. */
-export type SourceRead = { ok: true; lines: string[] } | { ok: false; status: number }
+/**
+ * A file's source as this page holds it: its lines, without terminators, and
+ * the fingerprint of the version they are (`null` when the server sent none,
+ * which leaves the line check as the only one).
+ */
+interface HeldSource {
+  lines: string[]
+  hash: string | null
+}
+
+/** Cached source per repo-relative path. */
+const lineCache = new Map<string, HeldSource>()
+
+/**
+ * The outcome of reading a file's source, with the status when it failed.
+ *
+ * `lines` is the cache's own array, so a writer that knows what changed can
+ * patch it in place; `hash` is the fingerprint at the time of the read, sent
+ * as the write's `base_hash`.
+ */
+export type SourceRead = { ok: true; lines: string[]; hash: string | null } | { ok: false; status: number }
+
+/**
+ * The version of the page's own note this page shows, once a write has moved
+ * it on from the rendered one (`markdown_source_hash`). `undefined` until then.
+ */
+let documentHash: string | null | undefined
+
+/** Per-file chains of in-flight writes; see {@link serializeWrite}. */
+const writeChains = new Map<string, Promise<unknown>>()
 
 /** In-flight raw reads, so two quick clicks on one file fetch it once. */
 const pendingReads = new Map<string, Promise<SourceRead>>()
@@ -183,7 +235,7 @@ export async function isOwnWriteEcho(relativePath: string): Promise<boolean> {
   // A write that started while the file was being read is still in flight, and
   // its line is not in the cache yet: the window is the authority for it.
   if (wasSelfWrite(key)) return true
-  const held = lineCache.get(key)
+  const held = lineCache.get(key)?.lines
   return held !== undefined && held.length === disk.lines.length && held.every((line, i) => line === disk.lines[i])
 }
 
@@ -193,6 +245,8 @@ export function resetTaskToggleState(): void {
   pendingReads.clear()
   selfWrites.clear()
   writtenPaths.clear()
+  writeChains.clear()
+  documentHash = undefined
 }
 
 /** `/.mbr/raw/...` URL for a repo-relative path, each segment encoded. */
@@ -215,8 +269,21 @@ async function fetchSourceLines(path: string): Promise<SourceRead> {
     credentials: 'same-origin',
   })
   if (!response.ok) return { ok: false, status: response.status }
+  const hash = response.headers?.get(HASH_HEADER) ?? null
   const lines = (await response.text()).split('\n').map((line) => line.replace(/\r$/, ''))
-  return { ok: true, lines }
+  return { ok: true, lines, hash }
+}
+
+/**
+ * The version of `path` the page was rendered from — or has written since —
+ * when `path` is the page's own note; `null` for any other file, or a page
+ * that carries no fingerprint.
+ */
+function renderedVersion(path: string): string | null {
+  if (path !== currentDocumentPath()) return null
+  if (documentHash !== undefined) return documentHash
+  const rendered = window.frontmatter?.['markdown_source_hash']
+  return typeof rendered === 'string' && rendered.length > 0 ? rendered : null
 }
 
 /**
@@ -229,7 +296,7 @@ async function fetchSourceLines(path: string): Promise<SourceRead> {
  */
 async function sourceLines(path: string): Promise<SourceRead> {
   const cached = lineCache.get(path)
-  if (cached) return { ok: true, lines: cached }
+  if (cached) return { ok: true, ...cached }
 
   // Single-flight: two boxes in one file clicked in quick succession would
   // otherwise each fetch it, and the slower read — holding bytes from before
@@ -245,9 +312,53 @@ async function sourceLines(path: string): Promise<SourceRead> {
   // Same hazard across a longer gap: a write may have cached a newer copy
   // while this read was in flight. What it holds always wins.
   const current = lineCache.get(path)
-  if (current) return { ok: true, lines: current }
-  if (fetched.ok) lineCache.set(path, fetched.lines)
+  if (current) return { ok: true, ...current }
+  if (!fetched.ok) return fetched
+
+  // The page's own note, read for the first time: its line numbers are the
+  // render's, so a file that is no longer the rendered version is a conflict
+  // — what is on line N now may be a different task. Not cached, so every
+  // attempt says the same until the page is reloaded.
+  const rendered = renderedVersion(path)
+  if (rendered !== null && fetched.hash !== null && fetched.hash !== rendered) {
+    return { ok: false, status: 409 }
+  }
+  lineCache.set(path, { lines: fetched.lines, hash: fetched.hash })
   return fetched
+}
+
+/**
+ * Record the version a successful write left `path` at — the response's
+ * `hash` — so the next write from this page names it. For the page's own note
+ * it is also the version the page now shows. `null` (no hash in the response)
+ * stops checking versions for that file rather than guessing one.
+ */
+export function noteSourceHash(path: string, hash: string | null): void {
+  const key = normalizePath(path)
+  const held = lineCache.get(key)
+  if (held) held.hash = hash
+  if (key === currentDocumentPath()) documentHash = hash
+}
+
+/**
+ * Run `write` after every earlier write to `path` from this page has settled.
+ *
+ * Each write sends the version its predecessor left (`base_hash`), so two
+ * writes to one file in flight at once would both name the version before
+ * either, and the server would refuse the second. Shared by every in-place
+ * writer — the flashcard deck receives it as a service — because a chain per
+ * writer would not see the other's writes.
+ */
+export function serializeWrite<T>(path: string, write: () => Promise<T>): Promise<T> {
+  const key = normalizePath(path)
+  const previous = writeChains.get(key) ?? Promise.resolve()
+  const result = previous.then(write)
+  const settled = result.catch(() => {})
+  writeChains.set(key, settled)
+  void settled.then(() => {
+    if (writeChains.get(key) === settled) writeChains.delete(key)
+  })
+  return result
 }
 
 /**
@@ -266,14 +377,19 @@ export const TOKEN_MESSAGE = 'Editing needs a token — open the editor (e) and 
  */
 const REFUSED_MESSAGE = 'This server is not accepting edits from this page.'
 
+/** A failed toggle, as {@link toggleTask} resolves it. */
+type ToggleFailure = { kind: TaskToggleFailure; message: string }
+
+/** The failure for a note that changed elsewhere, or is still downloading. */
+function staleFailure(kind: 'changed' | 'downloading'): ToggleFailure {
+  return { kind: kind === 'changed' ? 'conflict' : 'downloading', message: staleNoteMessage(kind) }
+}
+
 /** Human-readable reason for a failed write, by status. */
-function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other'; message: string } {
+function describeFailure(status: number): ToggleFailure {
+  const stale = staleKindForWrite(status)
+  if (stale) return staleFailure(stale)
   switch (status) {
-    case 409:
-      return {
-        kind: 'conflict',
-        message: 'That line changed on disk, so nothing was written.',
-      }
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
@@ -294,19 +410,22 @@ function describeFailure(status: number): { kind: 'conflict' | 'auth' | 'other';
  * different things here: `/.mbr/raw` is behind the identical `check_edit_access`
  * policy, so a token-protected server refuses the read before the write is ever
  * attempted, and reporting that as a generic "could not read the file" hides
- * the one thing the user can act on.
+ * the one thing the user can act on. A `404` means the note is no longer where
+ * this page found it, and a `503` that it is still downloading (the iOS app,
+ * after an edit on another device made the local copy a placeholder).
  */
-function describeReadFailure(status: number): {
-  kind: 'conflict' | 'auth' | 'other'
-  message: string
-} {
+function describeReadFailure(status: number): ToggleFailure {
+  const stale = staleKindForRead(status)
+  if (stale) return staleFailure(stale)
   switch (status) {
     case 401:
       return { kind: 'auth', message: TOKEN_MESSAGE }
     case 403:
       return { kind: 'auth', message: REFUSED_MESSAGE }
+    case 0:
+      return { kind: 'other', message: 'The server could not be reached.' }
     default:
-      return { kind: 'other', message: 'Could not read the file to update it.' }
+      return { kind: 'other', message: `Could not read the note to update it (${status}).` }
   }
 }
 
@@ -316,7 +435,12 @@ function describeReadFailure(status: number): {
  * Resolves rather than rejects on failure: every caller has a revert to run and
  * a message to show, and a rejected promise would make both easy to forget.
  */
-export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
+export function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
+  return serializeWrite(target.path, () => writeTask(target))
+}
+
+/** {@link toggleTask}, once the file has no other write from this page in flight. */
+async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
   const path = normalizePath(target.path)
   let read: SourceRead
   try {
@@ -336,7 +460,7 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
     // No such line means no `expected`, and sending a guess would either be
     // rejected as a conflict or — worse — match a line we never saw.
     lineCache.delete(path)
-    return { ok: false, kind: 'other', message: 'Could not read the file to update it.' }
+    return { ok: false, kind: 'conflict', message: NOTE_CHANGED_MESSAGE }
   }
 
   // Before the request, not after it: see `noteSelfWrite`.
@@ -348,7 +472,13 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
       method: 'POST',
       headers: editAuthHeaders({ 'Content-Type': 'application/json' }),
       credentials: 'same-origin',
-      body: JSON.stringify({ path, line: target.line, expected, to: target.to }),
+      body: JSON.stringify({
+        path,
+        line: target.line,
+        expected,
+        to: target.to,
+        base_hash: read.hash ?? undefined,
+      }),
     })
   } catch (err) {
     console.warn('Task toggle request failed:', err)
@@ -358,8 +488,9 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
   if (!response.ok) {
     const failure = describeFailure(response.status)
     // Our copy of the line is what the server just disagreed with; drop it so
-    // the retry re-reads rather than repeating the same rejected request.
-    if (failure.kind === 'conflict') lineCache.delete(path)
+    // the retry re-reads rather than repeating the same rejected request. A
+    // note still downloading is about to change under us too.
+    if (failure.kind === 'conflict' || failure.kind === 'downloading') lineCache.delete(path)
     if (response.status === 401) noteEditTokenRequired()
     return { ok: false, ...failure }
   }
@@ -369,14 +500,17 @@ export async function toggleTask(target: TaskToggleTarget): Promise<TaskToggleOu
   // back to the caller, which is the only place a new `@done(...)` can come
   // from now that the write no longer reloads the page.
   try {
-    const body = (await response.json()) as { line: number; text: string }
+    const body = (await response.json()) as { line: number; text: string; hash?: unknown }
     if (typeof body.text !== 'string') throw new Error('no text in the response')
     read.lines[target.line - 1] = body.text
+    noteSourceHash(path, typeof body.hash === 'string' ? body.hash : null)
     return { ok: true, text: body.text }
   } catch {
     // A response we cannot parse says nothing about the write, which the
-    // status code already confirmed. Re-read the file next time instead.
+    // status code already confirmed. Re-read the file next time instead — and
+    // stop checking the page's version, which moved to one we never learned.
     lineCache.delete(path)
+    noteSourceHash(path, null)
     return { ok: true }
   }
 }

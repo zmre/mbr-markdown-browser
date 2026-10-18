@@ -995,3 +995,156 @@ fn a_file_opened_in_place_does_not_look_at_its_folder_mbr() {
     );
     assert!(!refresh(&app).mbr_changed(), "outside the grant");
 }
+
+// ---- refresh: .mbr/ edited on another device ---------------------------------
+
+/// What an edit made on another device looks like in an iCloud Drive vault
+/// before the new version is downloaded: the file is in the cloud, only its
+/// placeholder is here.
+fn edit_in_the_cloud(path: &Path) {
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    std::fs::remove_file(path).unwrap();
+    std::fs::write(path.with_file_name(format!(".{name}.icloud")), "plist").unwrap();
+}
+
+/// The provider delivers the new version.
+fn arrive(path: &Path, text: &str) {
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    std::fs::remove_file(path.with_file_name(format!(".{name}.icloud"))).unwrap();
+    rewrite(path, text);
+}
+
+fn vault_with_config(prefix: &str) -> tempfile::TempDir {
+    let dir = vault();
+    std::fs::write(
+        dir.path().join(".mbr/config.toml"),
+        format!("title_prefix = \"{prefix} \"\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".mbr/user.css"), "body {}").unwrap();
+    dir
+}
+
+/// Regression (iPhone, iCloud vault, note open): `config.toml` edited on a
+/// Mac arrived dataless; the refresh read it on a fail-fast thread
+/// (`EDEADLK`), called that a broken configuration, and reopened the vault
+/// with the defaults and a "Configuration ignored" notice. A configuration
+/// still in the cloud is requested and waited for, and meanwhile the one in
+/// use stays — no error, no rebuild.
+#[test]
+fn a_config_edited_elsewhere_keeps_the_old_one_until_the_new_one_arrives() {
+    if !cfg!(target_vendor = "apple") {
+        return; // placeholders are only mapped on Apple platforms
+    }
+    let dir = vault_with_config("OLD");
+    let config = dir.path().join(".mbr/config.toml");
+    let (app, coordinator) = open_coordinated(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let before = current(&app.served);
+    assert!(get(&app, "/note/").text().contains("<title>OLD "));
+
+    edit_in_the_cloud(&config);
+    for _ in 0..2 {
+        let pending = refresh(&app);
+        assert!(!pending.mbr_changed(), "{pending:?}");
+        assert_eq!(pending.config_error, None, "{pending:?}");
+        assert_eq!(pending.mbr_downloads_requested, 1, "{pending:?}");
+        assert_eq!(app.config_error(), None);
+        assert!(Arc::ptr_eq(&before, &current(&app.served)), "no rebuild");
+        assert!(get(&app, "/note/").text().contains("<title>OLD "));
+        let errors = get(&app, "/note/errors.json").text();
+        assert!(!errors.contains("config_parse_error"), "{errors}");
+    }
+    let downloads = coordinator.downloads.lock().unwrap().clone();
+    assert!(
+        downloads.iter().any(|d| d.ends_with("/.mbr/config.toml")),
+        "{downloads:?}"
+    );
+
+    arrive(&config, "title_prefix = \"TEST \"\n");
+    let arrived = refresh(&app);
+    assert!(arrived.config_reloaded, "{arrived:?}");
+    assert_eq!(arrived.config_error, None);
+    assert_eq!(arrived.mbr_downloads_requested, 0, "{arrived:?}");
+    assert!(get(&app, "/note/").text().contains("<title>TEST "));
+}
+
+/// The common case: the provider delivers within the refresh's short wait,
+/// and that same refresh applies it.
+#[test]
+fn a_config_that_downloads_within_the_wait_is_applied_by_the_same_refresh() {
+    if !cfg!(target_vendor = "apple") {
+        return; // placeholders are only mapped on Apple platforms
+    }
+    let dir = vault_with_config("OLD");
+    let config = dir.path().join(".mbr/config.toml");
+    let (app, coordinator) = open_coordinated(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+
+    edit_in_the_cloud(&config);
+    let native = dir.path().canonicalize().unwrap().join(".mbr/config.toml");
+    coordinator.deliveries.lock().unwrap().insert(
+        native.to_string_lossy().into_owned(),
+        b"title_prefix = \"TEST \"\n".to_vec(),
+    );
+    let summary = refresh(&app);
+    assert!(summary.config_reloaded, "{summary:?}");
+    assert_eq!(summary.config_error, None);
+    assert_eq!(summary.mbr_downloads_requested, 0, "{summary:?}");
+    assert!(get(&app, "/note/").text().contains("<title>TEST "));
+}
+
+/// The same report's `user.css`: changed elsewhere, still in the cloud, then
+/// arrived. `assets_changed` — the app's cue to reload the page on screen —
+/// comes with the arrival, not before it (when the reload would have shown
+/// the old styles and nothing would reload it again).
+#[test]
+fn an_asset_edited_elsewhere_signals_a_reload_when_it_arrives() {
+    if !cfg!(target_vendor = "apple") {
+        return; // placeholders are only mapped on Apple platforms
+    }
+    let dir = vault_with_config("OLD");
+    let css = dir.path().join(".mbr/user.css");
+    let (app, coordinator) = open_coordinated(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+
+    edit_in_the_cloud(&css);
+    let pending = refresh(&app);
+    assert!(!pending.assets_changed, "{pending:?}");
+    assert_eq!(pending.mbr_downloads_requested, 1, "{pending:?}");
+    assert!(
+        coordinator
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d.ends_with("/.mbr/user.css"))
+    );
+
+    arrive(&css, "main h1 { color: red }");
+    let arrived = refresh(&app);
+    assert!(arrived.assets_changed, "{arrived:?}");
+    assert!(!arrived.config_reloaded && !arrived.templates_reloaded);
+    assert_eq!(arrived.mbr_downloads_requested, 0);
+    assert!(get(&app, "/.mbr/user.css").text().contains("color: red"));
+}
+
+/// A read that fails because the file is not downloaded (`EDEADLK` on the
+/// device, which figment reports as a parse failure) is no configuration
+/// error; the same failure with the file on the device is one.
+#[test]
+fn a_config_read_is_not_an_error_when_the_file_is_not_downloaded() {
+    let dir = vault();
+    std::fs::write(dir.path().join(".mbr/config.toml"), "this is [not toml\n").unwrap();
+    let vault = mbr_core::vault::MemVault::with_root(dir.path())
+        .with_file(".mbr/config.toml", "this is [not toml\n");
+    match LoadedConfig::read_through(&vault, dir.path()) {
+        ConfigRead::Loaded(loaded) => assert!(loaded.error.is_some(), "a real parse error"),
+        ConfigRead::NotDownloaded => panic!("the file is local"),
+    }
+    vault.set_availability(".mbr/config.toml", Availability::NotDownloaded);
+    assert!(matches!(
+        LoadedConfig::read_through(&vault, dir.path()),
+        ConfigRead::NotDownloaded
+    ));
+}
