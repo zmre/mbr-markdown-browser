@@ -280,6 +280,8 @@ bun run build      # Production build (tsc + vite)
 
 Built components are written to `crates/mbr-core/templates/components-js/` (gitignored; every vite config's `outDir`) and compiled into the binary via `include_bytes!`.
 
+After a layout or `theme.css` change, `components/scripts/check-overflow.sh <server-url>` (needs `agent-browser`, `curl`, `jq`; not in CI) reports every page that scrolls sideways, at 2400/1280/1024/768/390px in light and dark; `components/src/overflow.test.ts` pins the rules it found. See `docs/reference/development.md`.
+
 The build produces **nine bundles** — one main bundle plus eight lazy chunks, each with its own vite config:
 
 | Bundle | Vite config | Contents | Loaded |
