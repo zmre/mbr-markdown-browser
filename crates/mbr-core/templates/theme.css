@@ -255,6 +255,27 @@ body > footer {
     top: 0;
   }
 
+  /* An inline gutter for the three `.container` children of the grid.
+   *
+   * Pico's `.container` has no padding at or above 576px: it relies on its
+   * `max-width` being narrower than the viewport, so `margin-inline: auto`
+   * leaves slack on either side. In this grid the column is narrower than
+   * that max-width (1000px at a 1280px viewport, against Pico's 1200px), so the
+   * container fills the column exactly and there is no slack at all. Two things
+   * depend on there being some:
+   *   - Pico's `nav ul:first-child` / `nav ul:last-child` pull outward by
+   *     `--pico-nav-element-spacing-horizontal` (a negative margin), so the
+   *     header's last `<ul>` ran 10px past the viewport on every page;
+   *   - the marginalia indicator (`blockquote blockquote blockquote`) sits at
+   *     `left: 100%`, i.e. in the right-hand gutter.
+   * `--pico-spacing` is the gutter Pico itself gives `.container` on narrow
+   * screens, so this is also what the content looks like there. */
+  body.mbr-has-sidebar > header,
+  body.mbr-has-sidebar > main,
+  body.mbr-has-sidebar > footer {
+    padding-inline: var(--pico-spacing);
+  }
+
   body.mbr-has-sidebar > main {
     grid-area: main;
   }
@@ -816,7 +837,12 @@ blockquote blockquote blockquote::before {
   font-weight: 700;
   font-size: 1.5em;
   cursor: pointer;
-  padding: 0 4px;
+  /* 3px, not more: the indicator hangs in the right-hand gutter (`left: 100%`
+   * above), and the narrowest gutter it gets there is `--pico-spacing` (16px),
+   * in the sidebar layout. At 4px a side the box was 17-18px wide and scrolled
+   * the page sideways by the difference. (On a phone it moves inside the
+   * quote instead; see "Narrow Screens: Overflow".) */
+  padding: 0 3px;
   border-radius: var(--pico-border-radius);
 }
 
