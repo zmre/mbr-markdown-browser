@@ -58,6 +58,11 @@ jobs:
       - name: Check formatting
         run: nix build -L .#fmt
 
+      # Same flags and `.tomlfmt.toml` as the pre-commit hook; needs only
+      # cargo-sort and the manifests, not the toolchain.
+      - name: Check Cargo.toml sorting
+        run: nix build -L .#cargo-sort
+
   # Build frontend components - needed by lint and test jobs
   build-components:
     name: Build Components
@@ -595,9 +600,11 @@ jobs:
 
       - name: Detect components/ changes
         id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
+          base="$BASE_SHA"
           # Only relevant on pull_request events; skip on pushes to main.
           if [ -z "$base" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"

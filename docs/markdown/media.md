@@ -326,6 +326,19 @@ The CommonMark spec doesn't allow unescaped spaces in a `![caption](path)` desti
 
 Both work for all media types (images, video, audio, PDFs).
 
+### Linking to a Viewer Page
+
+Instead of embedding a file, you can link to mbr's viewer page for it:
+
+```markdown
+[Watch the demo](/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4)
+```
+
+The `pdfs`, `audio` and `images` viewers work the same way — see [Media Viewer
+Endpoints](../reference/cli.md#media-viewer-endpoints). These routes are
+addressed by their `path=` query rather than by a file, so mbr's link checkers
+leave them alone in both server and build mode.
+
 ## Performance Tips
 
 ### Video

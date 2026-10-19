@@ -116,6 +116,48 @@ pub fn is_external_url(url: &str) -> bool {
     url_scheme(url).is_some()
 }
 
+/// Returns `true` when `url` addresses one of mbr's own `?path=`-driven
+/// viewer routes (`/.mbr/videos/?path=…`, and the `pdfs` / `audio` / `images`
+/// siblings), in any spelling.
+///
+/// Those routes are addressed by their query, not by a file. A static build
+/// does write `.mbr/videos/index.html` and friends, so the canonical spelling
+/// happens to land on a real file — but the slashless one a hand author writes
+/// (`/.mbr/videos?path=…`) lands on the directory, and a file-based checker
+/// calls it a missing trailing slash although every static host redirects it
+/// and the server routes it directly. The server's `errors.json` checker never
+/// judges them (it skips all of `/.mbr/`, see `page_errors`); this is the
+/// narrower rule the static build's checker applies so the two agree on them.
+///
+/// The match is on a `.mbr` **path segment** rather than a `/.mbr/` prefix
+/// because the pipeline emits three spellings of the same link: `/.mbr/videos/`
+/// (server mode, site-absolute), `.mbr/videos/` (build, root page) and
+/// `../.mbr/videos/` (build, nested page). Requiring the `path=` parameter
+/// keeps it narrow: a genuinely broken `/.mbr/whatever/` link carrying no such
+/// query is still reported.
+///
+/// ```
+/// use mbr_core::url_path::is_mbr_query_route;
+///
+/// assert!(is_mbr_query_route("/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4"));
+/// assert!(is_mbr_query_route("../.mbr/pdfs?path=/docs/report.pdf"));
+/// assert!(!is_mbr_query_route("/.mbr/videos/"));
+/// ```
+pub fn is_mbr_query_route(url: &str) -> bool {
+    // Fragment first, then query: `#` closes a URI (RFC 3986 §3.5), so a `?`
+    // to its right is fragment text and never a query.
+    let before_fragment = url.split('#').next().unwrap_or_default();
+
+    before_fragment
+        .split_once('?')
+        .is_some_and(|(path, query)| {
+            path.split('/').any(|segment| segment == ".mbr")
+                && query
+                    .split('&')
+                    .any(|param| param.split_once('=').is_some_and(|(key, _)| key == "path"))
+        })
+}
+
 /// Returns the RFC 3986 scheme of `url` (without the trailing `:`), if any.
 ///
 /// The scheme grammar excludes `/`, `?` and `#`, so a colon that appears after
@@ -323,6 +365,55 @@ mod tests {
                 is_external_url(url),
                 *expected,
                 "is_external_url({url:?}) should be {expected}"
+            );
+        }
+    }
+    /// The exemption has to cover every spelling the pipeline emits and
+    /// nothing beyond it, so both halves of the predicate are pinned here:
+    /// a `.mbr` path segment *and* a `path=` query parameter.
+    #[test]
+    fn test_is_mbr_query_route_table() {
+        let cases: &[(&str, bool)] = &[
+            // The three spellings of one link: site-absolute (server mode),
+            // root-relative and nested-relative (static build).
+            ("/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4", true),
+            (".mbr/videos/?path=%2Fvideos%2Fdemo.mp4", true),
+            ("../.mbr/videos/?path=%2Fvideos%2Fdemo.mp4", true),
+            ("../../.mbr/audio/?path=/music/track.mp3", true),
+            // All four viewer routes, plus the slashless spelling a hand
+            // author writes (which is what the build used to flag).
+            ("/.mbr/pdfs/?path=/docs/report.pdf", true),
+            ("/.mbr/images/?path=/img/photo.png", true),
+            ("/.mbr/videos?path=/videos/demo.mp4", true),
+            // Extra parameters and ordering do not change the answer.
+            ("/.mbr/videos/?t=30&path=/videos/demo.mp4", true),
+            ("/.mbr/videos/?path=/videos/demo.mp4#t=30", true),
+            // A `.mbr` route with no query is a genuinely broken link and
+            // stays reportable — that is what keeps this narrow.
+            ("/.mbr/videos/", false),
+            ("/.mbr/whatever/", false),
+            // An unrelated query on an mbr route is not a viewer link.
+            ("/.mbr/videos/?v=1", false),
+            // `path` must be a parameter, not a prefix of one.
+            ("/.mbr/videos/?pathological=1", false),
+            // A `path=` query on an ordinary page is an ordinary page link.
+            ("/docs/page/?path=x", false),
+            // `.mbr` must be a whole segment, not a substring.
+            ("/notes/.mbrconfig/?path=x", false),
+            ("/my.mbr/videos/?path=x", false),
+            // `#` closes the URI, so this `?path=` is fragment text and there
+            // is no query at all.
+            ("/.mbr/videos/#frag?path=/videos/demo.mp4", false),
+            // Fragment-only and empty hrefs.
+            ("#section", false),
+            ("", false),
+        ];
+
+        for (url, expected) in cases {
+            assert_eq!(
+                is_mbr_query_route(url),
+                *expected,
+                "is_mbr_query_route({url:?}) should be {expected}"
             );
         }
     }

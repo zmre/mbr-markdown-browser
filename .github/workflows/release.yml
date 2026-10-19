@@ -183,12 +183,19 @@ jobs:
 
       - name: Extract and validate version
         id: version
+        env:
+          # workflow_dispatch inputs reach the script through the environment,
+          # never interpolated into it: `${{ }}` is substituted into the script
+          # text before bash parses it, so a crafted version string would run
+          # as shell code.
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Determine version from tag or input
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$INPUT_VERSION"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
@@ -211,7 +218,7 @@ jobs:
           # explicitly unchecked. Getting this wrong in either direction is
           # bad -- a silently unsigned tagged release, or a dry run that burns
           # a notarization slot and publishes a half-tested build.
-          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.dry_run }}" == "false" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" || "$INPUT_DRY_RUN" == "false" ]]; then
             SIGN=true
           else
             SIGN=false

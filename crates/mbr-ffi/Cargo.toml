@@ -12,6 +12,15 @@ documentation.workspace = true
 readme = "../../README.md"
 build = "build.rs"
 
+# UniFFI is only used by the Apple Swift shells: the macOS QuickLook extension
+# and the iOS app. Target-gate it to Apple platforms so Linux/Windows builds
+# never compile it, even transitively as a build-dependency. `target_vendor`,
+# not `target_os`, so the iOS staticlib (aarch64-apple-ios[-sim]) gets it too.
+# Runtime support only: the `cli` feature (bindings generator, clap) belongs to
+# the `uniffi-bindgen` binary in the `mbr` crate.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+uniffi.workspace = true
+
 [lib]
 # `staticlib` is `libmbr_ffi.a`, what the QuickLook extension links
 # (`-lmbr_ffi`); `lib` lets the `mbr` crate re-export it under `ffi`.
@@ -53,15 +62,6 @@ rayon = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
-
-# UniFFI is only used by the Apple Swift shells: the macOS QuickLook extension
-# and the iOS app. Target-gate it to Apple platforms so Linux/Windows builds
-# never compile it, even transitively as a build-dependency. `target_vendor`,
-# not `target_os`, so the iOS staticlib (aarch64-apple-ios[-sim]) gets it too.
-# Runtime support only: the `cli` feature (bindings generator, clap) belongs to
-# the `uniffi-bindgen` binary in the `mbr` crate.
-[target.'cfg(target_vendor = "apple")'.dependencies]
-uniffi.workspace = true
 
 # Apple-only, like the runtime dependency above. Cargo selects
 # build-dependencies by the *target* platform's cfg, so this is what lets

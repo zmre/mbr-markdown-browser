@@ -1092,6 +1092,28 @@
             inherit src;
             cargoExtraArgs = "--all";
           };
+
+          # Cargo.toml sort check: dependency tables sorted within their
+          # blank-line groups, tables in `.tomlfmt.toml`'s order (which keeps
+          # `[workspace]` first for scripts/bump-version.sh). Its own fileset,
+          # so it only rebuilds when a manifest changes, and cargo-sort reads
+          # the manifests itself: no cargo, no toolchain.
+          cargo-sort =
+            pkgs.runCommand "mbr-cargo-sort-check" {
+              nativeBuildInputs = [pkgs.cargo-sort];
+              src = pkgs.lib.fileset.toSource {
+                root = ./.;
+                fileset = pkgs.lib.fileset.unions [
+                  ./Cargo.toml
+                  ./.tomlfmt.toml
+                  (pkgs.lib.fileset.fileFilter (file: file.name == "Cargo.toml") ./crates)
+                ];
+              };
+            } ''
+              cd $src
+              cargo-sort sort --workspace --grouped --no-format --check
+              touch $out
+            '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           # Swift format check (Darwin only)
@@ -1337,7 +1359,7 @@
       # Checks run by `nix flake check`
       checks =
         {
-          inherit (packages) mbr-cli clippy fmt tests clippy-minimal tests-minimal;
+          inherit (packages) mbr-cli clippy fmt cargo-sort tests clippy-minimal tests-minimal;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           inherit (packages) swiftfmt swiftlint-check mbr;
@@ -1390,6 +1412,7 @@
             [
               cargo-watch
               cargo-audit
+              cargo-sort # Cargo.toml sorting (pre-commit hook, `nix build .#cargo-sort`)
               imagemagick
             ]
             ++ (pkgs.lib.optionals pkgs.stdenv.isDarwin [

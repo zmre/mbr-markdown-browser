@@ -2570,7 +2570,17 @@ impl Builder {
                         // `blob:`, so those valid hrefs were joined onto the
                         // source directory and reported as broken internal
                         // links (fatal under `--fail-on-broken-links`).
-                        if href.starts_with('#') || mbr_core::url_path::is_external_url(href) {
+                        //
+                        // mbr's own `?path=`-driven viewer routes are skipped
+                        // too: they are addressed by query, not by a file, so
+                        // the slashless spelling (`/.mbr/videos?path=…`) was
+                        // reported as a missing trailing slash while the
+                        // server's `errors.json` checker accepted it. See
+                        // `is_mbr_query_route`.
+                        if href.starts_with('#')
+                            || mbr_core::url_path::is_external_url(href)
+                            || mbr_core::url_path::is_mbr_query_route(href)
+                        {
                             continue;
                         }
 
@@ -3554,6 +3564,36 @@ mod tests {
             "Expected no broken links, got: {:?}",
             broken
         );
+    }
+
+    /// mbr's `?path=`-driven viewer routes are addressed by query, not by
+    /// filename. No `.mbr/videos/index.html` is generated in this fixture, so
+    /// without the filter every viewer href would be flagged — while the
+    /// genuinely missing target pins that ordinary validation still runs.
+    #[test]
+    fn test_validate_links_skips_mbr_query_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let html_path = temp_path.join("test.html");
+        std::fs::write(
+            &html_path,
+            r#"<html><body>
+            <a href="/.mbr/videos?path=%2Fvideos%2Fdemo.mp4">Slashless viewer</a>
+            <a href="/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4">Canonical viewer</a>
+            <a href=".mbr/pdfs/?path=%2Fdocs%2Freport.pdf">Root-relative viewer</a>
+            <a href="/nonexistent/">Genuinely broken</a>
+        </body></html>"#,
+        )
+        .unwrap();
+
+        let builder = test_builder(temp_path, root);
+        let broken = builder.validate_links();
+
+        assert_eq!(broken.len(), 1, "expected only the real break: {broken:?}");
+        assert_eq!(broken[0].link_url, "/nonexistent/");
     }
 
     #[test]
