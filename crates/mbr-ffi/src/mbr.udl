@@ -11,6 +11,12 @@ namespace mbr {
     [Throws=QuickLookError]
     PreviewDocument render_preview_with_config(string file_path, string? config_root, QuickLookConfig config);
 
+    // What a QuickLook thumbnail of a markdown file should show: its
+    // frontmatter cover image when that is a local image inside the
+    // repository, else the rendered top of the page. Markdown only.
+    [Throws=QuickLookError]
+    ThumbnailDocument render_thumbnail(string file_path, string? config_root);
+
     // Find the repository/config root directory by searching upward for markers
     // (.mbr, .git, .zk, .obsidian, book.toml, mkdocs.yml, docusaurus.config.js)
     // Falls back to the file's parent directory if no markers found
@@ -46,4 +52,13 @@ dictionary PreviewAttachment {
 dictionary PreviewDocument {
     string html;
     sequence<PreviewAttachment> attachments;
+};
+
+// What a thumbnail shows. `Image.path` is absolute, canonical, and already
+// proven to be a regular image file inside the repository - see
+// thumbnail_cover_image. `Page` is a preview document to snapshot.
+[Enum]
+interface ThumbnailDocument {
+    Image(string path);
+    Page(PreviewDocument document);
 };

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>MBR Thumbnail</string>
+	<key>CFBundleExecutable</key>
+	<string>MBRThumbnail</string>
+	<!--
+	  Same three Xcode build-setting tokens as MBRPreview/Info.plist, and the
+	  same reason: xcodebuild expands them in the dev flow, and the shipping
+	  Nix build (`mbr-quicklook` in flake.nix) substitutes them itself with
+	  -replace-fail, giving com.zmre.mbr.MBRThumbnail under the com.zmre.mbr
+	  host app.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MBRThumbnail</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.6</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>QLSupportedContentTypes</key>
+			<array>
+				<!--
+				  The preview extension's markdown entries, and only those:
+				  see MBRPreview/Info.plist for why each one is here. Unlike
+				  the preview, public.plain-text is deliberately absent. The
+				  system already draws good thumbnails for text and source
+				  files, and claiming them would route every .txt, .py and
+				  .swift icon in Finder through a web view.
+				-->
+				<string>net.daringfireball.markdown</string>
+				<string>public.markdown</string>
+				<string>dyn.ah62d4rv4ge81e5pe</string>
+			</array>
+			<!--
+			  Requests smaller than this many points go to the system's own
+			  icon instead of this extension. At list-view and sidebar sizes
+			  (16-32 pt) a page snapshot is an unreadable grey rectangle that
+			  costs a web-view render; the generic document icon is both
+			  clearer and free.
+			-->
+			<key>QLThumbnailMinimumDimension</key>
+			<integer>32</integer>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.quicklook.thumbnail</string>
+		<!--
+		  Must match the @objc(...) name in ThumbnailProvider.swift, for the
+		  same reason as the preview's: without it the class registers as
+		  "MBRThumbnail.ThumbnailProvider" and this lookup fails at run time.
+		-->
+		<key>NSExtensionPrincipalClass</key>
+		<string>ThumbnailProvider</string>
+	</dict>
+</dict>
+</plist>

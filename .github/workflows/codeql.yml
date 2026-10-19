@@ -112,40 +112,54 @@ jobs:
     # The Rust static library was already built by Nix above.
     # NOTE: This swiftc invocation mirrors flake.nix's mbr-quicklook derivation
     # (lines ~384-407). Keep both in sync when Swift sources change.
-    - name: Build Swift extension (CodeQL-traced)
+    - name: Build Swift extensions (CodeQL-traced)
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
         set -euo pipefail
         SDK_PATH="$(xcrun --show-sdk-path)"
         STATICLIB_PATH="$(pwd)/result/lib"
-        mkdir -p build/MBRPreview.appex/Contents/MacOS
 
-        swiftc \
-          -O \
-          -parse-as-library \
-          -application-extension \
-          -target arm64-apple-macos14.0 \
-          -sdk "$SDK_PATH" \
-          -L "$STATICLIB_PATH" \
-          -lmbr_ffi \
-          -framework Foundation \
-          -framework CoreFoundation \
-          -framework Security \
-          -framework SystemConfiguration \
-          -framework Cocoa \
-          -framework QuickLookUI \
-          -framework Quartz \
-          -framework UniformTypeIdentifiers \
-          -framework ExtensionKit \
-          -module-name MBRPreview \
-          -Xlinker -e -Xlinker _NSExtensionMain \
-          -Xlinker -dead_strip \
-          -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
-          -I apple/quicklook/Generated \
-          -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
-          apple/quicklook/Generated/mbr.swift \
-          apple/quicklook/MBRPreview/PreviewProvider.swift
+        # One function for both extensions (preview and thumbnail), as in
+        # flake.nix; extra arguments are frameworks and sources.
+        build_appex() {
+          local name="$1"
+          shift
+          mkdir -p "build/$name.appex/Contents/MacOS"
+          swiftc \
+            -O \
+            -parse-as-library \
+            -application-extension \
+            -target arm64-apple-macos14.0 \
+            -sdk "$SDK_PATH" \
+            -L "$STATICLIB_PATH" \
+            -lmbr_ffi \
+            -framework Foundation \
+            -framework CoreFoundation \
+            -framework Security \
+            -framework SystemConfiguration \
+            -framework Cocoa \
+            -framework QuickLookUI \
+            -framework Quartz \
+            -framework UniformTypeIdentifiers \
+            -framework ExtensionKit \
+            -module-name "$name" \
+            -Xlinker -e -Xlinker _NSExtensionMain \
+            -Xlinker -dead_strip \
+            -o "build/$name.appex/Contents/MacOS/$name" \
+            -I apple/quicklook/Generated \
+            -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
+            apple/quicklook/Generated/mbr.swift \
+            "$@"
+        }
+
+        build_appex MBRPreview apple/quicklook/MBRPreview/PreviewProvider.swift
+        build_appex MBRThumbnail \
+          -framework WebKit \
+          -framework QuickLookThumbnailing \
+          apple/quicklook/MBRThumbnail/ThumbnailProvider.swift \
+          apple/quicklook/MBRThumbnail/ThumbnailGeometry.swift \
+          apple/quicklook/MBRThumbnail/WebSnapshotter.swift
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4.38.2

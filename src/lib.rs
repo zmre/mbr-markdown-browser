@@ -44,6 +44,6 @@ pub use mbr_ssg::{BuildStats, Builder};
 pub use mbr_ffi::quicklook;
 #[cfg(all(feature = "ffi", target_vendor = "apple"))]
 pub use mbr_ffi::{
-    PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, find_config_root,
-    render_preview, render_preview_with_config,
+    PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, ThumbnailDocument,
+    find_config_root, render_preview, render_preview_with_config, render_thumbnail,
 };

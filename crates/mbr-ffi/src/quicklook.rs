@@ -91,6 +91,46 @@ const MAX_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
 /// shows - are the ones that fit.
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Most markdown a thumbnail renders (32 KiB), cut back to a line boundary.
+///
+/// A thumbnail only ever shows the top of the page, but WebKit lays out the
+/// whole document before it can snapshot any of it, and highlight.js colors
+/// every code block in it. 32 KiB is ten-plus screens of prose - far more than
+/// fits in the snapshot's one page - so the cap is invisible on the thumbnail
+/// and keeps a 1 MB note as fast as a short one.
+///
+/// Cutting can leave a code fence or a frontmatter block unclosed. The first
+/// only changes text below the visible page. The second needs a frontmatter
+/// block longer than the cap, at which point the note has no usable cover
+/// image either way.
+const MAX_THUMBNAIL_SOURCE_BYTES: usize = 32 * 1024;
+
+/// Frontmatter keys that may name a thumbnail's cover image, in priority order.
+///
+/// `cover` first because it says what it is for; `image` is the common
+/// OpenGraph-style key (and a person note's portrait), so it is the fallback.
+const COVER_IMAGE_KEYS: &[&str] = &["cover", "image"];
+
+/// Extensions a cover image may have to be used as the thumbnail itself.
+///
+/// The Swift side hands the file to `QLThumbnailReply(imageFileURL:)`, which
+/// decodes it with ImageIO, so this is the set ImageIO reads. SVG is absent on
+/// purpose: ImageIO does not rasterize it, and an undecodable cover would leave
+/// the file with no thumbnail at all instead of the rendered page.
+const COVER_IMAGE_EXTENSIONS: &[&str] = &[
+    "avif", "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp",
+];
+
+/// What thumbnails inline. Highlighting stays on so code looks the way it does
+/// in the preview. Mermaid is off: inlining it makes the page ~5.7 MB instead
+/// of ~380 KB, and WebKit parses all of it on every thumbnail. Measured on a
+/// warm web view, that took a thumbnail from 6-16 ms to 38-145 ms - before
+/// waiting for any diagram to finish rendering. A diagram shows as its source.
+const THUMBNAIL_CONFIG: QuickLookConfig = QuickLookConfig {
+    include_syntax_highlighting: true,
+    include_mermaid: false,
+};
+
 /// Extensions always previewed as markdown, whatever the repo config says.
 ///
 /// This is the same list `MBR.app` claims in its `Info.plist` (see the
@@ -157,6 +197,24 @@ pub struct PreviewDocument {
     pub html: String,
     /// Every local file the HTML refers to, in document order.
     pub attachments: Vec<PreviewAttachment>,
+}
+
+/// What a QuickLook thumbnail should show for a markdown file.
+///
+/// Exposed via UniFFI as an enum with associated values; the Swift thumbnail
+/// extension turns `Image` into `QLThumbnailReply(imageFileURL:)` and `Page`
+/// into a snapshot of the rendered HTML.
+#[derive(Debug, Clone)]
+pub enum ThumbnailDocument {
+    /// The note's frontmatter cover image, used as the thumbnail directly.
+    ///
+    /// `path` is absolute, canonical, and already proven to be a regular image
+    /// file inside the note's repository, no larger than
+    /// [`MAX_ATTACHMENT_BYTES`] - see [`thumbnail_cover_image`].
+    Image { path: String },
+    /// The rendered page, built exactly like a preview (same HTML, inline CSS
+    /// and attachments) from at most [`MAX_THUMBNAIL_SOURCE_BYTES`] of source.
+    Page { document: PreviewDocument },
 }
 
 /// Configuration options for QuickLook rendering.
@@ -256,107 +314,287 @@ pub fn render_preview_with_config(
     config_root: Option<String>,
     ql_config: QuickLookConfig,
 ) -> Result<PreviewDocument, QuickLookError> {
-    let path = PathBuf::from(&file_path);
-
-    if !path.exists() {
-        return Err(QuickLookError::FileReadError {
-            message: format!("File not found: {}", file_path),
-        });
-    }
-
-    // Find root directory (with .mbr folder) for custom themes
-    let root_path = if let Some(root) = config_root {
-        PathBuf::from(root)
-    } else {
-        config::find_root_dir(&path)
-    };
-
-    // Load config for markdown extensions
-    let config = Config::read(&root_path).unwrap_or_default();
+    let target = QuickLookTarget::locate(&file_path, config_root)?;
 
     // Non-markdown files must never reach the markdown parser: smart quotes,
     // emphasis and list markers would silently rewrite the user's source.
-    match preview_mode_for(&path, &config.markdown_extensions) {
+    match preview_mode_for(&target.path, &target.config.markdown_extensions) {
         PreviewMode::Markdown => {}
-        mode => return render_text_preview(&path, mode, &root_path, &ql_config, &config),
+        mode => {
+            return render_text_preview(
+                &target.path,
+                mode,
+                &target.root_path,
+                &ql_config,
+                &target.config,
+            );
+        }
     }
 
-    // Determine if this is an index file (affects link transformation)
-    let is_index_file = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|name| name == config.index_file);
-
-    let link_config = LinkTransformConfig {
-        markdown_extensions: config.markdown_extensions.clone(),
-        index_file: config.index_file.clone(),
-        is_index_file,
-        url_depth: None,
-        // QuickLook previews a single file with no repo index, so body
-        // wikilinks never resolve globally; the page URL is unused.
-        current_page_url: String::new(),
-        markdown_page_probe: None,
-    };
-
-    // Create a minimal tokio runtime for async markdown rendering
-    // Note: oEmbed is disabled (timeout=0) for faster preview
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| QuickLookError::MarkdownRenderError {
-            message: e.to_string(),
+    let source =
+        std::fs::read_to_string(&target.path).map_err(|e| QuickLookError::FileReadError {
+            message: format!("{}: {}", target.path.display(), e),
         })?;
+    let rendered = target.render_markdown(&source)?;
 
-    // QuickLook mode: server_mode=false, transcode disabled (transcode is server-only).
-    // Use empty tag sources for QuickLook (no wikilink transformation) and
-    // honor the user's mark_incomplete config (defaults to off in this preview).
-    let mark_incomplete = config.mark_incomplete.unwrap_or(false);
-    let incomplete_markers = config.incomplete_markers.clone();
-    let render_result = rt
-        .block_on(async {
-            markdown::render(
-                path.clone(),
-                &root_path,
-                0,
-                link_config,
-                false,                            // server_mode is false in QuickLook
-                false,                            // transcode is disabled in QuickLook
-                std::collections::HashSet::new(), // No tag sources in QuickLook
-                // Hardcoded off: a QuickLook preview is a static, scriptless
-                // panel with nothing to anchor a review selection to.
-                markdown::ReviewLines::Omit,
-                mark_incomplete,
-                &incomplete_markers,
-                None, // no repo wikilink index in QuickLook
-            )
-            .await
-        })
-        .map_err(|e| QuickLookError::MarkdownRenderError {
-            message: e.to_string(),
-        })?;
-    let frontmatter = render_result.frontmatter;
-    let headings = render_result.headings;
-    let html = render_result.html;
-
-    // Render through QuickLook template
     render_quicklook_template(
-        &html,
-        frontmatter,
-        headings,
-        &root_path,
+        &rendered.html,
+        rendered.frontmatter,
+        rendered.headings,
+        &target.root_path,
         &ql_config,
-        &config,
+        &target.config,
     )
 }
 
-/// Read up to [`MAX_TEXT_PREVIEW_BYTES`] from `path`.
+/// Render what a QuickLook *thumbnail* of a markdown file should show.
+///
+/// A frontmatter cover image (see [`COVER_IMAGE_KEYS`]) that names a local
+/// image inside the repository wins and is returned as
+/// [`ThumbnailDocument::Image`]. Otherwise the page is rendered exactly as the
+/// preview renders it - same template, theme and attachments - from the first
+/// [`MAX_THUMBNAIL_SOURCE_BYTES`] of the note, with [`THUMBNAIL_CONFIG`].
+///
+/// Only markdown is accepted. The thumbnail extension claims markdown types
+/// alone, so the system keeps drawing its own thumbnails for source and text
+/// files; anything else reaching this is an error rather than a `<pre>` page.
+pub fn render_thumbnail(
+    file_path: String,
+    config_root: Option<String>,
+) -> Result<ThumbnailDocument, QuickLookError> {
+    let target = QuickLookTarget::locate(&file_path, config_root)?;
+
+    if preview_mode_for(&target.path, &target.config.markdown_extensions) != PreviewMode::Markdown {
+        return Err(QuickLookError::MarkdownRenderError {
+            message: format!("Not a markdown file: {file_path}"),
+        });
+    }
+
+    let (bytes, truncated) = read_capped(&target.path, MAX_THUMBNAIL_SOURCE_BYTES)?;
+    let bytes = if truncated {
+        cut_at_line_boundary(&bytes)
+    } else {
+        &bytes[..]
+    };
+    // Lossy for the same reason as a text preview: a thumbnail that refuses a
+    // note over one bad byte is worse than one with a replacement character.
+    let source = String::from_utf8_lossy(bytes);
+
+    // The frontmatter comes out of the same render the page uses, so there is
+    // one YAML parse and one definition of what the frontmatter says.
+    let rendered = target.render_markdown(&source)?;
+
+    if let Some(path) = target.canonical_root().and_then(|canonical_root| {
+        thumbnail_cover_image(
+            &rendered.frontmatter,
+            &canonical_root,
+            target.path.parent().unwrap_or(&canonical_root),
+            &target.config.static_folder,
+        )
+    }) {
+        return Ok(ThumbnailDocument::Image { path });
+    }
+
+    render_quicklook_template(
+        &rendered.html,
+        rendered.frontmatter,
+        rendered.headings,
+        &target.root_path,
+        &THUMBNAIL_CONFIG,
+        &target.config,
+    )
+    .map(|document| ThumbnailDocument::Page { document })
+}
+
+/// The file being previewed, the repository it belongs to, and its config.
+///
+/// Shared by previews and thumbnails so both find the root, read the config and
+/// render markdown the same way.
+struct QuickLookTarget {
+    path: PathBuf,
+    root_path: PathBuf,
+    config: Config,
+}
+
+impl QuickLookTarget {
+    /// Resolve `file_path` and its repository root (`config_root`, or the
+    /// nearest marker above the file when absent) and read the root's config.
+    fn locate(file_path: &str, config_root: Option<String>) -> Result<Self, QuickLookError> {
+        let path = PathBuf::from(file_path);
+
+        if !path.exists() {
+            return Err(QuickLookError::FileReadError {
+                message: format!("File not found: {}", file_path),
+            });
+        }
+
+        // Find root directory (with .mbr folder) for custom themes
+        let root_path = config_root
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config::find_root_dir(&path));
+
+        // Load config for markdown extensions
+        let config = Config::read(&root_path).unwrap_or_default();
+
+        Ok(Self {
+            path,
+            root_path,
+            config,
+        })
+    }
+
+    /// The canonical repository root, or `None` if it cannot be resolved - in
+    /// which case nothing can be proven to be inside it.
+    fn canonical_root(&self) -> Option<PathBuf> {
+        self.root_path.canonicalize().ok()
+    }
+
+    /// Render `source` (this file's markdown, or the top of it) to HTML.
+    ///
+    /// Synchronous `render_str` rather than the async `render`: with oEmbed
+    /// disabled (timeout 0, as a preview always is) the two are the same
+    /// pipeline, and this avoids building a tokio runtime per preview.
+    fn render_markdown(
+        &self,
+        source: &str,
+    ) -> Result<markdown::MarkdownRenderResult, QuickLookError> {
+        let config = &self.config;
+
+        // Determine if this is an index file (affects link transformation)
+        let is_index_file = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name == config.index_file);
+
+        let link_transform_config = LinkTransformConfig {
+            markdown_extensions: config.markdown_extensions.clone(),
+            index_file: config.index_file.clone(),
+            is_index_file,
+            url_depth: None,
+            // QuickLook previews a single file with no repo index, so body
+            // wikilinks never resolve globally; the page URL is unused.
+            current_page_url: String::new(),
+            markdown_page_probe: None,
+        };
+
+        markdown::render_str(
+            source,
+            &self.path,
+            markdown::RenderOptions {
+                root_path: &self.root_path,
+                // oEmbed is disabled for a fast, network-free preview.
+                oembed_timeout_ms: 0,
+                link_transform_config,
+                oembed_cache: None,
+                // QuickLook is not server mode, and transcoding is server-only.
+                server_mode: false,
+                transcode_enabled: false,
+                // No tag sources in QuickLook (no wikilink transformation).
+                valid_tag_sources: std::collections::HashSet::new(),
+                // Hardcoded off: a QuickLook preview is a static, scriptless
+                // panel with nothing to anchor a review selection to.
+                review: markdown::ReviewLines::Omit,
+                // Honor the user's mark_incomplete config (defaults to off in
+                // this preview).
+                mark_incomplete: config.mark_incomplete.unwrap_or(false),
+                incomplete_markers: &config.incomplete_markers,
+                // No repo wikilink index in QuickLook.
+                wikilink_index: None,
+            },
+        )
+        .map_err(|e| QuickLookError::MarkdownRenderError {
+            message: e.to_string(),
+        })
+    }
+}
+
+/// The longest prefix of `bytes` that ends at a line break, or all of `bytes`
+/// when it has none (one enormous line is still worth a thumbnail).
+///
+/// Cutting at `\n` keeps every line that survives whole, so markdown that
+/// depends on line structure - headings, list markers, fences - is not split
+/// mid-construct, and a UTF-8 sequence is never cut in half (`\n` cannot occur
+/// inside one).
+fn cut_at_line_boundary(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(bytes, |newline| &bytes[..=newline])
+}
+
+/// The cover image a thumbnail should use instead of the rendered page.
+///
+/// Tries each of [`COVER_IMAGE_KEYS`] in order and returns the first that names
+/// a usable image: a string that is not a URL with a scheme, resolves to a
+/// regular file canonically inside `canonical_root`, has one of
+/// [`COVER_IMAGE_EXTENSIONS`], and is non-empty and no larger than
+/// [`MAX_ATTACHMENT_BYTES`]. A root-relative value (`/images/x.png`) resolves
+/// the way a page's root-relative asset does (direct, then the static folder);
+/// any other value is relative to the note's own directory, as it is for a
+/// contact portrait.
+///
+/// # Security
+///
+/// The value is attacker-controlled frontmatter and the returned path is read by
+/// the thumbnail extension, whose sandbox can read anything the user can. So the
+/// same containment as attachments applies - [`contained_canonical`] on the
+/// resolved path, never on the authored string - and the extension test runs
+/// on the *canonical* name, so a `cover.png` symlink to a non-image is refused.
+fn thumbnail_cover_image(
+    frontmatter: &markdown::SimpleMetadata,
+    canonical_root: &Path,
+    note_dir: &Path,
+    static_folder: &str,
+) -> Option<String> {
+    COVER_IMAGE_KEYS
+        .iter()
+        .filter_map(|key| frontmatter.get(*key)?.as_str())
+        .find_map(|value| {
+            resolve_cover_image(value.trim(), canonical_root, note_dir, static_folder)
+        })
+}
+
+/// One candidate of [`thumbnail_cover_image`], resolved and vetted.
+fn resolve_cover_image(
+    value: &str,
+    canonical_root: &Path,
+    note_dir: &Path,
+    static_folder: &str,
+) -> Option<String> {
+    if value.is_empty() || mbr_core::url_path::url_scheme(value).is_some() {
+        return None;
+    }
+
+    let resolved = if value.starts_with('/') {
+        resolve_asset_path(canonical_root, static_folder, value)
+    } else {
+        contained_canonical(canonical_root, &note_dir.join(value))
+    }?;
+
+    let is_image = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|extension| {
+            COVER_IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        });
+    let size = std::fs::metadata(&resolved).ok()?.len();
+
+    (is_image && size > 0 && size <= MAX_ATTACHMENT_BYTES)
+        .then(|| resolved.to_str().map(str::to_string))
+        .flatten()
+}
+
+/// Read up to `cap` bytes from `path`.
 ///
 /// Returns the bytes and whether the file was longer than the cap. Uses
 /// `Read::take` rather than reading the file and truncating, so a huge file is
 /// never pulled into memory in the first place. One extra byte is requested so
 /// "exactly at the cap" is distinguishable from "longer than the cap" without a
 /// second `metadata()` syscall (and without the TOCTOU a stat-then-read has).
-fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), QuickLookError> {
+fn read_capped(path: &Path, cap: usize) -> Result<(Vec<u8>, bool), QuickLookError> {
     use std::io::Read;
 
     let file = std::fs::File::open(path).map_err(|e| QuickLookError::FileReadError {
@@ -364,14 +602,14 @@ fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), QuickLookError> {
     })?;
 
     let mut bytes = Vec::new();
-    file.take(MAX_TEXT_PREVIEW_BYTES as u64 + 1)
+    file.take(cap as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| QuickLookError::FileReadError {
             message: format!("{}: {}", path.display(), e),
         })?;
 
-    let truncated = bytes.len() > MAX_TEXT_PREVIEW_BYTES;
-    bytes.truncate(MAX_TEXT_PREVIEW_BYTES);
+    let truncated = bytes.len() > cap;
+    bytes.truncate(cap);
     Ok((bytes, truncated))
 }
 
@@ -425,7 +663,7 @@ fn render_text_preview(
     ql_config: &QuickLookConfig,
     config: &Config,
 ) -> Result<PreviewDocument, QuickLookError> {
-    let (bytes, truncated) = read_capped(path)?;
+    let (bytes, truncated) = read_capped(path, MAX_TEXT_PREVIEW_BYTES)?;
     let text = String::from_utf8_lossy(&bytes);
     let html = text_to_pre_html(&text, mode, truncated);
 
@@ -1973,11 +2211,14 @@ mod tests {
 
         let small = dir.path().join("small.txt");
         std::fs::write(&small, b"abc").unwrap();
-        assert_eq!(read_capped(&small).unwrap(), (b"abc".to_vec(), false));
+        assert_eq!(
+            read_capped(&small, MAX_TEXT_PREVIEW_BYTES).unwrap(),
+            (b"abc".to_vec(), false)
+        );
 
         let big = dir.path().join("big.txt");
         std::fs::write(&big, vec![b'z'; MAX_TEXT_PREVIEW_BYTES + 10]).unwrap();
-        let (bytes, truncated) = read_capped(&big).unwrap();
+        let (bytes, truncated) = read_capped(&big, MAX_TEXT_PREVIEW_BYTES).unwrap();
         assert!(truncated);
         assert_eq!(bytes.len(), MAX_TEXT_PREVIEW_BYTES);
     }
@@ -1989,6 +2230,255 @@ mod tests {
             result.unwrap_err(),
             QuickLookError::FileReadError { .. }
         ));
+    }
+
+    // MARK: thumbnails
+
+    /// A repository (marked with `.mbr/`) holding `note.md` with `contents`.
+    /// Returns the temp dir, the canonical repo root and the note's path.
+    fn thumbnail_repo(note: &str, contents: &str) -> (tempfile::TempDir, PathBuf, String) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".mbr")).unwrap();
+        let note_path = repo.join(note);
+        std::fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        std::fs::write(&note_path, contents).unwrap();
+        let canonical_root = repo.canonicalize().unwrap();
+        let note_path = note_path.to_str().unwrap().to_string();
+        (temp_dir, canonical_root, note_path)
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn thumbnail_image(document: ThumbnailDocument) -> String {
+        match document {
+            ThumbnailDocument::Image { path } => path,
+            ThumbnailDocument::Page { .. } => panic!("expected a cover image, got a page"),
+        }
+    }
+
+    fn thumbnail_page(document: ThumbnailDocument) -> PreviewDocument {
+        match document {
+            ThumbnailDocument::Page { document } => document,
+            ThumbnailDocument::Image { path } => panic!("expected a page, got image {path}"),
+        }
+    }
+
+    #[test]
+    fn test_thumbnail_uses_relative_cover_image() {
+        let (_tmp, root, note) =
+            thumbnail_repo("posts/note.md", "---\ncover: images/cover.png\n---\n# Hi\n");
+        write_file(&root.join("posts/images/cover.png"), b"png bytes");
+
+        let path = thumbnail_image(render_thumbnail(note, None).unwrap());
+        assert_eq!(
+            path,
+            root.join("posts/images/cover.png").to_str().unwrap(),
+            "a relative cover resolves from the note's own directory"
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_uses_root_relative_cover_image() {
+        let (_tmp, root, note) = thumbnail_repo(
+            "posts/note.md",
+            "---\nimage: /images/cover.jpg\n---\n# Hi\n",
+        );
+        write_file(&root.join("images/cover.jpg"), b"jpg bytes");
+
+        let path = thumbnail_image(render_thumbnail(note, None).unwrap());
+        assert_eq!(path, root.join("images/cover.jpg").to_str().unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_root_relative_cover_falls_back_to_static_folder() {
+        let (_tmp, root, note) =
+            thumbnail_repo("note.md", "---\ncover: /images/cover.webp\n---\n# Hi\n");
+        write_file(&root.join("static/images/cover.webp"), b"webp bytes");
+
+        let path = thumbnail_image(render_thumbnail(note, None).unwrap());
+        assert_eq!(
+            path,
+            root.join("static/images/cover.webp").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_cover_key_wins_over_image_and_falls_through() {
+        let (_tmp, root, note) = thumbnail_repo(
+            "note.md",
+            "---\ncover: cover.png\nimage: portrait.png\n---\n# Hi\n",
+        );
+        write_file(&root.join("cover.png"), b"cover");
+        write_file(&root.join("portrait.png"), b"portrait");
+        let path = thumbnail_image(render_thumbnail(note.clone(), None).unwrap());
+        assert_eq!(path, root.join("cover.png").to_str().unwrap());
+
+        // An unusable `cover` is skipped, not fatal: `image` is tried next.
+        std::fs::remove_file(root.join("cover.png")).unwrap();
+        let path = thumbnail_image(render_thumbnail(note, None).unwrap());
+        assert_eq!(path, root.join("portrait.png").to_str().unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_cover_outside_repo_falls_back_to_page() {
+        let (tmp, _root, note) =
+            thumbnail_repo("note.md", "---\ncover: ../outside.png\n---\n# Hi\n");
+        write_file(&tmp.path().join("outside.png"), b"png bytes");
+
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_cover_symlink_out_of_repo_falls_back_to_page() {
+        let (tmp, root, note) = thumbnail_repo("note.md", "---\ncover: cover.png\n---\n# Hi\n");
+        let outside = tmp.path().join("outside.png");
+        write_file(&outside, b"png bytes");
+        std::os::unix::fs::symlink(&outside, root.join("cover.png")).unwrap();
+
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_cover_symlink_to_non_image_falls_back_to_page() {
+        // The extension is judged on the canonical name, not the authored one.
+        let (_tmp, root, note) = thumbnail_repo("note.md", "---\ncover: cover.png\n---\n# Hi\n");
+        write_file(&root.join("secret.txt"), b"not an image");
+        std::os::unix::fs::symlink(root.join("secret.txt"), root.join("cover.png")).unwrap();
+
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_non_image_cover_falls_back_to_page() {
+        let (_tmp, root, note) = thumbnail_repo("note.md", "---\ncover: doc.pdf\n---\n# Hi\n");
+        write_file(&root.join("doc.pdf"), b"%PDF");
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+
+        // SVG is an image to a browser but not to ImageIO.
+        let (_tmp, root, note) = thumbnail_repo("note.md", "---\ncover: art.svg\n---\n# Hi\n");
+        write_file(&root.join("art.svg"), b"<svg/>");
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_missing_or_empty_cover_falls_back_to_page() {
+        let (_tmp, _root, note) = thumbnail_repo("note.md", "---\ncover: nope.png\n---\n# Hi\n");
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+
+        let (_tmp, root, note) = thumbnail_repo("note.md", "---\ncover: empty.png\n---\n# Hi\n");
+        write_file(&root.join("empty.png"), b"");
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_oversized_cover_falls_back_to_page() {
+        let (_tmp, root, note) = thumbnail_repo("note.md", "---\ncover: big.png\n---\n# Hi\n");
+        let big = std::fs::File::create(root.join("big.png")).unwrap();
+        // Sparse: costs no disk, but stats as one byte over the cap.
+        big.set_len(MAX_ATTACHMENT_BYTES + 1).unwrap();
+
+        thumbnail_page(render_thumbnail(note, None).unwrap());
+    }
+
+    #[test]
+    fn test_thumbnail_remote_or_non_string_cover_falls_back_to_page() {
+        for frontmatter in [
+            "cover: https://example.com/cover.png",
+            "cover: data:image/png;base64,AAAA",
+            "cover: [a.png, b.png]",
+            "cover: 42",
+            "cover: \"   \"",
+        ] {
+            let (_tmp, _root, note) =
+                thumbnail_repo("note.md", &format!("---\n{frontmatter}\n---\n# Hi\n"));
+            thumbnail_page(render_thumbnail(note, None).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_thumbnail_page_matches_preview_of_short_note() {
+        // Under the cap a thumbnail page is the preview page, built with the
+        // thumbnail's asset choices: same template, theme and attachments.
+        let (_tmp, root, note) =
+            thumbnail_repo("note.md", "# Title\n\nSome text.\n\n![x](/images/a.png)\n");
+        write_file(&root.join("images/a.png"), b"png bytes");
+
+        let page = thumbnail_page(render_thumbnail(note.clone(), None).unwrap());
+        let preview = render_preview_with_config(note, None, THUMBNAIL_CONFIG).unwrap();
+        assert_eq!(page.html, preview.html);
+        assert_eq!(page.attachments, preview.attachments);
+        assert_eq!(page.attachments.len(), 1);
+    }
+
+    #[test]
+    fn test_thumbnail_page_leaves_out_mermaid() {
+        let (_tmp, _root, note) = thumbnail_repo("note.md", "# Title\n");
+        let page = thumbnail_page(render_thumbnail(note.clone(), None).unwrap());
+        let preview = render_preview(note, None).unwrap();
+        assert!(
+            page.html.len() + 1024 * 1024 < preview.html.len(),
+            "the thumbnail should not inline the mermaid library ({} vs {} bytes)",
+            page.html.len(),
+            preview.html.len()
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_caps_long_note_at_a_line_boundary() {
+        let line = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n";
+        let filler = line.repeat(MAX_THUMBNAIL_SOURCE_BYTES / line.len() + 10);
+        let contents = format!("# Top of the note\n\n{filler}\nTHE-VERY-END\n");
+        let (_tmp, _root, note) = thumbnail_repo("note.md", &contents);
+
+        let page = thumbnail_page(render_thumbnail(note, None).unwrap());
+        assert!(page.html.contains("Top of the note"));
+        assert!(
+            !page.html.contains("THE-VERY-END"),
+            "text past the cap must not be rendered"
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_keeps_whole_short_note() {
+        let (_tmp, _root, note) = thumbnail_repo("note.md", "# Top\n\nmiddle\n\nTHE-VERY-END");
+        let page = thumbnail_page(render_thumbnail(note, None).unwrap());
+        assert!(page.html.contains("THE-VERY-END"));
+    }
+
+    #[test]
+    fn test_cut_at_line_boundary() {
+        assert_eq!(cut_at_line_boundary(b"one\ntwo\nthr"), b"one\ntwo\n");
+        assert_eq!(cut_at_line_boundary(b"one\n"), b"one\n");
+        // No line break at all: one long line is kept rather than dropped.
+        assert_eq!(cut_at_line_boundary(b"no newline"), b"no newline");
+        assert_eq!(cut_at_line_boundary(b""), b"");
+        // A multi-byte character straddling the cap is cut whole.
+        let cut = "héllo\nwörld".as_bytes();
+        let cut = &cut[..cut.len() - 3];
+        assert_eq!(
+            std::str::from_utf8(cut_at_line_boundary(cut)).unwrap(),
+            "héllo\n"
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_rejects_non_markdown() {
+        let (_tmp, root, _note) = thumbnail_repo("note.md", "# Hi\n");
+        let script = root.join("script.py");
+        write_file(&script, b"print('hi')\n");
+
+        let error = render_thumbnail(script.to_str().unwrap().to_string(), None).unwrap_err();
+        assert!(matches!(error, QuickLookError::MarkdownRenderError { .. }));
+    }
+
+    #[test]
+    fn test_thumbnail_missing_file_is_an_error() {
+        let error = render_thumbnail("/nonexistent/note.md".to_string(), None).unwrap_err();
+        assert!(matches!(error, QuickLookError::FileReadError { .. }));
     }
 
     #[test]

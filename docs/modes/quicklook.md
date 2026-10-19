@@ -1,12 +1,12 @@
 ---
 title: QuickLook Preview
-description: Preview markdown and plain text in macOS Finder
+description: Preview markdown and plain text in macOS Finder, and show rendered markdown thumbnails
 order: 4
 ---
 
 # QuickLook Preview (macOS)
 
-mbr includes a QuickLook extension for macOS, allowing you to preview markdown - and plain text files - directly in Finder.
+mbr includes two QuickLook extensions for macOS: a preview extension, which renders markdown (and plain text files) when you press Space in Finder, and a thumbnail extension, which draws markdown files' icons in Finder as miniatures of the rendered page.
 
 ## What is QuickLook?
 
@@ -24,6 +24,47 @@ With mbr's QuickLook extension, markdown files render as formatted HTML instead 
 - **Table of contents**: In the QuickLook info panel
 - **Frontmatter display**: Shows metadata in a clean format
 - **Plain text and source files**: Shown verbatim, with syntax highlighting where available
+
+## Thumbnails
+
+Finder's icon and gallery views, the column-view preview pane, and Get Info show a *thumbnail* of a file rather than a preview. For markdown files, mbr's thumbnail extension draws one of two things:
+
+- **The cover image**, when the note's frontmatter names one as `cover:` or `image:` (checked in that order). The value may be relative to the note (`cover: images/cover.png`) or root-relative (`cover: /images/cover.png`, which also resolves through the `static_folder` overlay). It must be a local image (PNG, JPEG, GIF, WebP, HEIC/HEIF, AVIF, TIFF or BMP; not SVG) inside the repository and no larger than 16 MB. A URL, a file outside the repository, or anything else that does not qualify is skipped, and the next key or the rendered page is used instead.
+- **The rendered page** otherwise: the top of the same page the preview shows, with your `.mbr/theme.css` and `user.css`, laid out at 800 pixels wide on a letter-shaped sheet and scaled down.
+
+A few things differ from the preview, on purpose:
+
+| | Preview | Thumbnail |
+|-|---------|-----------|
+| File types | Markdown and plain text | Markdown only. Text and source files keep the system's own thumbnails |
+| Appearance | Follows light/dark mode | Always light. macOS caches a thumbnail once, whatever the mode was when it was drawn, and document thumbnails are paper-white by convention |
+| Remote images and embeds | Loaded | Never loaded (they show as empty boxes): the thumbnail's web view blocks every remote load |
+| Mermaid diagrams | Rendered | Shown as their source |
+| Source read | Whole file | The first 32 KB, which is far more than fits on the visible page |
+| Smallest size | n/a | Icons under 32 points (list view, sidebar) use the generic markdown icon |
+
+Thumbnails are drawn by the same WebKit engine as previews. The extension keeps two web views alive between requests, so after the first thumbnail (around 200 ms while the web view starts) each one takes about 10 ms. If a page cannot be drawn within a few seconds, or anything else fails, Finder shows the generic document icon instead; mbr never caches an error message as a thumbnail.
+
+### Turning thumbnails on
+
+After installing or updating `MBR.app` and launching it once:
+
+1. **Log out and back in, or restart.** macOS's thumbnail service only looks for new thumbnail extensions when it starts, so a freshly installed or updated one is not used until then. Previews do not have this problem.
+2. **Make sure the extension is enabled.** The Quick Look checkbox in **System Settings → General → Login Items & Extensions → Quick Look** reflects mbr's preview extension and may not turn thumbnails on. If thumbnails still do not appear, enable the thumbnail extension directly:
+   ```bash
+   pluginkit -e use -i com.zmre.mbr.MBRThumbnail
+   ```
+3. **Clear old thumbnails** with `qlmanage -r cache` (see below).
+
+### Refreshing old thumbnails
+
+Finder caches thumbnails, so markdown files it has already drawn keep their old plain-text icons until the cache is cleared:
+
+```bash
+qlmanage -r cache
+```
+
+The same applies after you change a note's theme or cover image: Finder redraws a thumbnail when the file itself changes, not when a file it references does.
 
 ## Plain Text Previews
 
@@ -83,8 +124,9 @@ The QuickLook extension is bundled with the macOS app.
 If the extension doesn't appear:
 
 ```bash
-# List registered QuickLook preview extensions
+# List registered QuickLook preview and thumbnail extensions
 pluginkit -mv -p com.apple.quicklook.preview | grep mbr
+pluginkit -mv -p com.apple.quicklook.thumbnail | grep mbr
 
 # Reload QuickLook
 qlmanage -r
@@ -242,6 +284,19 @@ If markdown files show as plain text:
    `pluginkit -mv -p com.apple.quicklook.preview`, and disable one with
    `pluginkit -e ignore -i <identifier>` (restore with `-e default`).
 
+### Markdown Icons Still Show Plain Text
+
+1. **Log out and back in** (or restart) after installing or updating `MBR.app`: the thumbnail service only discovers new thumbnail extensions when it starts.
+2. **Enable the extension**: `pluginkit -e use -i com.zmre.mbr.MBRThumbnail` (the System Settings Quick Look checkbox may only cover previews). See [Turning thumbnails on](#turning-thumbnails-on).
+3. **Clear the thumbnail cache** with `qlmanage -r cache`. Icons Finder drew before the extension was enabled are cached.
+4. **Check the timings.** Each thumbnail is logged with how long it took:
+   ```bash
+   log stream --info --predicate 'subsystem == "com.zmre.mbr.MBRThumbnail"'
+   ```
+   No lines at all means Finder is not using the extension (steps 1 and 2). `thumbnail failed` lines say why a file fell back to the generic icon.
+
+`qlmanage -t` is not a reliable test: on recent macOS it draws text-like files with a built-in renderer and never consults thumbnail extensions.
+
 ### Text Files Preview With the System Renderer
 
 For `.txt` and source files, mbr's extension competes with the previewer built into macOS, and both claim `public.plain-text`. If you get Apple's plain preview instead of mbr's, confirm the extension is enabled in **System Settings -> General -> Login Items & Extensions -> Quick Look**, then reset the cache with `qlmanage -r && qlmanage -r cache`.
@@ -276,12 +331,13 @@ If macOS disables the extension:
 
 ## Removing the Extension
 
-To uninstall the QuickLook extension:
+To uninstall the QuickLook extensions:
 
-The extension lives inside `MBR.app` and is not separately installable, so
-there is no standalone plugin file to delete — removing the app removes the
-extension. To keep the app but stop it previewing, either turn it off in
-**System Settings → General → Login Items & Extensions → Quick Look**, or:
+Both extensions live inside `MBR.app` and are not separately installable, so
+there is no standalone plugin file to delete — removing the app removes them.
+To keep the app but stop it drawing thumbnails, turn **MBR Thumbnail** off in
+**System Settings → General → Login Items & Extensions → Quick Look**. To stop
+it previewing, turn off **MBR Preview** there, or:
 
 ```bash
 # Find where it is registered

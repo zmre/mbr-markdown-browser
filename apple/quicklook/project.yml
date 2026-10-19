@@ -57,6 +57,9 @@ targets:
       - target: MBRPreview
         embed: true
         codeSign: true
+      - target: MBRThumbnail
+        embed: true
+        codeSign: true
 
   # QuickLook Preview Extension
   MBRPreview:
@@ -91,8 +94,39 @@ targets:
         OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap
     dependencies: []
 
+  # QuickLook Thumbnail Extension (Finder icons, gallery view, Get Info).
+  # A separate appex because one extension serves one extension point; it
+  # links the same libmbr_ffi.a, dead-stripped, plus WebKit for the snapshot.
+  MBRThumbnail:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: MBRThumbnail
+        createIntermediateGroups: true
+      - path: Generated/mbr.swift
+        createIntermediateGroups: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.mbr.quicklook-host.MBRThumbnail
+        INFOPLIST_FILE: MBRThumbnail/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: MBRThumbnail/MBRThumbnail.entitlements
+        SKIP_INSTALL: YES
+        LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
+        OTHER_LDFLAGS: $(inherited) -lmbr_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa -framework WebKit -framework QuickLookThumbnailing
+        HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
+        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap
+    dependencies: []
+
   # Test target for MBRPreview extension
-  # Note: We include MBRPreview sources directly since app extensions don't export symbols
+  # Note: We include MBRPreview and MBRThumbnail sources directly since app
+  # extensions don't export symbols. Their Info.plist and entitlements are
+  # excluded: a test bundle generates its own plist and needs no entitlements.
   MBRPreviewTests:
     type: bundle.unit-test
     platform: macOS
@@ -102,6 +136,11 @@ targets:
         createIntermediateGroups: true
       - path: MBRPreview
         createIntermediateGroups: true
+      - path: MBRThumbnail
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+          - "*.entitlements"
       - path: Generated/mbr.swift
         createIntermediateGroups: true
     settings:
@@ -115,7 +154,7 @@ targets:
         LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
         # Inherit search paths from MBRPreview target
         LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../target/release
-        OTHER_LDFLAGS: $(inherited) -lmbr_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa
+        OTHER_LDFLAGS: $(inherited) -lmbr_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Cocoa -framework WebKit -framework QuickLookThumbnailing
         HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         SWIFT_INCLUDE_PATHS: $(inherited) $(PROJECT_DIR)/Generated
         OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/mbrFFI.modulemap
@@ -127,6 +166,7 @@ schemes:
       targets:
         MBRQuickLookHost: all
         MBRPreview: all
+        MBRThumbnail: all
         MBRPreviewTests: [test]
     run:
       config: Debug
