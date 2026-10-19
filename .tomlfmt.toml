@@ -1,0 +1,20 @@
+# cargo-sort configuration (`cargo sort --workspace --grouped --no-format`).
+#
+# `workspace` must stay the first table of the root Cargo.toml:
+# scripts/bump-version.sh and release.yml's validate-version read the release
+# version as the first `^version = "..."` line, which is `[workspace.package]`'s.
+# cargo-sort's default order would put `[package]` first.
+table_order = [
+    "workspace",
+    "package",
+    "lib",
+    "features",
+    "dependencies",
+    "target",
+    "build-dependencies",
+    "dev-dependencies",
+    "bin",
+    "test",
+    "profile",
+    "bench",
+]

@@ -4,9 +4,9 @@
 [workspace]
 members = [
     "crates/mbr-core",
+    "crates/mbr-ffi",
     "crates/mbr-server",
     "crates/mbr-ssg",
-    "crates/mbr-ffi",
 ]
 # Plain `cargo build`/`test`/`clippy` from the repository root cover every
 # crate, as they did when this was one crate. `--workspace` is equivalent.
@@ -37,9 +37,9 @@ documentation = "https://zmre.github.io/mbr-markdown-browser/"
 # Internal crates. `version` is what crates.io records; the exact pin keeps
 # the published crates in lockstep (scripts/bump-version.sh rewrites it).
 mbr-core = { path = "crates/mbr-core", version = "=0.6.2" }
+mbr-ffi = { path = "crates/mbr-ffi", version = "=0.6.2" }
 mbr-server = { path = "crates/mbr-server", version = "=0.6.2" }
 mbr-ssg = { path = "crates/mbr-ssg", version = "=0.6.2" }
-mbr-ffi = { path = "crates/mbr-ffi", version = "=0.6.2" }
 
 aho-corasick = "1.1"
 # Editing feature: password/token hashing for the edit endpoint
@@ -63,13 +63,13 @@ glob = "0.3.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 html-escape = "0.2.13"
+# `MbrError::Http`'s `From<http::Error>`. Already in the tree via reqwest and
+# axum at this major version, so naming it adds no crate.
+http = "1"
 # `Range` parsing for files served through a vault (mbr-server's vault_body),
 # identical to what tower-http's ServeFile accepts. Already in the tree at this
 # version via tower-http, so naming it adds no crate.
 http-range-header = "0.4"
-# `MbrError::Http`'s `From<http::Error>`. Already in the tree via reqwest and
-# axum at this major version, so naming it adds no crate.
-http = "1"
 # Image processing with minimal features (only needed formats)
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 itertools = "0.15.0"
@@ -129,9 +129,11 @@ webpki-roots = "1"
 yaml-rust2 = { version = "0.13", default-features = false }
 
 # GUI stack (the `mbr` binary's `gui` feature).
-wry = { version = "0.57", features = ["devtools"] }
-tao = "0.37.0"
+gio = "0.22"
+gtk = "0.18"
 muda = "0.21"
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
 # Do NOT add the `common-controls-v6` feature: it wires the Windows/Linux
 # folder-or-file prompt (`open_picker.rs`) to `TaskDialogIndirect`, which is
 # exported only by the manifest-activated v6 `comctl32.dll` — a Rust binary
@@ -140,11 +142,9 @@ muda = "0.21"
 # (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
 # that show the dialog. See `open_picker.rs`'s module doc comment.
 rfd = "0.17"
-gio = "0.22"
-gtk = "0.18"
+tao = "0.37.0"
 windows-sys = "0.61.2"
-objc2-app-kit = { version = "0.3.2", default-features = false }
-objc2-foundation = { version = "0.3.2", default-features = false }
+wry = { version = "0.57", features = ["devtools"] }
 
 # Dev/bench only.
 criterion = { version = "0.8", features = ["async_tokio"] }
@@ -241,9 +241,9 @@ ffi = ["dep:mbr-ffi", "dep:uniffi"]
 
 [dependencies]
 mbr-core.workspace = true
+mbr-ffi = { workspace = true, optional = true }
 mbr-server = { workspace = true, optional = true }
 mbr-ssg = { workspace = true, optional = true }
-mbr-ffi = { workspace = true, optional = true }
 
 clap = { workspace = true, optional = true }
 ffmpeg-next = { workspace = true, optional = true }
@@ -257,14 +257,14 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 url.workspace = true
+
 # GUI dependencies (optional, enabled by default "gui" feature)
-wry = { workspace = true, optional = true }
-tao = { workspace = true, optional = true }
 muda = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
+tao = { workspace = true, optional = true }
+wry = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-muda = { workspace = true, features = ["gtk3"], optional = true }
 # `external_open`: gio's AppInfo::launch_default_for_uri is the desktop-portal
 # aware equivalent of xdg-open without the process spawn. Pinned to the gio the
 # GTK stack (gtk/webkit2gtk under tao/wry/muda) already uses, so this adds no
@@ -275,15 +275,7 @@ gio = { workspace = true, optional = true }
 # Same situation as gio above — gtk 0.18.2 is already in the tree via
 # tao/muda/webkit2gtk at this exact version, so naming it adds no crate.
 gtk = { workspace = true, optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many
-# times over; only the feature gates below are new, and those add no crate.
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-], optional = true }
+muda = { workspace = true, features = ["gtk3"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `external_open`: NSWorkspace::openURL, the only way a WKWebView-hosted app can
@@ -299,6 +291,15 @@ objc2-foundation = { workspace = true, features = [
     "std",
     "NSString",
     "NSURL",
+], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many
+# times over; only the feature gates below are new, and those add no crate.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ], optional = true }
 
 # The `uniffi-bindgen` binary only (ffi feature). Its `cli` feature is what
@@ -329,6 +330,12 @@ path = "src/main.rs"
 required-features = ["cli"]
 bench = false
 
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["ffi"]
+bench = false
+
 # Integration tests that drive a subsystem the lib only has with its feature.
 # Declared explicitly (autotests still discovers the rest) so a
 # `--no-default-features` test run skips them instead of failing to compile.
@@ -344,12 +351,6 @@ required-features = ["ssg"]
 [[test]]
 name = "cli_integration"
 required-features = ["cli"]
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"
-required-features = ["ffi"]
-bench = false
 
 [profile.release]
 opt-level = 3

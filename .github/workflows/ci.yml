@@ -58,6 +58,11 @@ jobs:
       - name: Check formatting
         run: nix build -L .#fmt
 
+      # Same flags and `.tomlfmt.toml` as the pre-commit hook; needs only
+      # cargo-sort and the manifests, not the toolchain.
+      - name: Check Cargo.toml sorting
+        run: nix build -L .#cargo-sort
+
   # Build frontend components - needed by lint and test jobs
   build-components:
     name: Build Components

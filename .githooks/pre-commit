@@ -33,27 +33,41 @@ rust_files_staged() {
 # Format Rust files and re-stage them
 format_rust_files() {
     if ! rust_files_staged; then
+        info "Skipping Rust formatting: no Rust files staged"
         return 0
     fi
 
     info "Formatting Rust files..."
 
-    # Get list of staged .rs files
-    local staged_rs_files
+    # Get list of staged .rs and Cargo.toml files
+    local staged_rs_files staged_manifests
     staged_rs_files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+    staged_manifests=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)Cargo\.toml$' || true)
 
-    if [[ -z "$staged_rs_files" ]]; then
-        return 0
+    if [[ -n "$staged_rs_files" ]]; then
+        if ! cargo fmt --all 2>&1; then
+            error "cargo fmt failed"
+            return 1
+        fi
     fi
 
-    # Run cargo fmt
-    if ! cargo fmt 2>&1; then
-        error "cargo fmt failed"
-        return 1
+    # Sort dependency tables. Flags and `.tomlfmt.toml` must match flake.nix's
+    # `cargo-sort` check (CI): grouped keeps blank-line groups and their
+    # comments together, no-format leaves array layout alone, and the config's
+    # table order keeps `[workspace]` first for scripts/bump-version.sh.
+    if [[ -n "$staged_manifests" ]]; then
+        if ! command -v cargo-sort >/dev/null 2>&1; then
+            error "cargo-sort not found (it is in the nix dev shell)"
+            return 1
+        fi
+        if ! cargo sort --workspace --grouped --no-format 2>&1; then
+            error "cargo sort failed"
+            return 1
+        fi
     fi
 
     # Re-stage the formatted files
-    for file in $staged_rs_files; do
+    for file in $staged_rs_files $staged_manifests; do
         if [[ -f "$file" ]]; then
             git add "$file"
         fi
@@ -65,6 +79,7 @@ format_rust_files() {
 # Run cargo clippy on staged Rust changes
 check_rust_quality() {
     if ! rust_files_staged; then
+        info "Skipping clippy: no Rust files staged"
         return 0
     fi
 

@@ -18,6 +18,10 @@ Before completing ANY Rust code changes, you MUST run these checks:
 # Format all Rust code (every crate in the workspace)
 cargo fmt --all
 
+# Sort Cargo.toml dependency tables (every manifest in the workspace).
+# Always these flags: they are what CI (`nix build .#cargo-sort`) checks.
+cargo sort --workspace --grouped --no-format
+
 # Check for lint issues (warnings are errors)
 # IMPORTANT: Use --all-targets to check test code too (matches CI)
 cargo clippy --workspace --all-targets -- -D warnings
@@ -28,8 +32,9 @@ cargo test --workspace
 
 **These are blocking requirements.** Do not consider Rust work complete until:
 1. `cargo fmt --all` has been run (code is formatted)
-2. `cargo clippy --workspace --all-targets -- -D warnings` passes with no errors
-3. `cargo test --workspace` passes
+2. `cargo sort --workspace --grouped --no-format --check` passes (manifests are sorted). `--grouped` sorts within blank-line groups, so a comment heading a group stays with it — put a new dependency in the group it belongs to. `.tomlfmt.toml` sets the table order; it is what keeps `[workspace]` the first table of the root `Cargo.toml` (see Workspace Crates: bump-version.sh reads the first `^version = ` line). `cargo-sort` is in the dev shell
+3. `cargo clippy --workspace --all-targets -- -D warnings` passes with no errors
+4. `cargo test --workspace` passes
 
 The workspace's `default-members` are all of its crates, so the plain `cargo fmt`/`clippy`/`test` cover them too; `--all`/`--workspace` makes it explicit, and is what CI and the flake pass.
 
@@ -768,7 +773,7 @@ nix run .#release
 nix flake check
 ```
 
-The flake builds with crane over the whole workspace: `cargoArtifacts`/`cargoArtifactsMinimal` (deps-only, `--workspace`, zstd `-19`) feed `.#clippy`/`.#tests` (`--workspace`) and `.#clippy-minimal`/`.#tests-minimal`; `.#mbr-cli` builds `-p mbr-markdown-browser`; `.#mbr-quicklook-staticlib` builds `-p mbr-ffi --lib` and installs `lib/libmbr_ffi.a`, which `.#mbr-quicklook` links `-lmbr_ffi`; `.#fmt` is `cargo fmt --all`. The version comes from `workspace.package.version`. The mkDummySrc `required-features` workaround patches only the root `Cargo.toml` (the members declare none). The macOS `mbr` derivation assembles the app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
+The flake builds with crane over the whole workspace: `cargoArtifacts`/`cargoArtifactsMinimal` (deps-only, `--workspace`, zstd `-19`) feed `.#clippy`/`.#tests` (`--workspace`) and `.#clippy-minimal`/`.#tests-minimal`; `.#mbr-cli` builds `-p mbr-markdown-browser`; `.#mbr-quicklook-staticlib` builds `-p mbr-ffi --lib` and installs `lib/libmbr_ffi.a`, which `.#mbr-quicklook` links `-lmbr_ffi`; `.#fmt` is `cargo fmt --all`; `.#cargo-sort` is the manifest sort check (cargo-sort only, over a fileset of the `Cargo.toml`s and `.tomlfmt.toml`). The version comes from `workspace.package.version`. The mkDummySrc `required-features` workaround patches only the root `Cargo.toml` (the members declare none). The macOS `mbr` derivation assembles the app bundle and performs ad-hoc code signing. Release archives are created in `release/`.
 
 **Note:** Code signing verification may fail in Nix sandbox environment due to metadata changes, but the app still runs correctly.
 
