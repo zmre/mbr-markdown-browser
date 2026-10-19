@@ -236,6 +236,12 @@ If mbr reports broken links:
    `docs/guide.md` resolves relative to `docs/`, so `../../x` already leaves the
    repository
 
+Links to mbr's own media viewers — `/.mbr/videos/?path=…` and the `pdfs`,
+`audio` and `images` siblings, with or without the trailing slash — are exempt
+from link checking. They are addressed by their `path=` query rather than by a
+file in the output, so there is nothing for the checker to look for. A
+`/.mbr/…` link with no `path=` query is still checked.
+
 ### Large Asset Files
 
 For repositories with large assets (videos, etc.):

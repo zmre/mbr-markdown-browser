@@ -175,7 +175,11 @@ axum routes with no file behind them, and `/.mbr/theme.css`-style assets fall
 back to the compiled-in defaults when the repository has no `.mbr/` folder. The
 path resolver never sees any of it, so its verdict would be a 404 claim about a
 URL that serves 200. A static build has no such gap — it writes that whole tree
-itself, so those files are checked like any other.
+itself, so those files are checked like any other — with one exception shared
+with the server: links to the media viewers carrying a `path=` query
+(`url_path::is_mbr_query_route`) are skipped, since they are addressed by query
+rather than by a file and the slashless spelling (`/.mbr/videos?path=…`) would
+otherwise be reported as missing its trailing slash.
 
 ## Design Decisions
 

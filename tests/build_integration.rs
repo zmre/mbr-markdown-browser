@@ -1118,6 +1118,35 @@ async fn test_build_detects_page_link_without_trailing_slash() {
     );
 }
 
+/// mbr's own `?path=`-driven viewer routes are addressed by query, not by a
+/// file, so the build's checker must leave them alone the way the server's
+/// `errors.json` checker does. The slashless spelling is the one a hand author
+/// writes, and it used to be reported (it lands on the generated
+/// `.mbr/videos/` directory without its trailing slash). The genuinely missing
+/// sibling pins that ordinary validation still runs on the same page.
+#[tokio::test]
+async fn test_build_skips_mbr_viewer_query_routes() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n\
+         <a href=\"/.mbr/videos?path=%2Fvideos%2Fdemo.mp4\">slashless viewer</a>\n\
+         <a href=\"/.mbr/videos/?path=%2Fvideos%2Fdemo.mp4\">canonical viewer</a>\n\
+         <a href=\"../../.mbr/pdfs?path=%2Fdocs%2Freport.pdf\">relative viewer</a>\n\
+         <a href=\"/.mbr/audio?t=3&path=%2Fmusic%2Ftrack.mp3\">audio viewer</a>\n\n\
+         [Watch](/.mbr/videos?path=%2Fvideos%2Fdemo.mp4)\n\n\
+         [Broken](/missing/)\n",
+    );
+
+    let (_output, stats) = build_site_with_stats(&repo).await;
+
+    assert_eq!(
+        stats.broken_links, 1,
+        "only the genuinely missing page may be reported, got {}",
+        stats.broken_links
+    );
+}
+
 /// A `..` chain that climbs out of the output directory produced no diagnostic
 /// while the resolver silently clamped it.
 #[tokio::test]
