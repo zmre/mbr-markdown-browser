@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	The thumbnail extension's sandbox: the same grants as the preview's.
+
+	com.apple.security.app-sandbox
+	com.apple.security.files.user-selected.read-only
+	  Required for the same reasons as in MBRPreview.entitlements: PlugInKit
+	  loads no unsandboxed extension, and the second is what lets the
+	  extension consume QuickLook's sandbox extension for the file whose
+	  thumbnail it was asked for.
+
+	com.apple.security.temporary-exception.files.absolute-path.read-only
+	  Also as in the preview, and for the same files: a page's images, the
+	  frontmatter cover image, and .mbr/theme.css, .mbr/user.css and
+	  .mbr/config.toml at the repository root all live outside the one-file
+	  grant. MBRPreview.entitlements explains why the grant is "/" rather than
+	  home-relative.
+
+	  What keeps a note from reading anything with it is in code. Rust
+	  (src/quicklook.rs) is the only thing that turns note content into a path,
+	  and it hands over only paths it has proven are regular files inside the
+	  note's repository: the attachment list (collect_preview_attachments) and
+	  the cover image (thumbnail_cover_image). The page itself can name no
+	  file. Its cid: URLs are answered by AttachmentSchemeHandler from that list
+	  alone, and file: URLs are blocked outright by the content rule list in
+	  WebSnapshotter.swift.
+
+	com.apple.security.network.client
+	  Not for the page: a thumbnail still loads no remote content. It is here
+	  because WebKit will not run without it. A sandboxed WKWebView's helper
+	  processes check the host's entitlements, and without this key the GPU
+	  process exits the moment it starts:
+
+	    com.apple.WebKit.GPU: Application does not have permission to
+	    communicate with network resources.
+
+	  - so every snapshot failed in Finder and the generic icon was shown.
+	  An unsandboxed test harness never sees this; only the real extension
+	  does.
+
+	  Remote content is kept out by the content rule list in
+	  WebSnapshotter.swift instead ("mbr-thumbnail-no-network"), which blocks
+	  every load that is not cid:, data:, about: or blob:, http(s) and file:
+	  included. That rule is now the only barrier, and it is what keeps a
+	  thumbnail from waiting on a remote server (a remote image would hold the
+	  page's load event, and so the snapshot, multiplied by every note in a
+	  Finder window) or caching content that later changes.
+	  ThumbnailProviderTests pins that it compiles and blocks remote loads.
+
+	Like the preview's file, this is the only source of these keys for the Nix
+	build, which signs with exactly what is written here. flake.nix's
+	postFixup verifies all three keys are present on the signed appex.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/</string>
+	</array>
+</dict>
+</plist>

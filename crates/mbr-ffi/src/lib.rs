@@ -37,6 +37,6 @@ pub mod mobile;
 
 #[cfg(target_vendor = "apple")]
 pub use quicklook::{
-    PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, find_config_root,
-    render_preview, render_preview_with_config,
+    PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, ThumbnailDocument,
+    find_config_root, render_preview, render_preview_with_config, render_thumbnail,
 };

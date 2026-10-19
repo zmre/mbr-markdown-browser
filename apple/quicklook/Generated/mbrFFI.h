@@ -258,6 +258,11 @@ RustBuffer uniffi_mbr_ffi_fn_func_render_preview(RustBuffer file_path, RustBuffe
 RustBuffer uniffi_mbr_ffi_fn_func_render_preview_with_config(RustBuffer file_path, RustBuffer config_root, RustBuffer config, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_FUNC_RENDER_THUMBNAIL
+#define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_FN_FUNC_RENDER_THUMBNAIL
+RustBuffer uniffi_mbr_ffi_fn_func_render_thumbnail(RustBuffer file_path, RustBuffer config_root, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_MBR_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_MBR_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_mbr_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -533,6 +538,12 @@ uint16_t uniffi_mbr_ffi_checksum_func_render_preview(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_RENDER_PREVIEW_WITH_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_RENDER_PREVIEW_WITH_CONFIG
 uint16_t uniffi_mbr_ffi_checksum_func_render_preview_with_config(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_RENDER_THUMBNAIL
+#define UNIFFI_FFIDEF_UNIFFI_MBR_FFI_CHECKSUM_FUNC_RENDER_THUMBNAIL
+uint16_t uniffi_mbr_ffi_checksum_func_render_thumbnail(void
     
 );
 #endif

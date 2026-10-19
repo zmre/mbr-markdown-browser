@@ -86,7 +86,9 @@ chmod -R u+w "$APP"
 # one modified after signing is reported as "damaged" with no way through.
 # Sign innermost-out; `--deep` is deprecated for signing on macOS 13+, so nested
 # code is signed explicitly, but --deep is still fine for verification.
-ENTITLEMENTS="$(cd "$(dirname "$0")/.." && pwd)/apple/quicklook/MBRPreview/MBRPreview.entitlements"
+# Each QuickLook extension is signed with its own entitlements file, at
+# apple/quicklook/<name>/<name>.entitlements.
+QUICKLOOK_DIR="$(cd "$(dirname "$0")/.." && pwd)/apple/quicklook"
 
 # Strip build-machine metadata (quarantine, provenance xattrs) before signing.
 xattr -cr "$APP"
@@ -111,8 +113,14 @@ if [ -f "$APP/Contents/Frameworks/libpdfium.dylib" ]; then
     sign "$APP/Contents/Frameworks/libpdfium.dylib"
 fi
 
-if [ -d "$APP/Contents/PlugIns/MBRPreview.appex" ]; then
-    if [ -f "$ENTITLEMENTS" ]; then
+# Sign one QuickLook extension (MBRPreview: previews; MBRThumbnail: Finder
+# thumbnails) with its entitlements, if the bundle has it.
+sign_appex() {
+    local name="$1"
+    local appex="$APP/Contents/PlugIns/$name.appex"
+    local entitlements="$QUICKLOOK_DIR/$name/$name.entitlements"
+    [ -d "$appex" ] || return 0
+    if [ -f "$entitlements" ]; then
         # The sandbox grant in the entitlements file is a *restricted*
         # entitlement, and AMFI will not grant one to ad-hoc signed code on the
         # strength of its signature alone - so an ad-hoc build additionally
@@ -125,20 +133,22 @@ if [ -d "$APP/Contents/PlugIns/MBRPreview.appex" ]; then
         # from the same file for the same reason - two hand-maintained copies
         # of the grants would drift.
         if [ "$REAL_SIGN" -eq 1 ]; then
-            sign "$APP/Contents/PlugIns/MBRPreview.appex" --entitlements "$ENTITLEMENTS"
+            sign "$appex" --entitlements "$entitlements"
         else
-            cp "$ENTITLEMENTS" "$WORK/appex-adhoc.entitlements"
+            cp "$entitlements" "$WORK/$name-adhoc.entitlements"
             # Dots escaped: plutil reads this as a key *path*, so the
             # unescaped name means four nested dictionaries and fails.
             plutil -insert 'com\.apple\.security\.get-task-allow' -bool true \
-                "$WORK/appex-adhoc.entitlements"
-            sign "$APP/Contents/PlugIns/MBRPreview.appex" \
-                --entitlements "$WORK/appex-adhoc.entitlements"
+                "$WORK/$name-adhoc.entitlements"
+            sign "$appex" --entitlements "$WORK/$name-adhoc.entitlements"
         fi
     else
-        sign "$APP/Contents/PlugIns/MBRPreview.appex"
+        sign "$appex"
     fi
-fi
+}
+
+sign_appex MBRPreview
+sign_appex MBRThumbnail
 
 sign "$APP"
 codesign --verify --deep --strict "$APP"

@@ -705,9 +705,15 @@
             ];
 
             buildPhase = ''
-              mkdir -p build/MBRPreview.appex/Contents/MacOS
-
-              # Compile the QuickLook extension using swiftc from nixpkgs
+              # Two extensions, one per QuickLook extension point: MBRPreview
+              # (com.apple.quicklook.preview, the spacebar panel) and
+              # MBRThumbnail (com.apple.quicklook.thumbnail, Finder icons,
+              # gallery view, Get Info). Both link the same staticlib with the
+              # same flags, so one function builds either and the two cannot
+              # drift; the arguments after the name are extra frameworks and
+              # the extension's own sources.
+              #
+              # Compile with swiftc from nixpkgs.
               # App extensions should be MH_EXECUTE (executables), not MH_BUNDLE
               # -parse-as-library: Don't look for main() function
               # -application-extension: Mark as app extension (required for sandboxing)
@@ -715,53 +721,70 @@
               # -dead_strip: drop every function and constant the extension never
               # reaches. ld pulls in each libmbr_ffi.a member that resolves a symbol and
               # keeps all of it otherwise, embedded web assets included.
-              swiftc \
-                -O \
-                -parse-as-library \
-                -application-extension \
-                -target ${swiftTarget} \
-                -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
-                -L ${packages.mbr-quicklook-staticlib}/lib \
-                -lmbr_ffi \
-                -framework Foundation \
-                -framework CoreFoundation \
-                -framework Security \
-                -framework SystemConfiguration \
-                -framework Cocoa \
-                -framework QuickLookUI \
-                -framework Quartz \
-                -framework UniformTypeIdentifiers \
-                -framework ExtensionKit \
-                -module-name MBRPreview \
-                -Xlinker -e -Xlinker _NSExtensionMain \
-                -Xlinker -dead_strip \
-                -o build/MBRPreview.appex/Contents/MacOS/MBRPreview \
-                -I apple/quicklook/Generated \
-                -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
-                apple/quicklook/Generated/mbr.swift \
+              build_appex() {
+                name=$1
+                shift
+                mkdir -p build/$name.appex/Contents/MacOS
+                swiftc \
+                  -O \
+                  -parse-as-library \
+                  -application-extension \
+                  -target ${swiftTarget} \
+                  -sdk ${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+                  -L ${packages.mbr-quicklook-staticlib}/lib \
+                  -lmbr_ffi \
+                  -framework Foundation \
+                  -framework CoreFoundation \
+                  -framework Security \
+                  -framework SystemConfiguration \
+                  -framework Cocoa \
+                  -framework QuickLookUI \
+                  -framework Quartz \
+                  -framework UniformTypeIdentifiers \
+                  -framework ExtensionKit \
+                  -module-name $name \
+                  -Xlinker -e -Xlinker _NSExtensionMain \
+                  -Xlinker -dead_strip \
+                  -o build/$name.appex/Contents/MacOS/$name \
+                  -I apple/quicklook/Generated \
+                  -Xcc -fmodule-map-file=apple/quicklook/Generated/mbrFFI.modulemap \
+                  apple/quicklook/Generated/mbr.swift \
+                  "$@"
+
+                # Copy Info.plist to complete the .appex bundle structure.
+                #
+                # The plist is shared with the Xcode dev project (project.yml),
+                # so it holds $(...) build settings that only xcodebuild expands.
+                # This build has to expand them itself or the shipped bundle gets
+                # a literal "$(PRODUCT_BUNDLE_IDENTIFIER)" as its identifier,
+                # which is not a valid bundle ID and is not prefixed by the host
+                # app's, so macOS will not load the extension.
+                #
+                # --replace-fail: if a token is renamed on either side this build
+                # fails loudly instead of silently shipping the unexpanded text.
+                cp apple/quicklook/$name/Info.plist build/$name.appex/Contents/Info.plist
+                substituteInPlace build/$name.appex/Contents/Info.plist \
+                  --replace-fail '$(PRODUCT_BUNDLE_IDENTIFIER)' "com.zmre.mbr.$name" \
+                  --replace-fail '$(MARKETING_VERSION)' '${version}' \
+                  --replace-fail '$(CURRENT_PROJECT_VERSION)' '${version}'
+              }
+
+              build_appex MBRPreview \
                 apple/quicklook/MBRPreview/PreviewProvider.swift
 
-              # Copy Info.plist to complete the .appex bundle structure.
-              #
-              # The plist is shared with the Xcode dev project (project.yml),
-              # so it holds $(...) build settings that only xcodebuild expands.
-              # This build has to expand them itself or the shipped bundle gets
-              # a literal "$(PRODUCT_BUNDLE_IDENTIFIER)" as its identifier,
-              # which is not a valid bundle ID and is not prefixed by the host
-              # app's, so macOS will not load the extension.
-              #
-              # --replace-fail: if a token is renamed on either side this build
-              # fails loudly instead of silently shipping the unexpanded text.
-              cp apple/quicklook/MBRPreview/Info.plist build/MBRPreview.appex/Contents/Info.plist
-              substituteInPlace build/MBRPreview.appex/Contents/Info.plist \
-                --replace-fail '$(PRODUCT_BUNDLE_IDENTIFIER)' 'com.zmre.mbr.MBRPreview' \
-                --replace-fail '$(MARKETING_VERSION)' '${version}' \
-                --replace-fail '$(CURRENT_PROJECT_VERSION)' '${version}'
+              # WebKit: the thumbnail is a snapshot of the preview's HTML in an
+              # offscreen WKWebView. QuickLookThumbnailing: QLThumbnailProvider.
+              build_appex MBRThumbnail \
+                -framework WebKit \
+                -framework QuickLookThumbnailing \
+                apple/quicklook/MBRThumbnail/ThumbnailProvider.swift \
+                apple/quicklook/MBRThumbnail/ThumbnailGeometry.swift \
+                apple/quicklook/MBRThumbnail/WebSnapshotter.swift
             '';
 
             installPhase = ''
               mkdir -p $out
-              cp -R build/MBRPreview.appex $out/
+              cp -R build/MBRPreview.appex build/MBRThumbnail.appex $out/
             '';
           };
         }
@@ -827,8 +850,10 @@
                   cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
                   cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
 
-                  # QuickLook extension
-                  cp -R ${packages.mbr-quicklook}/MBRPreview.appex $out/Applications/MBR.app/Contents/PlugIns/
+                  # QuickLook extensions: previews and thumbnails
+                  cp -R ${packages.mbr-quicklook}/MBRPreview.appex \
+                    ${packages.mbr-quicklook}/MBRThumbnail.appex \
+                    $out/Applications/MBR.app/Contents/PlugIns/
 
                   # NOTE: signing does NOT happen here. It is the last thing the
                   # derivation does, in postFixup below - see the comment there.
@@ -915,18 +940,25 @@
                   # the two builds. plutil rewrites the plist, which also drops
                   # the comments - harmless here, and it guarantees AMFI gets
                   # well-formed XML.
-                  cp ${./apple/quicklook/MBRPreview/MBRPreview.entitlements} \
-                    $TMPDIR/appex-adhoc.entitlements
-                  chmod u+w $TMPDIR/appex-adhoc.entitlements
-                  # The dots must be escaped: plutil reads -insert's argument as
-                  # a key *path*, so the unescaped name is parsed as four
-                  # nested dictionaries and fails with "Key path not found".
-                  /usr/bin/plutil -insert 'com\.apple\.security\.get-task-allow' \
-                    -bool true $TMPDIR/appex-adhoc.entitlements
+                  #
+                  # Each extension is signed with its own entitlements file.
+                  sign_appex() {
+                    name=$1
+                    entitlements=$2
+                    cp "$entitlements" $TMPDIR/$name-adhoc.entitlements
+                    chmod u+w $TMPDIR/$name-adhoc.entitlements
+                    # The dots must be escaped: plutil reads -insert's argument as
+                    # a key *path*, so the unescaped name is parsed as four
+                    # nested dictionaries and fails with "Key path not found".
+                    /usr/bin/plutil -insert 'com\.apple\.security\.get-task-allow' \
+                      -bool true $TMPDIR/$name-adhoc.entitlements
 
-                  /usr/bin/codesign --force --sign - \
-                    --entitlements $TMPDIR/appex-adhoc.entitlements \
-                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex
+                    /usr/bin/codesign --force --sign - \
+                      --entitlements $TMPDIR/$name-adhoc.entitlements \
+                      $out/Applications/MBR.app/Contents/PlugIns/$name.appex
+                  }
+                  sign_appex MBRPreview ${./apple/quicklook/MBRPreview/MBRPreview.entitlements}
+                  sign_appex MBRThumbnail ${./apple/quicklook/MBRThumbnail/MBRThumbnail.entitlements}
                   # Signs Contents/MacOS/mbr along with the bundle.
                   /usr/bin/codesign --force --sign - $out/Applications/MBR.app
 
@@ -944,20 +976,50 @@
                   # entitlements" and then signs with NONE, still exiting 0. (AMFI's
                   # XML parser is much stricter than plutil -lint - a literal "--"
                   # inside an XML comment is enough, since that is illegal in XML.)
-                  /usr/bin/codesign -d --entitlements - --xml \
-                    $out/Applications/MBR.app/Contents/PlugIns/MBRPreview.appex \
-                    > $TMPDIR/appex-entitlements.plist
-                  for key in com.apple.security.app-sandbox \
-                             com.apple.security.files.user-selected.read-only \
-                             com.apple.security.network.client \
-                             com.apple.security.get-task-allow; do
-                    if ! /usr/bin/grep -q "$key" $TMPDIR/appex-entitlements.plist; then
-                      echo "error: $key missing from the signed MBRPreview.appex" >&2
-                      echo "       QuickLook would silently never load it. See" >&2
-                      echo "       apple/quicklook/MBRPreview/MBRPreview.entitlements." >&2
-                      exit 1
-                    fi
-                  done
+                  #
+                  # $1 is the appex, then the keys it must carry, then "!" and the
+                  # keys it must NOT carry.
+                  verify_appex_entitlements() {
+                    name=$1
+                    shift
+                    /usr/bin/codesign -d --entitlements - --xml \
+                      $out/Applications/MBR.app/Contents/PlugIns/$name.appex \
+                      > $TMPDIR/$name-entitlements.plist
+                    want=present
+                    for key in "$@"; do
+                      if [ "$key" = "!" ]; then
+                        want=absent
+                        continue
+                      fi
+                      if /usr/bin/grep -q "$key" $TMPDIR/$name-entitlements.plist; then
+                        found=present
+                      else
+                        found=absent
+                      fi
+                      if [ "$found" != "$want" ]; then
+                        echo "error: $key is $found in the signed $name.appex (want $want)" >&2
+                        echo "       QuickLook would silently never load it, or it would" >&2
+                        echo "       have a grant it must not. See" >&2
+                        echo "       apple/quicklook/$name/$name.entitlements." >&2
+                        exit 1
+                      fi
+                    done
+                  }
+                  verify_appex_entitlements MBRPreview \
+                    com.apple.security.app-sandbox \
+                    com.apple.security.files.user-selected.read-only \
+                    com.apple.security.network.client \
+                    com.apple.security.get-task-allow
+                  # network.client is required, not optional: WebKit's GPU
+                  # process exits at launch in a sandboxed host without it, and
+                  # every thumbnail fails. Remote content is kept out by the
+                  # content rule list in WebSnapshotter.swift instead
+                  # (MBRThumbnail.entitlements says why).
+                  verify_appex_entitlements MBRThumbnail \
+                    com.apple.security.app-sandbox \
+                    com.apple.security.files.user-selected.read-only \
+                    com.apple.security.network.client \
+                    com.apple.security.get-task-allow
                 '';
 
                 meta = with pkgs.lib; {
@@ -1297,6 +1359,9 @@
                 /usr/bin/codesign --force --sign - \
                   --entitlements ${./apple/quicklook/MBRPreview/MBRPreview.entitlements} \
                   staging/MBR.app/Contents/PlugIns/MBRPreview.appex 2>/dev/null || true
+                /usr/bin/codesign --force --sign - \
+                  --entitlements ${./apple/quicklook/MBRThumbnail/MBRThumbnail.entitlements} \
+                  staging/MBR.app/Contents/PlugIns/MBRThumbnail.appex 2>/dev/null || true
                 /usr/bin/codesign --force --sign - staging/MBR.app 2>/dev/null || true
 
                 # An unsigned Mach-O cannot run on Apple Silicon, so treat a

@@ -140,7 +140,7 @@ class PreviewProviderTests: XCTestCase {
         XCTAssertTrue(loaded.isEmpty, "a file that cannot be read is dropped, not faked")
     }
 
-    func testLoadAttachments_unknownExtensionFallsBackToData() throws {
+    func testLoadAttachments_unknownExtensionIsSentAsOpaqueData() throws {
         let tempDir = try makeTempDirectory("unknown-ext")
         let file = tempDir.appendingPathComponent("thing.zzzznotatype")
         try Data("bytes".utf8).write(to: file)
@@ -149,6 +149,27 @@ class PreviewProviderTests: XCTestCase {
             PreviewAttachment(id: "mbr-asset-0", path: file.path)
         ])
 
+        // macOS mints a dynamic type (`dyn.…`) for an extension nothing
+        // declares instead of returning nil, so `?? .data` is not what answers
+        // here. What matters is the same either way: the attachment is still
+        // sent, as opaque bytes rather than as something QuickLook would decode.
+        let contentType = try XCTUnwrap(loaded["mbr-asset-0"]).contentType
+        XCTAssertTrue(contentType.conforms(to: .data))
+        XCTAssertFalse(contentType.conforms(to: .image))
+        XCTAssertFalse(contentType.conforms(to: .text))
+    }
+
+    func testLoadAttachments_noExtensionFallsBackToData() throws {
+        let tempDir = try makeTempDirectory("no-ext")
+        let file = tempDir.appendingPathComponent("LICENSE")
+        try Data("bytes".utf8).write(to: file)
+
+        let loaded = PreviewProvider.loadAttachments([
+            PreviewAttachment(id: "mbr-asset-0", path: file.path)
+        ])
+
+        // No extension at all is where `UTType(filenameExtension:)` is nil
+        // and the fallback in loadAttachments is what picks the type.
         XCTAssertEqual(try XCTUnwrap(loaded["mbr-asset-0"]).contentType, .data)
     }
 

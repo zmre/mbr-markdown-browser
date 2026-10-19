@@ -1,14 +1,18 @@
 # QuickLook Extension Development Guide
 
-This document covers building, testing, debugging, and troubleshooting the MBR QuickLook extension.
+This document covers building, testing, debugging, and troubleshooting the MBR QuickLook extensions: `MBRPreview` (the spacebar preview) and `MBRThumbnail` (Finder thumbnails).
 
 ## Architecture Overview
 
 The QuickLook extension consists of:
 
 1. **Rust library** (`crates/mbr-ffi/src/quicklook.rs`) - Core rendering logic exposed via UniFFI
-2. **Swift extension** (`MBRPreview/`) - macOS QuickLook extension that calls Rust
-3. **Host app** (`Host/`) - Required container app for the extension
+2. **Swift extensions** - each calls Rust, one per extension point:
+   - `MBRPreview/` - `com.apple.quicklook.preview`, the spacebar panel
+   - `MBRThumbnail/` - `com.apple.quicklook.thumbnail`, Finder's icon and
+     gallery views, the column-view preview pane and Get Info (see
+     [Thumbnails](#thumbnails))
+3. **Host app** (`Host/`) - Required container app for the extensions
 4. **UniFFI bindings** (`Generated/`) - Auto-generated Swift/C bindings
 
 ### Data-based, not view-based
@@ -65,6 +69,91 @@ To sanity-check by hand, preview a `.md` containing:
 Only the second must render. The first keeps its authored URL (`/../../etc/passwd`)
 in the HTML, because no attachment was minted for it, and therefore loads nothing.
 
+
+### Thumbnails
+
+`MBRThumbnail.appex` is a separate extension because one appex serves one
+extension point. It links the same `libmbr_ffi.a` and calls
+`render_thumbnail` (`crates/mbr-ffi/src/quicklook.rs`), which returns either:
+
+- `ThumbnailDocument.image(path)` - a frontmatter `cover:`/`image:` that resolves
+  to a local image inside the repository (same containment as attachments).
+  `ThumbnailProvider` hands it to `QLThumbnailReply(imageFileURL:)`.
+- `ThumbnailDocument.page(document)` - the preview's own `PreviewDocument`, built
+  from the first 32 KiB of the note, without mermaid. `WebSnapshotter` loads it
+  into an offscreen `WKWebView` and snapshots the top of the page.
+
+Unlike the preview, the thumbnail extension *does* own a web view, so the
+security invariant above is enforced in Swift as well: `AttachmentSchemeHandler`
+answers `cid:` URLs from the document's attachment list only (and serves only
+images), and a content rule list blocks every scheme except `cid:`, `data:`,
+`about:` and `blob:`. That rule is the only network barrier: the extension
+must carry `network.client`, because a sandboxed `WKWebView`'s GPU process
+exits at launch without it ("Application does not have permission to
+communicate with network resources") and every thumbnail fails.
+
+Things learned the hard way, each pinned by a test in
+`MBRPreviewTests/ThumbnailProviderTests.swift`:
+
+- `WKWebView.handlesURLScheme("cid")` is `false`, so a `cid` scheme handler can
+  be registered and the HTML needs no rewriting.
+- mbr renders images `loading="lazy"`, and in a web view with no window lazy
+  images never load. A user script switches every image to eager at document
+  end.
+- WebKit content-rule regexes have no alternation: `^(cid|data):` fails to
+  compile, so there is one rule per allowed scheme.
+- A page whose script never yields (`for (;;) {}`) hangs `takeSnapshot` as well
+  as the load. Every step races one deadline (2.5 s, plus 0.75 s for the
+  snapshot) and a view that misses it is thrown away and replaced.
+- The `QLThumbnailReply(contextSize:drawing:)` context is a bitmap of
+  `contextSize x scale` *pixels* with no scale transform, so drawing into a
+  `contextSize` rect fills only the bottom-left quarter at 2x.
+  `ThumbnailProvider.drawingRect(in:fallback:)` measures the context instead.
+  Likewise WebKit's offscreen pixels-per-point is a guess; `SnapshotView`
+  retakes a too-small snapshot once at the measured scale.
+- Two views are kept for the life of the process. The first thumbnail pays
+  ~200 ms for the WebContent launch; after that a page takes ~7-10 ms.
+
+**Testing thumbnails.** Things that make a working build look broken:
+
+- `qlmanage -t` does not exercise the extension on recent macOS: it draws
+  text-like files with a built-in renderer.
+- `com.apple.quicklook.ThumbnailsAgent` only discovers thumbnail extensions
+  when it starts. After installing or updating the app, log out and back in, or
+  restart the agent (dev machines only; it relaunches on demand):
+  ```bash
+  pkill -KILL -f 'Support/com.apple.quicklook.ThumbnailsAgent$'
+  ```
+  The agent's discovery log line (`Completed discovery. Final # of matches: N`
+  for the `com.apple.quicklook.thumbnail` point) says whether it sees it.
+- The thumbnail point is ExtensionKit-based with `EXDefaultUserElection = 0`,
+  so the extension starts disabled. The System Settings Quick Look checkbox
+  reflects the preview group; enable the thumbnail with
+  `pluginkit -e use -i com.zmre.mbr.MBRThumbnail` (or the
+  `com.zmre.mbr.quicklook-host.MBRThumbnail` dev build).
+- An app copied out of `/nix/store` is read-only: `chmod -R u+w` the copy
+  before re-signing it, or `codesign` writes a seal it cannot finish.
+- The timing harness approach (compiling `MBRThumbnail/*.swift` into a plain
+  command-line tool) runs **unsandboxed**, so it cannot catch failures that only
+  happen in the extension's sandbox (file access, WebKit process launch,
+  missing entitlements) or in how QuickLook hands over its drawing context -
+  the bottom-left-quadrant scale bug was invisible to it. Test in Finder before
+  calling a change done.
+
+Then drive it the way Finder does, with `QLThumbnailGenerator`:
+
+```swift
+let request = QLThumbnailGenerator.Request(
+    fileAt: url, size: CGSize(width: 256, height: 256), scale: 2,
+    representationTypes: .thumbnail)
+QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { rep, error in ... }
+```
+
+and watch the per-thumbnail durations:
+
+```bash
+/usr/bin/log stream --info --predicate 'subsystem == "com.zmre.mbr.MBRThumbnail"'
+```
 
 ## Useful Tips
 
@@ -486,7 +575,13 @@ If you suspect binding mismatch:
 
 ## Entitlements
 
-The extension runs in a sandboxed environment. Key entitlements in `MBRPreview.entitlements`:
+`MBRThumbnail.entitlements` has the same keys as the preview's, including
+`network.client`, which WebKit requires (not the page: remote loads are
+blocked by the content rule list); its header comment explains why.
+flake.nix's `postFixup` fails the build if a signed appex is missing a
+required key.
+
+The extensions run in a sandboxed environment. Key entitlements in `MBRPreview.entitlements`:
 
 - `com.apple.security.app-sandbox` - Required for extensions
 - `com.apple.security.files.user-selected.read-only` - File access
@@ -504,6 +599,7 @@ warning: The CFBundleShortVersionString of an app extension ('1.0') must match t
 Update versions in:
 - `Host/Info.plist`
 - `MBRPreview/Info.plist`
+- `MBRThumbnail/Info.plist`
 
 ## Quick Reference
 
@@ -513,6 +609,9 @@ Update versions in:
 | Build + install | `./build.sh install` |
 | Regenerate bindings | `cargo run --bin uniffi-bindgen --features ffi -- generate --library target/release/libmbr_ffi.a --language swift --out-dir apple/quicklook/Generated` |
 | Test preview | `qlmanage -p /path/to/file.md` |
+| Check thumbnail registration | `pluginkit -mAv -p com.apple.quicklook.thumbnail \| grep mbr` |
+| Watch thumbnail timings | `/usr/bin/log stream --info --predicate 'subsystem == "com.zmre.mbr.MBRThumbnail"'` |
+| Clear Finder's thumbnail cache | `qlmanage -r cache` |
 | Check registration | `pluginkit -mAv -p com.apple.quicklook.preview \| grep mbr` |
 | Enable extension | `pluginkit -e use -i com.zmre.mbr.quicklook-host.MBRPreview` |
 | Check file UTI | `mdls -name kMDItemContentType /path/to/file.md` |

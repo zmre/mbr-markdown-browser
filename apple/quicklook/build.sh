@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./build.sh          - Build extension only
-#   ./build.sh install  - Build and install into local MBR.app
+#   ./build.sh install  - Build and install both extensions into local MBR.app
 
 set -euo pipefail
 
@@ -49,11 +49,17 @@ xcodebuild \
     -derivedDataPath "$DERIVED_DATA" \
     build
 
-EXTENSION_PATH="$DERIVED_DATA/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns/MBRPreview.appex"
+HOST_PLUGINS="$DERIVED_DATA/Build/Products/Release/MBRQuickLookHost.app/Contents/PlugIns"
+# Both extensions, each with the entitlements it is signed with. The preview
+# answers the spacebar panel; the thumbnail answers Finder's icons, gallery
+# view and Get Info (one extension point per appex).
+EXTENSIONS=(MBRPreview MBRThumbnail)
 
 echo ""
 echo "Build complete!"
-echo "Extension at: $EXTENSION_PATH"
+for name in "${EXTENSIONS[@]}"; do
+    echo "Extension at: $HOST_PLUGINS/$name.appex"
+done
 
 # Install if requested
 if [[ "${1:-}" == "install" ]]; then
@@ -67,11 +73,11 @@ if [[ "${1:-}" == "install" ]]; then
     # Create PlugIns directory if needed
     mkdir -p "$PLUGINS_DIR"
 
-    # Remove old extension if exists
-    rm -rf "$PLUGINS_DIR/MBRPreview.appex"
-
-    # Copy new extension
-    cp -R "$EXTENSION_PATH" "$PLUGINS_DIR/"
+    # Replace each extension with the fresh build
+    for name in "${EXTENSIONS[@]}"; do
+        rm -rf "$PLUGINS_DIR/$name.appex"
+        cp -R "$HOST_PLUGINS/$name.appex" "$PLUGINS_DIR/"
+    done
 
     # Replace symlink with actual binary (codesign requires regular files)
     if [[ -L "$MBR_BINARY" ]]; then
@@ -83,20 +89,32 @@ if [[ "${1:-}" == "install" ]]; then
 
     # Re-sign the app bundle (preserving extension entitlements)
     echo "Re-signing MBR.app..."
-    # First re-sign the extension with its entitlements
-    /usr/bin/codesign --force --sign - \
-        --entitlements "$SCRIPT_DIR/MBRPreview/MBRPreview.entitlements" \
-        "$PLUGINS_DIR/MBRPreview.appex"
+    # First re-sign each extension with its own entitlements
+    for name in "${EXTENSIONS[@]}"; do
+        /usr/bin/codesign --force --sign - \
+            --entitlements "$SCRIPT_DIR/$name/$name.entitlements" \
+            "$PLUGINS_DIR/$name.appex"
+    done
     # Then re-sign the host app
     /usr/bin/codesign --force --sign - "$MBR_APP"
 
     echo ""
     echo "Installation complete!"
-    echo "Extension installed at: $PLUGINS_DIR/MBRPreview.appex"
+    for name in "${EXTENSIONS[@]}"; do
+        echo "Extension installed at: $PLUGINS_DIR/$name.appex"
+    done
     echo ""
     echo "To register the QuickLook extension, run MBR.app once:"
     echo "  open '$MBR_APP'"
     echo ""
-    echo "Then test with:"
+    echo "Then test the preview with:"
     echo "  qlmanage -p /path/to/file.md"
+    echo ""
+    echo "Thumbnails: qlmanage -t never reaches thumbnail extensions on current"
+    echo "macOS. The thumbnail agent only discovers a new or updated extension"
+    echo "when it starts, so log out and back in (or reboot), make sure it is"
+    echo "enabled (pluginkit -e use -i <thumbnail bundle id>), clear the cache"
+    echo "(qlmanage -r cache), then look at markdown files in Finder's icon or"
+    echo "gallery view, or ask QLThumbnailGenerator as Finder does. See"
+    echo "DEVELOP.md, 'Testing thumbnails'."
 fi
