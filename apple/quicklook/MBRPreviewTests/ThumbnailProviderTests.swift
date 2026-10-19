@@ -143,6 +143,21 @@ final class ThumbnailProviderTests: XCTestCase {
         )
     }
 
+    // MARK: - Badge
+
+    /// Both kinds of reply carry the "MD" file-type badge: a note with a cover
+    /// image is still a markdown file.
+    func testReplies_carryTheMarkdownBadge() throws {
+        let dir = try makeTempDirectory("badge")
+        let png = dir.appendingPathComponent("cover.png")
+        try self.writePNG(png)
+        XCTAssertEqual(ThumbnailProvider.reply(coverImageAt: png.path).extensionBadge, "MD")
+
+        let image = NSImage(size: NSSize(width: 10, height: 10))
+        let page = ThumbnailProvider.reply(drawing: image, contextSize: CGSize(width: 10, height: 13))
+        XCTAssertEqual(page.extensionBadge, "MD")
+    }
+
     func testRenderThumbnail_pageWithoutCover() throws {
         let repo = try makeTempDirectory("page")
         let note = repo.appendingPathComponent("note.md")

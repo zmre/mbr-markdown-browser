@@ -41,6 +41,7 @@ A few things differ from the preview, on purpose:
 | Remote images and embeds | Loaded | Never loaded (they show as empty boxes): the thumbnail's web view blocks every remote load |
 | Mermaid diagrams | Rendered | Shown as their source |
 | Source read | Whole file | The first 32 KB, which is far more than fits on the visible page |
+| File-type badge | n/a | "MD", drawn by Finder in its standard badge style (`QLThumbnailReply.extensionBadge`) wherever it badges icons; larger renderings may show none |
 | Smallest size | n/a | Icons under 32 points (list view, sidebar) use the generic markdown icon |
 
 Thumbnails are drawn by the same WebKit engine as previews. The extension keeps two web views alive between requests, so after the first thumbnail (around 200 ms while the web view starts) each one takes about 10 ms. If a page cannot be drawn within a few seconds, or anything else fails, Finder shows the generic document icon instead; mbr never caches an error message as a thumbnail.

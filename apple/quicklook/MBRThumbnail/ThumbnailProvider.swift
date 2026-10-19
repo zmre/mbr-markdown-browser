@@ -63,9 +63,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
 
         switch document {
         case let .image(path):
-            // The cover image is already proven to be a local image file inside
-            // the repository; QuickLook decodes and scales it itself.
-            let reply = QLThumbnailReply(imageFileURL: URL(fileURLWithPath: path))
+            let reply = Self.reply(coverImageAt: path)
             Self.finish(handler, .success(reply), fileURL: fileURL, kind: "cover", since: start)
 
         case let .page(page):
@@ -85,6 +83,25 @@ final class ThumbnailProvider: QLThumbnailProvider {
         }
     }
 
+    /// The file-type badge on every thumbnail this extension answers.
+    ///
+    /// `extensionBadge` is QuickLook's own convention for this: the system
+    /// draws the badge in its standard style, sized for the icon, so it stays
+    /// readable at small sizes and matches other file types. Nothing is baked
+    /// into the image, so the snapshot stays identical to the preview, and
+    /// larger renderings that show no badge are untouched.
+    static let extensionBadge = "MD"
+
+    /// A reply for a note's cover image.
+    ///
+    /// The path is already proven to be a local image file inside the
+    /// repository; QuickLook decodes and scales it itself.
+    static func reply(coverImageAt path: String) -> QLThumbnailReply {
+        let reply = QLThumbnailReply(imageFileURL: URL(fileURLWithPath: path))
+        reply.extensionBadge = Self.extensionBadge
+        return reply
+    }
+
     /// A reply that draws `image` to fill the whole thumbnail.
     ///
     /// The Core Graphics variant (`drawing:`), not `currentContextDrawing:`,
@@ -92,7 +109,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
     /// see ``drawingRect(in:fallback:)`` for why that matters.
     static func reply(drawing image: NSImage, contextSize: CGSize) -> QLThumbnailReply {
         let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        return QLThumbnailReply(contextSize: contextSize) { context in
+        let reply = QLThumbnailReply(contextSize: contextSize) { context in
             guard let cgImage else {
                 return false
             }
@@ -100,6 +117,8 @@ final class ThumbnailProvider: QLThumbnailProvider {
             context.draw(cgImage, in: Self.drawingRect(in: context, fallback: contextSize))
             return true
         }
+        reply.extensionBadge = Self.extensionBadge
+        return reply
     }
 
     /// The rectangle, in the context's user space, that covers all of it.
