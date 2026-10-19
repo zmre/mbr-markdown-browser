@@ -595,9 +595,11 @@ jobs:
 
       - name: Detect components/ changes
         id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
+          base="$BASE_SHA"
           # Only relevant on pull_request events; skip on pushes to main.
           if [ -z "$base" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
