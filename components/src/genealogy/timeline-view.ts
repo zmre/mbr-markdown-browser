@@ -1,11 +1,12 @@
 /**
  * Timeline-tree chart view: renders the pure `timeline-layout.ts` output as an
  * SVG via lit-html templates, with pan/zoom from the shared
- * `SvgViewportController`, `+`/`−`/`⤢` control buttons, and click/keyboard
+ * `SvgViewportController`, zoom in / out / fit control buttons, and click/keyboard
  * navigation on the person cards.
  */
 import { html, render, svg, nothing, type TemplateResult } from 'lit'
 import { SvgViewportController } from '../graph/viewport-controller.js'
+import { icon, iconMinus, iconPlus, iconScan } from '../icons.js'
 import {
   AXIS_W,
   CARD_H,
@@ -127,9 +128,9 @@ function chartTemplate(
       </g>
     </svg>
     <div class="rel-graph-controls">
-      <button type="button" aria-label="Zoom in" title="Zoom in" @click=${handlers.onZoomIn}>+</button>
-      <button type="button" aria-label="Zoom out" title="Zoom out" @click=${handlers.onZoomOut}>−</button>
-      <button type="button" aria-label="Reset view" title="Reset view" @click=${handlers.onReset}>⤢</button>
+      <button type="button" aria-label="Zoom in" title="Zoom in" @click=${handlers.onZoomIn}>${icon(iconPlus)}</button>
+      <button type="button" aria-label="Zoom out" title="Zoom out" @click=${handlers.onZoomOut}>${icon(iconMinus)}</button>
+      <button type="button" aria-label="Fit to view" title="Fit to view" @click=${handlers.onReset}>${icon(iconScan)}</button>
     </div>
   `
 }
@@ -173,7 +174,7 @@ function mountTimeline(container: HTMLElement, ctx: GenealogyContext): Genealogy
     // Smart initial view: fit-all when cards stay readable; for very
     // wide/shallow trees start partly zoomed in on the focus person instead.
     // The SVG's own viewBox (fit-all) remains the controller's base, so manual
-    // zoom-out to the full tree is always possible; ⤢ returns to this view.
+    // zoom-out to the full tree is always possible; the fit control returns to this view.
     const rect = canvas.getBoundingClientRect()
     const focus = layout.nodes.find((n) => n.isFocus)
     const initialView = computeInitialViewBox({

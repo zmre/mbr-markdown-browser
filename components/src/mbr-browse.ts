@@ -3,6 +3,8 @@ import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getCanonicalPath } from './shared.js'
 import { isInputTarget } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
+import { DISCLOSURE_CSS, ICON_BUTTON_CSS } from './controls.ts'
+import { ICON_SM, icon, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
 import {
   type MarkdownFile,
   type SortField,
@@ -834,16 +836,13 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   private _renderTrigger(): TemplateResult {
     return html`
       <button
-        class="browse-trigger"
+        class="browse-trigger mbr-icon-btn"
         @click=${() => this.open()}
         aria-label="Browse files"
-        title="Browse (-)"
+        aria-expanded=${this._isOpen ? 'true' : 'false'}
+        title="Browse (−)"
       >
-        <div class="hamburger-icon">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
+        ${icon(iconPanelLeft)}
       </button>
     `;
   }
@@ -867,8 +866,8 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
       <aside class="left-pane">
         <div class="pane-header">
           <h2>Navigate</h2>
-          <button class="close-button" @click=${this.close} aria-label="Close">
-            ✕
+          <button class="close-button mbr-icon-btn" @click=${this.close} aria-label="Close" title="Close (Esc)">
+            ${icon(iconX)}
           </button>
         </div>
 
@@ -897,7 +896,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           @click=${() => this._toggleSection('recent')}
           aria-expanded=${isExpanded}
         >
-          <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
           <span class="section-title">Recent</span>
           <span class="section-count">${recentFiles.length}</span>
         </button>
@@ -934,7 +933,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           @click=${() => this._toggleSection('shortcuts')}
           aria-expanded=${isExpanded}
         >
-          <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
           <span class="section-title">Shortcuts</span>
           <span class="section-count">${shortcutFiles.length}</span>
         </button>
@@ -962,7 +961,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           @click=${() => this._toggleSection('tags')}
           aria-expanded=${isExpanded}
         >
-          <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
           <span class="section-title">Tags</span>
         </button>
         ${isExpanded ? html`
@@ -994,9 +993,11 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
             ${hasChildren ? html`
               <button
                 class="tree-toggle"
+                aria-label=${isExpanded ? 'Collapse' : 'Expand'}
+                aria-expanded=${isExpanded ? 'true' : 'false'}
                 @click=${(e: Event) => { e.stopPropagation(); this._toggleTag(tag.name); }}
               >
-                ${isExpanded ? '▼' : '▶'}
+                ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron' })}
               </button>
             ` : html`<span class="tree-spacer"></span>`}
             <button
@@ -1027,7 +1028,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           @click=${() => this._toggleSection('notes')}
           aria-expanded=${isExpanded}
         >
-          <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
           <span class="section-title">Notes</span>
           <span class="section-count">${this._folderTree?.fileCount || 0}</span>
         </button>
@@ -1059,16 +1060,18 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
             ${hasChildren ? html`
               <button
                 class="tree-toggle"
+                aria-label=${isExpanded ? 'Collapse' : 'Expand'}
+                aria-expanded=${isExpanded ? 'true' : 'false'}
                 @click=${(e: Event) => { e.stopPropagation(); this._toggleFolder(node.path); }}
               >
-                ${isExpanded ? '▼' : '▶'}
+                ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron' })}
               </button>
             ` : html`<span class="tree-spacer"></span>`}
             <button
               class="tree-label"
               @click=${() => this._selectFolder(node.path, homeLabel)}
             >
-              <span class="folder-icon">📁</span>
+              ${icon(isExpanded || isCurrent ? iconFolderOpen : iconFolder, { size: ICON_SM, className: 'folder-icon' })}
               <span class="label-text">${homeLabel}</span>
               <span class="label-count">${node.fileCount}</span>
             </button>
@@ -1091,16 +1094,18 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           ${hasChildren ? html`
             <button
               class="tree-toggle"
+              aria-label=${isExpanded ? 'Collapse' : 'Expand'}
+              aria-expanded=${isExpanded ? 'true' : 'false'}
               @click=${(e: Event) => { e.stopPropagation(); this._toggleFolder(node.path); }}
             >
-              ${isExpanded ? '▼' : '▶'}
+              ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron' })}
             </button>
           ` : html`<span class="tree-spacer"></span>`}
           <button
             class="tree-label"
             @click=${() => this._selectFolder(node.path, node.title || node.name)}
           >
-            <span class="folder-icon">📁</span>
+            ${icon(isExpanded || isCurrent ? iconFolderOpen : iconFolder, { size: ICON_SM, className: 'folder-icon' })}
             <span class="label-text">${node.title || node.name}</span>
             <span class="label-count">${node.fileCount}</span>
           </button>
@@ -1129,7 +1134,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
               @click=${() => this._toggleSection(sectionKey)}
               aria-expanded=${isExpanded}
             >
-              <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+              ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
               <span class="section-title">${this._formatFieldName(fieldName)}</span>
             </button>
             ${isExpanded ? html`
@@ -1190,8 +1195,8 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         <div class="pane-header">
           <h3>${this._currentSelection?.label || 'Files'}</h3>
           <span class="pane-count">${count}</span>
-          <button class="close-button" @click=${() => this._clearSelection()} aria-label="Close">
-            ✕
+          <button class="close-button mbr-icon-btn" @click=${() => this._clearSelection()} aria-label="Close">
+            ${icon(iconX)}
           </button>
         </div>
 
@@ -1230,10 +1235,10 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     return html`
       <li>
         <button class="subfolder-row" @click=${() => this._openSubfolder(node)}>
-          <span class="folder-icon" aria-hidden="true">📁</span>
+          ${icon(iconFolder, { size: ICON_SM, className: 'folder-icon' })}
           <span class="subfolder-name">${label}</span>
           <span class="subfolder-count">${node.fileCount}</span>
-          <span class="subfolder-chevron" aria-hidden="true">›</span>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'subfolder-chevron' })}
         </button>
       </li>
     `;
@@ -1296,51 +1301,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, css`
     :host {
       display: contents;
-    }
-
-    /* Trigger button */
-    .browse-trigger {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0.5rem;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      border-radius: 4px;
-      transition: background 0.15s ease;
-      margin-left: 1px;
-      margin-right: 1px;
-    }
-
-    .browse-trigger:hover {
-      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
-      margin-left: 0px;
-      margin-right: 0px;
-    }
-
-    /* Hamburger icon */
-    .hamburger-icon {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      width: 18px;
-      height: 14px;
-    }
-
-    .hamburger-icon span {
-      display: block;
-      height: 2px;
-      background: var(--pico-color, currentColor);
-      border-radius: 1px;
-      transition: all 0.2s ease;
-    }
-
-    .hambruger-icon span:hover {
-      background: #fff;
     }
 
     /* Backdrop */
@@ -1442,17 +1405,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .close-button {
-      background: transparent;
-      border: none;
-      font-size: 1.25rem;
-      color: var(--pico-muted-color, #999);
-      cursor: pointer;
-      padding: 0.25rem;
-      line-height: 1;
-    }
-
-    .close-button:hover {
-      color: var(--pico-color, #333);
+      margin-inline-end: -0.5rem;
     }
 
     /* Pane Content */
@@ -1486,22 +1439,19 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .section-header:hover .section-title,
+    .section-header:hover .section-count,
     .section-header:hover .toggle-icon {
       color: var(--pico-primary-inverse, #fff);
     }
 
     .toggle-icon {
-      width: 1rem;
-      font-size: 0.65rem;
-      color: var(--pico-muted-color, #999);
+      margin-inline-end: 0.375rem;
     }
 
     .section-title {
       flex: 1;
       font-weight: 600;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      font-size: 0.8125rem;
       color: var(--pico-muted-color, #666);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1511,9 +1461,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     .section-count {
       font-size: 0.75rem;
       color: var(--pico-muted-color, #666);
-      background: var(--pico-muted-border-color, #e0e0e0);
-      padding: 0.1rem 0.4rem;
-      border-radius: 10px;
+      font-variant-numeric: tabular-nums;
     }
 
     .section-content {
@@ -1566,12 +1514,13 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .tree-toggle {
-      width: 1rem;
-      height: 1rem;
+      width: 1.25rem;
+      height: 1.25rem;
+      padding: 0;
+      margin: 0;
       background: transparent;
       border: none;
       cursor: pointer;
-      font-size: 0.6rem;
       color: var(--pico-muted-color, #999);
       display: flex;
       align-items: center;
@@ -1580,7 +1529,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .tree-spacer {
-      width: 1rem;
+      width: 1.25rem;
       flex-shrink: 0;
     }
 
@@ -1601,7 +1550,13 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .folder-icon {
-      font-size: 0.9rem;
+      flex: none;
+      color: var(--mbr-icon-color, var(--pico-muted-color, #666));
+    }
+
+    .tree-row.selected .folder-icon,
+    .tree-row:hover .folder-icon {
+      color: var(--pico-primary-inverse, #fff);
     }
 
     .label-text {
@@ -1814,9 +1769,8 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
     }
 
     .subfolder-chevron {
+      flex: none;
       color: var(--pico-muted-color, #666);
-      font-size: 1.1rem;
-      line-height: 1;
     }
 
     .file-filename {
@@ -1973,7 +1927,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         width: 500px;
       }
     }
-  `;
+  `];
 }
 
 declare global {

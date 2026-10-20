@@ -33,7 +33,8 @@ export const PICKER_CSS = `
   padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0);
 }
 .mbr-picker-header h3 { margin: 0; font-size: 0.95rem; }
-.mbr-picker-close { background: transparent; border: none; font-size: 1.3rem; cursor: pointer; color: inherit; line-height: 1; padding: 0.1rem 0.4rem; }
+.mbr-picker-close { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; margin: 0; padding: 0; background: transparent; border: none; border-radius: var(--mbr-control-radius, 8px); box-shadow: none; cursor: pointer; color: var(--mbr-icon-color, inherit); }
+.mbr-picker-close:hover { background: var(--mbr-control-hover-bg, rgba(127,127,127,0.12)); color: var(--mbr-icon-color-hover, inherit); }
 .mbr-picker-field { padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-picker-field label { display: block; font-size: 0.75rem; opacity: 0.75; margin-bottom: 0.25rem; }
 .mbr-picker-field input[type="text"], .mbr-picker-field textarea {

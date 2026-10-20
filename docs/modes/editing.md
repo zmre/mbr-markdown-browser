@@ -7,10 +7,15 @@ order: 5
 # In-Browser Editing
 
 mbr can let you edit markdown files directly from the browser while running in
-**server or GUI mode**. It is **off by default** and intended for private use
-(for example, the GUI window on your own machine). When enabled, a pencil
-button (✎) appears next to the info button; pressing it — or the `e` shortcut —
+**server or GUI mode**. It is **on by default in the GUI** (a private window on
+your own machine, bound to 127.0.0.1) and **off by default for the server**
+(`mbr -s`), which must be asked. Static builds never edit. When enabled, a pencil
+button (a pencil) appears next to the info button; pressing it — or the `e` shortcut —
 opens a [Milkdown/Crepe](https://milkdown.dev/) editor for the current file.
+
+![The in-browser editor open over a note, with the frontmatter collapsed and the note rendered as editable rich text](../images/screens/editor.png)
+
+*The editor (`e`) edits the note in place; Save writes the markdown back to disk.*
 
 > [!WARNING]
 > Editing writes to your files. Only enable it on repositories you intend to
@@ -19,16 +24,33 @@ opens a [Milkdown/Crepe](https://milkdown.dev/) editor for the current file.
 
 ## Enabling editing
 
-Enable it with a CLI flag:
+| Mode | Default | Turn it on | Turn it off |
+|------|---------|------------|-------------|
+| GUI (`mbr`, `mbr -g`, the app, folders opened in the window) | **on** | — | `edit_enabled = false`, `MBR_EDIT_ENABLED=false` or `--no-edit` |
+| Server (`mbr -s`) | off | `--edit`, `edit_enabled = true` or `MBR_EDIT_ENABLED=true` | `--no-edit` (beats a config that turns it on) |
+| Static build (`mbr -b`) | never | — | — |
+
+Precedence is the usual one: a value in `.mbr/config.toml` beats the mode's
+default, `MBR_EDIT_ENABLED` beats the config file, and `--edit` / `--no-edit`
+beat everything. `--no-edit` also covers every folder the GUI opens later
+(`Open…`, Finder's "Open With").
+
+For the server, enable it with a CLI flag:
 
 ```bash
 mbr -s --edit ~/notes
 ```
 
-or in `.mbr/config.toml`:
+or in `.mbr/config.toml` (which also keeps the GUI's default explicit):
 
 ```toml
 edit_enabled = true
+```
+
+To keep a repository read-only in the GUI too:
+
+```toml
+edit_enabled = false
 ```
 
 On loopback (127.0.0.1), that's all you need — local edits require no token
@@ -38,7 +60,7 @@ included. For remote access, see [Remote editing](#remote-editing).
 
 ## Using the editor
 
-1. Open a markdown page and click the ✎ button (top right) or press `e`.
+1. Open a markdown page and click the pencil button (top right) or press `e`.
 2. The editor loads the file. The **body** is edited in the WYSIWYG Crepe
    editor; any **YAML frontmatter** is shown in a separate raw-text field (open
    the "YAML frontmatter" section to edit it). Frontmatter is preserved
@@ -413,8 +435,12 @@ To keep the hash out of the repository, set it in the environment instead
 MBR_EDIT_TOKEN_HASH='$argon2id$v=19$m=19456,t=2,p=1$....' mbr -s --edit --host 0.0.0.0 ~/notes
 ```
 
-Without a hash, `--edit` on a non-loopback host refuses to start and exits
-with status 1, explaining why on stderr.
+Without a hash, `--edit` (or `edit_enabled = true`) on a non-loopback host
+refuses to start and exits with status 1, explaining why on stderr. Editing that
+is only on by default — the GUI's — is instead turned **off** on a non-loopback
+host without a hash, with a warning, and so is any editing when the non-loopback
+address comes from `--host` without `--edit`: a bind address must never turn a
+default into an unauthenticated network write endpoint.
 
 ### Entering the token
 

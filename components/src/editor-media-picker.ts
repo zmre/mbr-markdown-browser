@@ -18,6 +18,7 @@
 
 import { fuzzyFilter } from './fuzzy.js';
 import { createNestedModal } from './editor-picker-shared.js';
+import { iconElement, iconX } from './icon-dom.ts';
 
 /** Media kinds the picker surfaces (mirrors StaticFileKind's media variants). */
 export type MediaKind = 'image' | 'video' | 'audio' | 'pdf';
@@ -134,7 +135,7 @@ export function openMediaPicker(opts: MediaPickerOptions): Promise<MediaPickResu
     const closeBtn = document.createElement('button');
     closeBtn.className = 'mbr-picker-close';
     closeBtn.setAttribute('aria-label', 'Cancel');
-    closeBtn.textContent = '×';
+    closeBtn.append(iconElement(iconX));
     closeBtn.addEventListener('click', () => finish(null));
     header.append(h3, closeBtn);
 

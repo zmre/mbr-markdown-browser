@@ -32,8 +32,7 @@
 import { buildTextIndex, rangeForMatch, type TextIndex } from '../find-in-page.ts'
 import { LINE_SELECTOR, lineOfOffset } from './anchor.ts'
 import { quoteMatches, pickNearest } from './reanchor.ts'
-import { createIconSvg } from './icon-svg.ts'
-import { REVIEW_ANCHOR_PREFIX, type ReviewNote } from './types.ts'
+import { REVIEW_ANCHOR_PREFIX, noteTypeIcon, type ReviewNote } from './types.ts'
 
 /** Class on every injected marker. Mirrored in `theme.css` and `BLOCKED_SELECTOR`. */
 export const MARKER_CLASS = 'mbr-review-marker'
@@ -194,7 +193,7 @@ export class ReviewMarkerLayer {
       }
     })
 
-    const icon = createIconSvg(group.notes[0]!.type)
+    const icon = noteTypeIcon(group.notes[0]!.type)
     if (icon !== null) marker.appendChild(icon)
 
     group.host.appendChild(marker)

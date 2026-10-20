@@ -11,6 +11,8 @@
  * the narrow layout, so a desktop page is unchanged.
  */
 
+import { ICON_SM, iconElement, iconEllipsis } from './icon-dom.ts';
+
 export const CRUMBS_SELECTOR = 'nav.breadcrumbs';
 export const MORE_CLASS = 'mbr-crumbs-more';
 export const EXPANDED_CLASS = 'mbr-crumbs-expanded';
@@ -27,7 +29,7 @@ export function enhanceBreadcrumbs(nav: HTMLElement): void {
   const small = document.createElement('small');
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = '…';
+  button.append(iconElement(iconEllipsis, { size: ICON_SM }));
   button.setAttribute('aria-label', 'Show the full path');
   button.setAttribute('aria-expanded', 'false');
   button.addEventListener('click', () => {

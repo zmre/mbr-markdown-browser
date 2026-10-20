@@ -102,14 +102,14 @@ genealogy charts. See
 | Use      | For                          | Examples                            |
 |----------|------------------------------|-------------------------------------|
 | `type:`  | What the note **is**         | `person`, `recipe`, `meeting-notes` |
-| `style:` | How the page should **look** | `outline`, `kanban`, your own class |
+| `style:` | How the page should **look** | `outline`, `slides`, your own class |
 
 Prefer `type` when the answer is a kind of note, and reach for `style` when the
-answer is a presentation choice that is not the note's kind. A board of cards is a
-good example of the latter: a project note displayed as a
-[kanban](kanban/) is still a project note, so it keeps `style: kanban`.
+answer is a presentation choice that is not the note's kind. A handout is a good
+example of the latter: meeting notes formatted as an outline are still meeting
+notes, so they are `type: meeting-notes` with `style: outline`.
 
-Nothing stops a page from carrying both. A deck of slides about a person can be
+A page can carry both, as above. A deck of slides about a person is
 `type: person` with `style: slides`.
 
 ## Styles That Ship With mbr
@@ -118,7 +118,10 @@ Nothing stops a page from carrying both. A deck of slides about a person can be
 |-----------|------------------------------------------------------------------------------------|--------------------------------|
 | `outline` | Auto-numbered headings, alternating list markers, tighter typography, print styles | [Below](#the-outline-style)    |
 | `slides`  | Turns the page into a Reveal.js deck, with horizontal rules separating slides      | [Presentation Slides](slides/) |
-| `kanban`  | Lays lists out as trello-like columns, one card per bullet                         | [Kanban Display](kanban/)      |
+
+Kanban boards are not a page style. A board is a section that starts with a
+`--- {.kanban}` divider; `style: kanban` in frontmatter breaks the page layout
+instead of drawing a board. See [Kanban Display](kanban/).
 
 ## The Outline Style
 
@@ -219,6 +222,6 @@ later, and a typo costs you nothing but a class nobody reads.
 ## See Also
 
 - [Presentation Slides](slides/) - The `slides` style in full
-- [Kanban Display](kanban/) - The `kanban` style in full
+- [Kanban Display](kanban/) - Boards from `--- {.kanban}` sections
 - [Relationships & Genealogy](relationships/#the-type-field) - What else `type` drives
 - [CSS Theming](../customization/themes/) - Themes, `user.css`, and full theme overrides

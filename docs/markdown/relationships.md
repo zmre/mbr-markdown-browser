@@ -348,6 +348,10 @@ mbr ships two complementary visualizations. Both are lazy-loaded (they cost
 nothing until used) and both work identically in server, GUI, and static-build
 modes:
 
+![A family chart with a grandmother at the top, a married couple in the middle, and their two children below](../images/screens/family-chart.png)
+
+*The family chart drawn from parent, child and spouse relationships.*
+
 - **Relationship charts** — interactive family, timeline, org and graph charts
   rendered inline on `type: person` and `type: organization` pages.
 - **Link graph in the sidebar** — a force-directed mini graph of the current
@@ -385,7 +389,7 @@ is `family`. The org chart and the two graphs are described in
   person.
 - **Expand/collapse** of non-blood branches via per-card mini-tree and
   link-break toggles.
-- Native pan/zoom; clicking a card navigates to that person; `⤢` recenters.
+- Native pan/zoom; clicking a card navigates to that person; the fit-to-view button recenters.
 
 **Timeline tree** — a custom time-aware layout:
 
@@ -437,7 +441,7 @@ internal links, and typed relationships. It appears on any note that has a
   color, and 1st-, 2nd-, … degree neighbours step down a ramp of the same hue.
 - **Hovering** a node shows a card with the note's title and description
   (desktop only); **clicking** navigates; **dragging** repositions.
-- The `⤢` button opens a **full-screen view** with pan/zoom, node labels, and a
+- The expand button opens a **full-screen view** with pan/zoom, node labels, and a
   **depth stepper** (`1`–`5`) to widen or narrow the neighbourhood on the fly.
 
 The default depth comes from the `graph_depth` config option (default `2`,

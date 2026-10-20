@@ -11,6 +11,7 @@
 import { html, render, svg, nothing, type TemplateResult } from 'lit'
 import { repeat } from 'lit/directives/repeat.js'
 import { SvgViewportController } from '../graph/viewport-controller.js'
+import { icon, iconMinus, iconPlus, iconScan } from '../icons.js'
 import { nodeTitle } from '../graph/relationship-graph.js'
 import { parseViewBox, type ViewBox } from '../graph/viewport.js'
 import {
@@ -161,9 +162,9 @@ function chartTemplate(
       </g>
     </svg>
     <div class="rel-graph-controls">
-      <button type="button" aria-label="Zoom in" title="Zoom in" @click=${handlers.onZoomIn}>+</button>
-      <button type="button" aria-label="Zoom out" title="Zoom out" @click=${handlers.onZoomOut}>−</button>
-      <button type="button" aria-label="Reset view" title="Reset view" @click=${handlers.onReset}>⤢</button>
+      <button type="button" aria-label="Zoom in" title="Zoom in" @click=${handlers.onZoomIn}>${icon(iconPlus)}</button>
+      <button type="button" aria-label="Zoom out" title="Zoom out" @click=${handlers.onZoomOut}>${icon(iconMinus)}</button>
+      <button type="button" aria-label="Fit to view" title="Fit to view" @click=${handlers.onReset}>${icon(iconScan)}</button>
     </div>
   `
 }

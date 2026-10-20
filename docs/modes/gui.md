@@ -84,6 +84,19 @@ When files change on disk, the GUI automatically reloads the current page. This 
 2. Edit files in your preferred editor
 3. See changes instantly in mbr
 
+### In-Browser Editing
+
+Editing is **on by default** in the GUI: the pencil button (or `e`) opens the editor,
+task checkboxes write through, and flashcard reviews are recorded. The window
+talks to mbr on 127.0.0.1, so no token is needed (writes are still CSRF- and
+Host-checked).
+
+To browse read-only, set `edit_enabled = false` in the repository's
+`.mbr/config.toml`, set `MBR_EDIT_ENABLED=false`, or launch with `--no-edit`.
+The default and `--no-edit` apply to every folder you open in the window, not
+just the first. If the GUI is bound to a non-loopback `--host` without an
+`edit_token_hash`, editing stays off. See [In-Browser Editing](editing.md).
+
 ### Switching Directories or Opening a File
 
 Use **File → Open…** (Cmd+O) to switch to a different markdown repository, or open a

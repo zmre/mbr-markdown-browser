@@ -237,6 +237,9 @@ impl Templates {
         // `humanize_date`); registered here so it survives `reload()` and the
         // `Tera::default()` fallback above.
         tera.register_filter("humandate", humandate_filter);
+        // `icon(name=…, size=…)`: the shared icon set (`icons.rs`), so a
+        // template draws the same artwork as the components.
+        tera.register_function("icon", crate::icons::icon_function);
 
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {

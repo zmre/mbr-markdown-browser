@@ -69,7 +69,8 @@ describe('<mbr-flashcards>', () => {
   it('renders the button on a flashcard page and collapses histories at idle', async () => {
     installDeckPage()
     await mount()
-    expect(button()?.textContent).toContain('Review flashcards')
+    expect(button()?.textContent).toContain('Review')
+    expect(button()?.getAttribute('aria-label')).toBe('Review flashcards')
     await vi.waitFor(() => expect(document.querySelectorAll('dd.mbr-fc-history summary')).toHaveLength(2))
     const summaries = document.querySelectorAll('dd.mbr-fc-history summary')
     expect(summaries[0].textContent).toMatch(/^Reviewed 2×/)

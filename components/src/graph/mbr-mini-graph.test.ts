@@ -423,7 +423,9 @@ describe('mbr-mini-graph depth stepper', () => {
   function clickStep(element: MbrMiniGraphElement, label: string): void {
     const buttons = shadow(element).querySelectorAll<HTMLButtonElement>('.depth-stepper button')
     for (const btn of buttons) {
-      if ((btn.textContent ?? '').trim() === label) btn.click()
+      // Icon buttons: match the accessible name, not a glyph.
+      const name = label === '+' ? 'Increase depth' : 'Decrease depth'
+      if (btn.getAttribute('aria-label') === name) btn.click()
     }
   }
 

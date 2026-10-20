@@ -53,6 +53,18 @@ import { referencesPlugin } from './editor-plugins/references.js';
 import { imagesPlugin } from './editor-plugins/images.js';
 import { NOTE_DOWNLOADING_MESSAGE } from './stale-note.js';
 import {
+  ICON_SM,
+  iconElement,
+  iconEllipsis,
+  iconFolderInput,
+  iconFootnote,
+  iconImage,
+  iconMarkup,
+  iconSquarePen,
+  iconTextCursorInput,
+  iconX,
+} from './icon-dom.ts';
+import {
   DEFINITION_LIST_CSS,
   addDefinitionListMenuItem,
   definitionListPlugins,
@@ -335,8 +347,10 @@ const MODAL_CSS = `
 }
 .mbr-editor-notice p { margin: 0; flex: 1; }
 .mbr-editor-notice-dismiss {
-  all: unset; cursor: pointer; padding: 0 0.25rem; opacity: 0.7;
+  all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; margin: -0.25rem -0.25rem 0 0; border-radius: 6px; opacity: 0.7;
 }
+.mbr-editor-notice-dismiss:hover { opacity: 1; background: var(--mbr-control-hover-bg, rgba(127,127,127,0.12)); }
 .mbr-editor-fm { border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
 .mbr-editor-fm textarea {
@@ -451,7 +465,7 @@ const HEADER_CSS = `
   outline: 2px solid var(--pico-primary, #0172ad); outline-offset: -2px;
 }
 .mbr-editor-modal .mbr-editor-save { font-weight: 600; }
-.mbr-editor-modal .mbr-editor-more { font-size: 1.4rem; letter-spacing: 0.05em; }
+.mbr-editor-modal .mbr-editor-more { padding: 0 0.5rem; }
 .mbr-editor-title { min-width: 0; text-align: center; line-height: 1.2; }
 .mbr-editor-title h2 {
   margin: 0; font-size: 1.0625rem; font-weight: 600; color: inherit;
@@ -478,7 +492,9 @@ const HEADER_CSS = `
   background: none; border: 0; box-shadow: none; margin: 0; width: 100%;
   min-height: 44px; padding: 0 0.75rem; border-radius: 8px;
   font: inherit; font-size: 1rem; color: inherit; text-align: left; cursor: pointer;
+  display: flex; align-items: center; gap: 0.625rem;
 }
+.mbr-editor-menu [role="menuitem"] > svg { flex: none; color: var(--mbr-icon-color, inherit); }
 .mbr-editor-modal .mbr-editor-menu [role="menuitem"]:hover,
 .mbr-editor-modal .mbr-editor-menu [role="menuitem"]:focus {
   background: color-mix(in srgb, currentColor 10%, transparent);
@@ -733,7 +749,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // cursor selection. Each guards unsaved edits before navigating away.
   const actions = document.createElement('div');
   actions.className = 'mbr-editor-actions';
-  const moreBtn = barButton('⋯', 'mbr-editor-more');
+  const moreBtn = iconBarButton(iconEllipsis, 'mbr-editor-more');
   moreBtn.setAttribute('aria-label', 'File actions');
   moreBtn.title = 'File actions';
   moreBtn.setAttribute('aria-haspopup', 'menu');
@@ -743,12 +759,12 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   menu.setAttribute('role', 'menu');
   menu.setAttribute('aria-label', 'File actions');
   menu.hidden = true;
-  const menuItem = (label: string, hint: string, run: () => void): HTMLButtonElement => {
+  const menuItem = (label: string, hint: string, run: () => void, shape: string): HTMLButtonElement => {
     const item = document.createElement('button');
     item.type = 'button';
     item.setAttribute('role', 'menuitem');
     item.tabIndex = -1;
-    item.textContent = label;
+    item.append(iconElement(shape, { size: ICON_SM }), label);
     item.title = hint;
     item.addEventListener('click', () => {
       closeMenu();
@@ -757,9 +773,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     return item;
   };
   const menuItems = [
-    menuItem('New note…', 'Create a new markdown file', () => void handleNew()),
-    menuItem('Rename…', 'Rename this file', () => void handleMove('basename')),
-    menuItem('Move…', 'Move this file to another folder', () => void handleMove('folder')),
+    menuItem('New note…', 'Create a new markdown file', () => void handleNew(), iconSquarePen),
+    menuItem('Rename…', 'Rename this file', () => void handleMove('basename'), iconTextCursorInput),
+    menuItem('Move…', 'Move this file to another folder', () => void handleMove('folder'), iconFolderInput),
   ];
   menu.append(...menuItems);
 
@@ -919,7 +935,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     const dismiss = document.createElement('button');
     dismiss.type = 'button';
     dismiss.className = 'mbr-editor-notice-dismiss';
-    dismiss.textContent = '✕';
+    dismiss.append(iconElement(iconX, { size: ICON_SM }));
     dismiss.setAttribute('aria-label', 'Dismiss');
     dismiss.addEventListener('click', () => notice.remove());
     notice.append(text, dismiss);
@@ -1346,6 +1362,13 @@ function barButton(label: string, className: string): HTMLButtonElement {
   return b;
 }
 
+/** A header bar button holding only an icon (the ⋯ menu); label it with aria-label. */
+function iconBarButton(shape: string, className: string): HTMLButtonElement {
+  const b = barButton('', className);
+  b.append(iconElement(shape, { size: 22 }));
+  return b;
+}
+
 /** A format-bar tool: a small inline icon plus a text label. */
 function toolButton(iconSvg: string, label: string, className: string): HTMLButtonElement {
   const b = document.createElement('button');
@@ -1359,13 +1382,10 @@ function toolButton(iconSvg: string, label: string, className: string): HTMLButt
   return b;
 }
 
-const SVG_ATTRS =
-  'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-  'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
-/** Lines of text with a raised mark: a footnote. */
-const FOOTNOTE_ICON = `<svg ${SVG_ATTRS}><path d="M3 8h11M3 13h11M3 18h7"/><path d="M18 4.5l1.5-1v6"/></svg>`;
+/** Lines of text with a raised mark: a footnote (mbr's own glyph, same grid). */
+const FOOTNOTE_ICON = iconMarkup(iconFootnote);
 /** A framed picture: media. */
-const MEDIA_ICON = `<svg ${SVG_ATTRS}><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 15.5l-5-5-9 9"/></svg>`;
+const MEDIA_ICON = iconMarkup(iconImage);
 
 /**
  * The note's name and its folder, for the title: `notes/2026/plan.md` →

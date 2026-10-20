@@ -84,6 +84,9 @@ async fn run() -> Result<(), MbrError> {
     if args.no_symlink_mounts {
         mbr::config::disable_symlink_mounts_for_process();
     }
+    if args.no_edit {
+        mbr::config::disable_editing_for_process();
+    }
 
     // Initialize tracing/logging based on verbosity flags
     // Use try_init to allow server to re-configure if needed (it uses tower_http logging)
@@ -206,7 +209,17 @@ async fn run() -> Result<(), MbrError> {
 
     // Apply CLI overrides (the highest-precedence configuration layer).
     // Lives in cli::apply_overrides so the wiring is testable.
-    let mut config = cli::apply_overrides(Config::read(&absolute_path)?, &args)?;
+    // The GUI starts from its own defaults (editing on); every other mode from
+    // the compiled-in ones. `browser.rs` reads later folders the GUI way too.
+    #[cfg(feature = "gui")]
+    let loaded = if is_gui_mode {
+        Config::read_for_gui(&absolute_path)?
+    } else {
+        Config::read(&absolute_path)?
+    };
+    #[cfg(not(feature = "gui"))]
+    let loaded = Config::read(&absolute_path)?;
+    let mut config = cli::apply_overrides(loaded, &args)?;
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {

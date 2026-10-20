@@ -14,6 +14,7 @@
 import { html, nothing, type TemplateResult } from 'lit'
 import { chipDatetime, formatChipLabel, isOverdue, priorityDot } from './task-format.js'
 import type { TaskHit, TaskStatus } from './types.js'
+import { icon, iconCalendar, iconCheck } from '../icons.js'
 
 /** Indent per nesting level for a subtask, in rem. */
 const DEPTH_INDENT_REM = 0.9
@@ -179,7 +180,7 @@ function renderChips(
             class="mbr-task-due ${overdue ? 'mbr-task-overdue' : ''}"
             datetime=${chipDatetime(hit.due, hit.due_has_time)}
             title=${overdue ? 'Overdue' : 'Due'}
-            >${formatChipLabel(hit.due, hit.due_has_time, locale)}</time
+            >${icon(iconCalendar, { size: 12, className: 'chip-icon' })}${formatChipLabel(hit.due, hit.due_has_time, locale)}</time
           >`
         : nothing}
       ${hit.done
@@ -187,7 +188,7 @@ function renderChips(
             class="mbr-task-completed"
             datetime=${chipDatetime(hit.done, hit.done_has_time)}
             title="Completed"
-            >${formatChipLabel(hit.done, hit.done_has_time, locale)}</time
+            >${icon(iconCheck, { size: 12, className: 'chip-icon' })}${formatChipLabel(hit.done, hit.done_has_time, locale)}</time
           >`
         : nothing}
     </span>

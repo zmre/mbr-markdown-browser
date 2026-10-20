@@ -23,6 +23,12 @@ import { fetchPageLinks } from './graph/links-cache.js';
 import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
 import { isCardKey } from './contact-meta.js';
+import { isMacPlatform } from './mbr-keys.js';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { ICON_SM, icon, iconArrowLeft, iconArrowRight, iconArrowUpRight, iconChevronRight, iconInfo, iconX } from './icons.ts';
+
+/** The disclosure chevron every info-panel summary starts with. */
+const SUMMARY_CHEVRON = icon(iconChevronRight, { size: ICON_SM, className: 'chevron' });
 
 interface Heading {
   level: number;
@@ -59,6 +65,20 @@ declare global {
   interface HTMLElementTagNameMap {
     'mbr-info': MbrInfoElement;
   }
+}
+
+/**
+ * Whether a frontmatter value has nothing to show: absent, blank, or an empty
+ * list/map. Such a row would be a label beside nothing — e.g. `relationships`,
+ * whose list of maps the frontmatter simplifier leaves empty (the panel shows
+ * them in their own section), or `gui_mode: ""` outside the GUI.
+ */
+export function isEmptyMetadataValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
 }
 
 /** Title/description for a note, built from site.json frontmatter. */
@@ -124,8 +144,12 @@ export class MbrInfoElement extends LitElement {
   private _getMeta: (path: string) => NoteMeta | undefined = (path) =>
     this._noteMeta.get(canonicalizeNotePath(path));
 
-  // Keys to skip (internal/technical fields)
-  private static skipKeys = new Set(['markdown_source', 'markdown_source_hash', 'server_mode', 'gui_mode']);
+  // Keys to skip (internal/technical fields the server adds to the page's
+  // frontmatter). `edit_enabled` is no longer sent there; it stays listed for
+  // pages rendered by an older server or a custom template.
+  private static skipKeys = new Set([
+    'markdown_source', 'markdown_source_hash', 'server_mode', 'gui_mode', 'edit_enabled',
+  ]);
 
   // Preferred display order for common keys
   private static preferredOrder = [
@@ -245,7 +269,8 @@ export class MbrInfoElement extends LitElement {
   private _getOrderedKeys(): string[] {
     const type = this._frontmatter['type'];
     const allKeys = Object.keys(this._frontmatter)
-      .filter(k => !MbrInfoElement.skipKeys.has(k) && !isCardKey(type, k));
+      .filter(k => !MbrInfoElement.skipKeys.has(k) && !isCardKey(type, k))
+      .filter(k => !isEmptyMetadataValue(this._frontmatter[k]));
 
     return [
       ...MbrInfoElement.preferredOrder.filter(k => allKeys.includes(k)),
@@ -368,12 +393,13 @@ export class MbrInfoElement extends LitElement {
   private _renderTrigger(): TemplateResult {
     return html`
       <button
-        class="info-trigger"
+        class="info-trigger mbr-icon-btn"
         @click=${() => this._open()}
         aria-label="Open info panel"
-        title="Info (Ctrl+g)"
+        aria-expanded=${this._isOpen ? 'true' : 'false'}
+        title=${isMacPlatform() ? 'Info (⌘G)' : 'Info (Ctrl+G)'}
       >
-        <span class="info-icon">ℹ</span>
+        ${icon(iconInfo)}
       </button>
     `;
   }
@@ -387,7 +413,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section" open>
-        <summary><strong>Metadata</strong></summary>
+        <summary>${SUMMARY_CHEVRON}<strong>Metadata</strong></summary>
         <div class="info-content">
           <table class="metadata-table striped">
             <tbody>
@@ -435,7 +461,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section" open>
-        <summary><strong>Document Info</strong></summary>
+        <summary>${SUMMARY_CHEVRON}<strong>Document Info</strong></summary>
         <div class="info-content">
           <table class="metadata-table striped">
             <tbody>
@@ -496,7 +522,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section" open>
-        <summary><strong>Table of Contents</strong></summary>
+        <summary>${SUMMARY_CHEVRON}<strong>Table of Contents</strong></summary>
         <nav class="toc-nav">
           <ul class="toc-list">
             ${this._headings.map(heading => html`
@@ -586,7 +612,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section" open>
-        <summary>
+        <summary>${SUMMARY_CHEVRON}
           <strong>Relationships</strong>
           <span class="link-count">(${relationships.length})</span>
         </summary>
@@ -611,7 +637,7 @@ export class MbrInfoElement extends LitElement {
     if (this._linksLoading) {
       return html`
         <details class="info-section">
-          <summary><strong>Links Out</strong></summary>
+          <summary>${SUMMARY_CHEVRON}<strong>Links Out</strong></summary>
           <div class="info-content">
             <p class="loading-text">Loading...</p>
           </div>
@@ -629,7 +655,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section">
-        <summary><strong>Links Out</strong> <span class="link-count">(${outbound.length})</span></summary>
+        <summary>${SUMMARY_CHEVRON}<strong>Links Out</strong> <span class="link-count">(${outbound.length})</span></summary>
         <div class="info-content">
           ${internalLinks.length > 0 ? html`
             <div class="link-group">
@@ -654,7 +680,7 @@ export class MbrInfoElement extends LitElement {
                   <li class="link-item">
                     <a href="${safeHref(link.to)}" class="link-url external" target="_blank" rel="noopener">
                       ${link.text || link.to}
-                      <span class="external-icon" aria-label="Opens in new tab">↗</span>
+                      <span class="external-icon" role="img" aria-label="Opens in new tab">${icon(iconArrowUpRight, { size: 14 })}</span>
                     </a>
                   </li>
                 `)}
@@ -670,7 +696,7 @@ export class MbrInfoElement extends LitElement {
     if (this._linksLoading) {
       return html`
         <details class="info-section">
-          <summary><strong>Links In</strong></summary>
+          <summary>${SUMMARY_CHEVRON}<strong>Links In</strong></summary>
           <div class="info-content">
             <p class="loading-text">Loading...</p>
           </div>
@@ -686,7 +712,7 @@ export class MbrInfoElement extends LitElement {
 
     return html`
       <details class="info-section">
-        <summary><strong>Links In</strong> <span class="link-count">(${inbound.length})</span></summary>
+        <summary>${SUMMARY_CHEVRON}<strong>Links In</strong> <span class="link-count">(${inbound.length})</span></summary>
         <div class="info-content">
           <ul class="links-list">
             ${inbound.map(link => html`
@@ -715,7 +741,7 @@ export class MbrInfoElement extends LitElement {
         ${meta.prevPage
           ? html`
             <a href="${meta.prevPage.url}" class="nav-prev" @click=${() => this._close()}>
-              <span class="nav-arrow">←</span>
+              <span class="nav-arrow">${icon(iconArrowLeft, { size: ICON_SM })}</span>
               <span class="nav-label">Previous</span>
               <span class="nav-title">${meta.prevPage.title}</span>
             </a>
@@ -726,7 +752,7 @@ export class MbrInfoElement extends LitElement {
             <a href="${meta.nextPage.url}" class="nav-next" @click=${() => this._close()}>
               <span class="nav-label">Next</span>
               <span class="nav-title">${meta.nextPage.title}</span>
-              <span class="nav-arrow">→</span>
+              <span class="nav-arrow">${icon(iconArrowRight, { size: ICON_SM })}</span>
             </a>
           `
           : html`<div class="nav-spacer"></div>`}
@@ -763,8 +789,8 @@ export class MbrInfoElement extends LitElement {
       <div class="info-panel-backdrop" @click=${() => this._close()}></div>
       <aside class="info-panel" aria-label="Document information">
         <div class="info-panel-content">
-          <button class="info-panel-close" @click=${() => this._close()} aria-label="Close info panel">
-            <span class="info-panel-close-icon">&times;</span>
+          <button class="info-panel-close mbr-icon-btn" @click=${() => this._close()} aria-label="Close info panel" title="Close (Esc)">
+            ${icon(iconX)}
           </button>
 
           <h2>Info</h2>
@@ -793,35 +819,9 @@ export class MbrInfoElement extends LitElement {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
-    }
-
-    /* Trigger button */
-    .info-trigger {
-      cursor: pointer;
-      width: 2rem;
-      height: 2rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 4px;
-      border: none;
-      background: transparent;
-      transition: background 0.15s ease;
-    }
-
-    .info-trigger:hover {
-      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
-    }
-
-    .info-icon {
-      font-size: 1.1rem;
-      line-height: 1;
-      font-style: normal;
-      color: var(--pico-color, #333);
     }
 
     /* Backdrop overlay */
@@ -884,28 +884,8 @@ export class MbrInfoElement extends LitElement {
      * not move it: in the iOS app it sat under the native bar, untappable. */
     .info-panel-close {
       position: absolute;
-      top: calc(0.5rem + env(safe-area-inset-top, 0px));
-      right: calc(0.5rem + env(safe-area-inset-right, 0px));
-      width: 44px;
-      height: 44px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      border-radius: 4px;
-      border: none;
-      background: transparent;
-      transition: background-color 0.2s ease;
-    }
-
-    .info-panel-close:hover {
-      background-color: var(--pico-secondary-hover, #f0f0f0);
-    }
-
-    .info-panel-close-icon {
-      font-size: 2rem;
-      line-height: 1;
-      color: var(--pico-color, #333);
+      top: calc(0.75rem + env(safe-area-inset-top, 0px));
+      right: calc(0.75rem + env(safe-area-inset-right, 0px));
     }
 
     /* Info section styling */
@@ -917,21 +897,47 @@ export class MbrInfoElement extends LitElement {
     }
 
     .info-section summary {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      list-style: none;
       cursor: pointer;
       padding: 0.5rem;
       user-select: none;
-      color: var(--pico-primary, #1095c1);
-      border-radius: 4px;
-      transition: background-color 0.2s ease, color 0.2s ease;
+      color: var(--pico-color, #333);
+      border-radius: calc(var(--mbr-control-radius, 8px) - 2px);
+      transition: background-color 120ms ease;
     }
 
-    .info-section summary:hover {
-      background-color: var(--pico-primary-hover-background, #1095c1);
-      color: var(--pico-primary-inverse, #fff);
+    .info-section summary::-webkit-details-marker {
+      display: none;
     }
 
-    .info-section summary:hover strong {
-      color: var(--pico-primary-inverse, #fff);
+    @media (hover: hover) {
+      .info-section summary:hover {
+        background-color: var(--mbr-control-hover-bg, rgba(127, 127, 127, 0.12));
+      }
+    }
+
+    .info-section summary:focus-visible {
+      outline: none;
+      box-shadow: var(--mbr-focus-ring, 0 0 0 2px var(--pico-primary, #0172ad));
+    }
+
+    .info-section summary .chevron {
+      flex: none;
+      color: var(--mbr-icon-color, var(--pico-muted-color, #666));
+      transition: transform 150ms ease;
+    }
+
+    .info-section[open] > summary .chevron {
+      transform: rotate(90deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .info-section summary .chevron {
+        transition: none;
+      }
     }
 
     .info-content {
@@ -1098,7 +1104,8 @@ export class MbrInfoElement extends LitElement {
     }
 
     .external-icon {
-      font-size: 0.8em;
+      display: inline-flex;
+      vertical-align: -0.1em;
       margin-left: 0.25rem;
       opacity: 0.7;
     }
@@ -1189,7 +1196,7 @@ export class MbrInfoElement extends LitElement {
     }
 
     .nav-arrow {
-      font-size: 1.2rem;
+      display: inline-flex;
       color: var(--pico-primary, #1095c1);
     }
 
@@ -1252,5 +1259,5 @@ export class MbrInfoElement extends LitElement {
         padding: 1.5rem 1rem;
       }
     }
-  `;
+  `];
 }

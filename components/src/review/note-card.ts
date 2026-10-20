@@ -8,7 +8,7 @@
  *
  * # The type glyph is generated content
  *
- * The type icon is a real `<svg>` built by `icon-svg.ts` — the same call the
+ * The type icon is a real `<svg>` built by `types.ts`'s `noteTypeIcon` — the same call the
  * in-document markers make, so the panel and the page cannot drift apart. Lit
  * renders a `Node` handed to a child expression directly, so no `unsafeSVG`
  * and no artwork restated here.
@@ -31,9 +31,7 @@
 import { html, nothing, type TemplateResult } from 'lit'
 import { formatLocation } from './export-format.ts'
 import { displayQuote } from './note-model.ts'
-import { createIconSvg } from './icon-svg.ts'
-import { typeDef } from './types.ts'
-import type { ReviewNote } from './types.ts'
+import { noteTypeIcon, typeDef, type ReviewNote } from './types.ts'
 
 /**
  * Wording for a note whose anchor no longer matches the document, or `null`
@@ -87,7 +85,7 @@ export function renderNoteCard(options: NoteCardOptions): TemplateResult {
         <span class="note-badge" data-type=${note.type}>
           ${def
             ? html`<span class="note-icon" aria-hidden="true"
-                >${createIconSvg(def.id)}</span
+                >${noteTypeIcon(def.id)}</span
               >`
             : nothing}
           <span class="note-type-label">${def?.label ?? note.type}</span>

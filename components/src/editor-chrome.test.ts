@@ -14,7 +14,7 @@ function cssBlock(name: string): string {
 describe('editor chrome', () => {
   it('has Cancel on the left, and ⋯ and Save on the right, in a native-sheet header', () => {
     expect(editorSource).toContain("barButton('Cancel', 'mbr-editor-cancel')")
-    expect(editorSource).toContain("barButton('⋯', 'mbr-editor-more')")
+    expect(editorSource).toContain("iconBarButton(iconEllipsis, 'mbr-editor-more')")
     expect(editorSource).toContain("barButton('Save', 'mbr-editor-save')")
     expect(editorSource).toContain('header.append(cancelBtn, title, actions)')
     const header = cssBlock('HEADER_CSS')

@@ -289,6 +289,21 @@ describe('MbrMediaBrowserElement', () => {
     })
   })
 
+  describe('results count', () => {
+    const countText = (e: MbrMediaBrowserElement) =>
+      (e.shadowRoot?.querySelector('.results-info')?.textContent ?? '').replace(/\s+/g, ' ').trim()
+
+    it('says "1 file", not "1 files"', async () => {
+      el = await mount([file('/img/only.png', { type: 'image' }, 1)])
+      expect(countText(el)).toBe('1 file')
+    })
+
+    it('pluralizes any other count', async () => {
+      el = await mount([file('/img/a.png', { type: 'image' }, 1), file('/img/b.png', { type: 'image' }, 2)])
+      expect(countText(el)).toBe('2 files')
+    })
+  })
+
   describe('pagination', () => {
     it('slices the memoized list to the display limit', async () => {
       const many = Array.from({ length: 10 }, (_, i) =>

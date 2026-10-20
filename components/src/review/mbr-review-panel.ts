@@ -24,6 +24,8 @@
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { safeHref } from '../safe-href.ts'
+import { DISCLOSURE_CSS, ICON_BUTTON_CSS, KBD_CSS } from '../controls.ts'
+import { ICON_SM, icon, iconChevronRight, iconX } from '../icons.ts'
 import { copyText } from './clipboard.ts'
 import { formatReview } from './export-format.ts'
 import './mbr-review-form.ts'
@@ -522,7 +524,7 @@ export class MbrReviewPanelElement extends LitElement {
           Copy as markdown
         </button>
         ${this._renderClearAll(count)}
-        <button class="review-close" @click=${() => this._close()} aria-label="Close">✕</button>
+        <button class="review-close mbr-icon-btn" @click=${() => this._close()} aria-label="Close" title="Close (Esc)">${icon(iconX)}</button>
         ${this._clearFailed
           ? html`<p class="copy-status failed" role="status"
               >Could not clear the notes — this browser refused the write.</p
@@ -699,7 +701,7 @@ export class MbrReviewPanelElement extends LitElement {
           aria-expanded=${this._showMarkdown}
           @click=${() => (this._showMarkdown = !this._showMarkdown)}
         >
-          ${this._showMarkdown ? '▼' : '▶'} Show markdown
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron' })} Show markdown
         </button>
         ${this._showMarkdown
           ? html`<textarea
@@ -729,7 +731,7 @@ export class MbrReviewPanelElement extends LitElement {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, KBD_CSS, css`
     :host {
       display: contents;
     }
@@ -849,16 +851,6 @@ export class MbrReviewPanelElement extends LitElement {
       color: var(--pico-del-color, #dc3545);
     }
 
-    .review-close {
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      font-size: 1rem;
-      line-height: 1;
-      padding: 0.3rem 0.4rem;
-      border-radius: 4px;
-      color: var(--pico-muted-color, #5c6b73);
-    }
 
     .copy-status {
       flex-basis: 100%;
@@ -1021,7 +1013,7 @@ export class MbrReviewPanelElement extends LitElement {
      * and the panel matches the in-document markers. Custom properties cross
      * the shadow boundary; the rules using them do not, hence this. Painted
      * with background-color so the badge's own per-type colour drives it. */
-    /* The icon is a real <svg> from icon-svg.ts, the same call the
+    /* The icon is a real <svg> from types.ts (noteTypeIcon), the same call the
      * in-document markers make. It strokes with currentColor, so the badge's
      * per-type colour above is all this has to set. */
     .note-icon {
@@ -1132,6 +1124,9 @@ export class MbrReviewPanelElement extends LitElement {
     }
 
     .markdown-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
       align-self: flex-start;
       margin: 0;
       background: transparent;
@@ -1171,15 +1166,7 @@ export class MbrReviewPanelElement extends LitElement {
     }
 
     kbd {
-      display: inline-block;
-      padding: 0.05rem 0.3rem;
       margin-right: 0.1rem;
-      font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
-      font-size: 0.68rem;
-      color: var(--pico-color, #333);
-      background: var(--pico-secondary-background, #f5f5f5);
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
     }
 
     @media (max-width: 620px) {
@@ -1187,5 +1174,5 @@ export class MbrReviewPanelElement extends LitElement {
         width: 100vw;
       }
     }
-  `
+  `]
 }

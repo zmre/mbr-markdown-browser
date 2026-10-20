@@ -8,6 +8,10 @@ order: 3
 
 mbr uses [pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) with all extensions enabled, plus additional features for richer content.
 
+![A note in dark mode showing a tip callout, a table and a syntax-highlighted Rust code block](../images/screens/hero-dark.png)
+
+*Callouts, tables and highlighted code, here in dark mode.*
+
 ## Standard Extensions
 
 These are pulldown-cmark's built-in extensions:
@@ -81,7 +85,6 @@ Use callout boxes for important information:
 ```
 
 Available box types: `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`.
-`
 
 ### Live Examples
 
@@ -159,7 +162,7 @@ displayed text and rendered as their own elements, so the line stays readable.
 
 | Syntax | Meaning | Notes |
 |--------|---------|-------|
-| `@due(<date>)` | Due date | Rendered as a 🗓 chip |
+| `@due(<date>)` | Due date | Rendered as a calendar chip |
 | `@done(<date>)` | Completion time | Rendered as a ✓ chip |
 | `#tag` | Tag | `A–Z`, `a–z`, `0–9`, `_` and `-`; must follow a space or start the text |
 | `!!` | High priority | An orange dot |

@@ -32,9 +32,9 @@
         <ul>
           <li>
             {% if parent_path %}
-            <a href="{{ parent_path }}" role="button" class="outline secondary">&lt; Back</a>
+            <a href="{{ parent_path }}" role="button" class="outline secondary mbr-icon-label">{{ icon(name="chevron-left", size=16) | safe }}Back</a>
             {% else %}
-            <a href="/" role="button" class="outline secondary">&lt; Home</a>
+            <a href="/" role="button" class="outline secondary mbr-icon-label">{{ icon(name="house", size=16) | safe }}Home</a>
             {% endif %}
           </li>
         </ul>

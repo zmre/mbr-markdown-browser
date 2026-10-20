@@ -528,3 +528,96 @@ fn test_no_symlink_mounts_applies_to_the_server() {
         );
     }
 }
+
+// ---- edit_enabled per mode ----------------------------------------------------
+
+/// Starts `mbr -s` on `repo` with `args` and `env`, and returns the
+/// `editEnabled` its note page tells the components (as seen from loopback).
+fn served_edit_enabled(repo: &TestRepo, args: &[&str], env: &[(&str, &str)]) -> bool {
+    use std::io::{Read, Write};
+    let port = common::find_available_port();
+    let mut child = mbr_command()
+        .envs(env.iter().copied())
+        .arg("-s")
+        .arg("-q")
+        .arg("-p")
+        .arg(port.to_string())
+        .args(args)
+        .arg(repo.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn mbr -s");
+    let fetch = || -> Option<String> {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        write!(
+            stream,
+            "GET /note/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .ok()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).ok()?;
+        response.contains("editEnabled").then_some(response)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut page = None;
+    while page.is_none() && std::time::Instant::now() < deadline {
+        page = fetch();
+        if page.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let page = page.expect("server never served the page");
+    if page.contains("editEnabled: true,") {
+        true
+    } else {
+        assert!(
+            page.contains("editEnabled: false,"),
+            "no editEnabled in page"
+        );
+        false
+    }
+}
+
+/// The server never edits unless asked: by `--edit`, by the repository's
+/// config or by `MBR_EDIT_ENABLED`; `--no-edit` beats a config that asks.
+#[test]
+fn test_server_editing_is_off_unless_asked_for() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n");
+    assert!(!served_edit_enabled(&repo, &[], &[]), "default");
+    assert!(served_edit_enabled(&repo, &["--edit"], &[]), "--edit");
+    assert!(
+        served_edit_enabled(&repo, &[], &[("MBR_EDIT_ENABLED", "true")]),
+        "env"
+    );
+
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "edit_enabled = true\n",
+    )
+    .unwrap();
+    assert!(served_edit_enabled(&repo, &[], &[]), "config");
+    assert!(
+        !served_edit_enabled(&repo, &["--no-edit"], &[]),
+        "--no-edit"
+    );
+}
+
+#[test]
+fn test_edit_and_no_edit_are_mutually_exclusive() {
+    let repo = TestRepo::new();
+    let output = mbr_command()
+        .args(["-s", "--edit", "--no-edit"])
+        .arg(repo.path())
+        .output()
+        .expect("run mbr");
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("cannot be used with"),
+        "{}",
+        stderr_of(&output)
+    );
+}

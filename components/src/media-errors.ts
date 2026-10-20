@@ -21,6 +21,7 @@
  */
 
 import { html, css, nothing, type CSSResult, type TemplateResult } from 'lit';
+import { ICON_SM, icon, iconTriangleAlert } from './icons.ts';
 
 /** Media kinds used by `errors.json`; mirrors `MediaKind` in `src/page_errors.rs`. */
 export type MediaKind = 'image' | 'video' | 'audio' | 'source';
@@ -401,9 +402,9 @@ export const mediaErrorStyles: CSSResult = css`
 
   .media-error-icon {
     flex: 0 0 auto;
+    display: inline-flex;
+    padding-top: 0.15em;
     color: var(--pico-del-color, #883835);
-    font-size: 1.1em;
-    line-height: 1.3;
   }
 
   .media-error-body {
@@ -444,7 +445,7 @@ export const mediaErrorStyles: CSSResult = css`
 export function renderMediaErrorNotice(notice: MediaErrorNotice): TemplateResult {
   return html`
     <div class="media-error" role="alert">
-      <span class="media-error-icon" aria-hidden="true">&#9888;</span>
+      <span class="media-error-icon" aria-hidden="true">${icon(iconTriangleAlert, { size: ICON_SM })}</span>
       <div class="media-error-body">
         <p class="media-error-headline">${notice.headline}</p>
         ${notice.detail

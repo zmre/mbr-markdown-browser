@@ -5,6 +5,8 @@ import { isInputTarget, isModalOpen } from './mbr-keys.js'
 import { getMbrAssetBase } from './dynamic-loader.js'
 import { currentDocumentPath, syncDocumentTask, toggleTask } from './task-toggle.js'
 import type { MbrOverlay } from './overlay.js'
+import { ICON_BUTTON_CSS } from './controls.ts'
+import { icon, iconListChecks } from './icons.ts'
 import type { TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
 declare global {
@@ -69,7 +71,7 @@ function loadTasksChunk(): Promise<boolean> {
 }
 
 /**
- * `<mbr-tasks>` — clipboard trigger for the task browser.
+ * `<mbr-tasks>` — `list-checks` trigger for the task browser.
  *
  * Ships in the main bundle and stays tiny: a nav button plus the `t` shortcut.
  * The two-pane panel itself lives in the lazily-imported `mbr-tasks.min.js`
@@ -181,27 +183,14 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
   private _renderTrigger(): TemplateResult {
     return html`
       <button
-        class="tasks-trigger"
+        class="tasks-trigger mbr-icon-btn"
         @click=${() => this.toggle()}
         aria-label="Open the task browser"
-        title="Tasks (t)"
+        aria-expanded=${this._isOpen ? 'true' : 'false'}
+        title="Tasks (T)"
         ?aria-busy=${this._loading}
       >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-          <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-        </svg>
+        ${icon(iconListChecks)}
       </button>
     `
   }
@@ -242,30 +231,11 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
     `
   }
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
     }
 
-    /* Trigger button — same metrics as <mbr-info>'s, so the nav row stays even. */
-    .tasks-trigger {
-      cursor: pointer;
-      width: 2rem;
-      height: 2rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 4px;
-      border: none;
-      background: transparent;
-      color: var(--pico-color, #333);
-      transition: background 0.15s ease;
-    }
-
-    .tasks-trigger:hover {
-      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
-    }
 
     .tasks-loading-backdrop {
       position: fixed;
@@ -302,5 +272,5 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
         transform: rotate(360deg);
       }
     }
-  `
+  `]
 }

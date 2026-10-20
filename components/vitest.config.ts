@@ -37,6 +37,22 @@ const readRepoFile = (relative: string): string =>
  * — `crlf.md` must reach the test with its `\r\n`s. A fixture without a
  * golden maps to `null`, which the parity test reports as a failure.
  */
+/**
+ * The icon source of truth, `crates/mbr-core/templates/icons/*.svg`, keyed by
+ * file name, for `icons.test.ts`: it regenerates `src/icon-shapes.ts` from these
+ * and fails when the checked-in module is stale, and checks theme.css's mask
+ * icons draw the same shapes.
+ */
+const readIconSvgs = (): Record<string, string> => {
+  const dir = fileURLToPath(new URL('../crates/mbr-core/templates/icons/', import.meta.url))
+  return Object.fromEntries(
+    readdirSync(dir)
+      .filter((f) => f.endsWith('.svg'))
+      .sort()
+      .map((f) => [f, readFileSync(`${dir}${f}`, 'utf8')])
+  )
+}
+
 const readEditorFixtures = (): Record<string, { source: string; outline: string | null }> => {
   const dir = fileURLToPath(new URL('../tests/fixtures/editor-roundtrip/', import.meta.url))
   const fixtures: Record<string, { source: string; outline: string | null }> = {}
@@ -57,7 +73,10 @@ export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
+    // Pico itself, for the flashcard deck's guard against its [role=group] rules.
+    __MBR_PICO_CSS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/pico-main/pico.min.css')),
     __MBR_APP_BRIDGE_SWIFT__: JSON.stringify(readRepoFile('../apple/ios/MBRMobile/Web/AppBridge.swift')),
+    __MBR_ICON_SVGS__: JSON.stringify(readIconSvgs()),
     __MBR_EDITOR_FIXTURES__: JSON.stringify(readEditorFixtures()),
     // Shared with mbr-core's `editor_math_parity`; under tests/fixtures/ so the
     // Nix test sandbox (flake.nix's source filter) has it too.

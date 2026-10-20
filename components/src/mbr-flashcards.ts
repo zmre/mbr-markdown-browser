@@ -34,6 +34,7 @@ import { getFlashcardsConcentricThreshold, isEditEnabled, isFlashcardsProgressEn
 import { isPlayKey } from './mbr-keys.js'
 import { MbrSlidesElement } from './mbr-slides.js'
 import { PlayFabController } from './fab.js'
+import { ICON_LG, ICON_SM, icon, iconGalleryVerticalEnd } from './icons.ts'
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
 import {
   TOKEN_MESSAGE,
@@ -252,7 +253,7 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     // purpose: template whitespace is not minified.
     const open = () => this.open()
     // prettier-ignore
-    return this._isDeck ? html`<button class="play-slides-btn" @click=${open} title="Review flashcards (P)"><span class="play-icon"></span>Review flashcards</button>${this._showsFab() ? html`<button type="button" class="mbr-fab" @click=${open} aria-label="Review flashcards" title="Review flashcards (P)"><span class="play-icon"></span></button>` : nothing}` : nothing
+    return this._isDeck ? html`<button class="play-slides-btn mbr-icon-btn labeled" @click=${open} aria-label="Review flashcards" title="Review flashcards (P)">${icon(iconGalleryVerticalEnd, { size: ICON_SM })}<span>Review</span></button>${this._showsFab() ? html`<button type="button" class="mbr-fab" @click=${open} aria-label="Review flashcards" title="Review flashcards (P)">${icon(iconGalleryVerticalEnd, { size: ICON_LG })}</button>` : nothing}` : nothing
   }
 
   // <mbr-slides>' own sheet, not a copy: the two buttons share the nav slot

@@ -8,6 +8,10 @@ order: 4
 
 mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at any time to view an in-app help overlay.
 
+![The keyboard shortcuts overlay listing navigation keys and panel keys in two columns](../images/screens/keyboard-shortcuts-help.png)
+
+*The in-app help overlay, opened with `?`.*
+
 ## Page Navigation
 
 | Key | Action |

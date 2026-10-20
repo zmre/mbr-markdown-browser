@@ -137,17 +137,31 @@ export const DECK_CSS = `
 .mbr-fc-filter-pop small { color: var(--pico-muted-color, #6b7280); font-variant-numeric: tabular-nums; }
 .mbr-fc-filter-pop input { margin: 0; flex: none; }
 
-.mbr-fc-close {
-  border: none;
-  background: transparent;
-  /* inherit, not --pico-color: Pico redefines that on every button (to the
-   * primary-inverse white), which made this glyph invisible in light mode. */
-  color: inherit;
-  font-size: 1.4rem !important;
-  line-height: 1;
-  padding: 0.15rem 0.5rem !important;
+.mbr-fc-overlay button > .mbr-icon { flex: none; }
+.mbr-fc-swap,
+.mbr-fc-controls > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
 }
-.mbr-fc-close:hover { background: var(--pico-secondary-background, rgba(0, 0, 0, 0.06)); }
+.mbr-fc-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--mbr-control-radius, 8px);
+  background: transparent;
+  box-shadow: none;
+  /* Not --pico-color: Pico redefines that on every button (to the
+   * primary-inverse white), which made the glyph invisible in light mode. */
+  color: var(--mbr-icon-color, inherit);
+  padding: 0 !important;
+}
+.mbr-fc-close:hover { background: var(--mbr-control-hover-bg, rgba(0, 0, 0, 0.06)); color: var(--mbr-icon-color-hover, inherit); }
+.mbr-fc-close:focus-visible { outline: none; box-shadow: var(--mbr-focus-ring, 0 0 0 2px var(--pico-primary, #0172ad)); }
 
 .mbr-fc-banner {
   margin: 0.6rem auto 0;
@@ -191,7 +205,8 @@ export const DECK_CSS = `
   transform-style: preserve-3d;
   transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1);
   outline: none;
-  border-radius: 1rem;
+  --mbr-fc-radius: 1rem;
+  border-radius: var(--mbr-fc-radius);
 }
 @keyframes mbr-fc-enter {
   from { opacity: 0; transform: translateY(10px) scale(0.985); }
@@ -210,7 +225,7 @@ export const DECK_CSS = `
   flex-direction: column;
   overflow: auto;
   padding: clamp(2rem, 5vw, 3.25rem) clamp(1rem, 4vw, 3rem) clamp(1.25rem, 4vw, 2.5rem);
-  border-radius: 1rem;
+  border-radius: var(--mbr-fc-radius, 1rem);
   border: 1px solid var(--pico-muted-border-color, #e5e7eb);
   background: var(--pico-card-background-color, var(--pico-background-color, #fff));
   box-shadow: var(--pico-card-box-shadow, 0 0.5rem 1.5rem rgba(0, 0, 0, 0.08)), 0 1.5rem 3rem -1.5rem rgba(0, 0, 0, 0.25);
@@ -218,6 +233,17 @@ export const DECK_CSS = `
   -webkit-backface-visibility: hidden;
 }
 .mbr-fc-back { transform: rotateY(180deg); }
+
+/* Pico draws every [role=group] as one joined button group: it squares each
+ * child's corners on the sides that touch a sibling, pulls every child but
+ * the first 1px left, and adds a bottom margin. The card (two faces) and the
+ * rating row (four buttons) are groups for assistive technology only, so
+ * that made the front face square on the right, the back face square on the
+ * left, and the rating buttons square inside. These selectors outrank Pico's
+ * (0,2,0) and (0,2,1) whatever order the sheets load in. */
+.mbr-fc-overlay [role=group] { margin-bottom: 0; }
+.mbr-fc-overlay [role=group] > .mbr-fc-face { border-radius: var(--mbr-fc-radius, 1rem); margin-left: 0; }
+.mbr-fc-overlay [role=group] > button { border-radius: var(--pico-border-radius, 0.25rem); margin-left: 0; }
 .mbr-fc-side {
   position: absolute;
   top: 0.85rem;

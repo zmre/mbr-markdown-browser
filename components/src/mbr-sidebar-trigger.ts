@@ -1,12 +1,15 @@
 import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
+import { ICON_BUTTON_CSS } from './controls.ts'
+import { icon, iconPanelLeft } from './icons.ts'
 
 /**
  * Trigger button for the sidebar navigation drawer.
  *
- * This component renders a hamburger button that dispatches a custom event
- * to toggle the sidebar. It's designed to be placed in the nav bar and is
- * hidden on desktop (where the sidebar is always visible inline).
+ * This component renders the `panel-left` ghost button (the same glyph as
+ * `<mbr-browse>`'s, so both sidebar styles look alike) that dispatches a
+ * custom event to toggle the sidebar. It's designed to be placed in the nav
+ * bar and is hidden on desktop (where the sidebar is always visible inline).
  *
  * Usage:
  * <mbr-sidebar-trigger></mbr-sidebar-trigger>
@@ -16,55 +19,22 @@ import { customElement } from 'lit/decorators.js'
  */
 @customElement('mbr-sidebar-trigger')
 export class MbrSidebarTriggerElement extends LitElement {
-  static override styles = css`
-    :host {
-      display: inline-flex;
-      align-items: center;
-    }
-
-    /* Hide on desktop - sidebar is always visible inline */
-    @media (min-width: 1024px) {
+  static override styles = [
+    ICON_BUTTON_CSS,
+    css`
       :host {
-        display: none;
+        display: inline-flex;
+        align-items: center;
       }
-    }
 
-    button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0.5rem;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      border-radius: 4px;
-      transition: background 0.15s ease;
-      margin-left: 1px;
-      margin-right: 1px;
-    }
-
-    button:hover {
-      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
-      margin-left: 0px;
-      margin-right: 0px;
-    }
-
-    .hamburger {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      width: 18px;
-      height: 14px;
-    }
-
-    .hamburger span {
-      display: block;
-      height: 2px;
-      background: var(--pico-color, currentColor);
-      border-radius: 1px;
-      transition: all 0.2s ease;
-    }
-  `;
+      /* Hide on desktop - sidebar is always visible inline */
+      @media (min-width: 1024px) {
+        :host {
+          display: none;
+        }
+      }
+    `,
+  ];
 
   private _handleClick() {
     window.dispatchEvent(new CustomEvent('mbr-sidebar-toggle'));
@@ -72,12 +42,8 @@ export class MbrSidebarTriggerElement extends LitElement {
 
   override render() {
     return html`
-      <button @click=${this._handleClick} aria-label="Toggle navigation" title="Browse (-)">
-        <div class="hamburger">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
+      <button class="mbr-icon-btn" @click=${this._handleClick} aria-label="Toggle navigation" title="Browse (−)">
+        ${icon(iconPanelLeft)}
       </button>
     `;
   }

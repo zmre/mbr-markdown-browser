@@ -11,6 +11,8 @@ import {
   type RuntimeMediaError,
   type UnplayableMediaError,
 } from './media-errors.js';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { icon, iconTriangleAlert, iconX } from './icons.ts';
 
 /**
  * The tagged variants emitted by `src/page_errors.rs`. Extending this union
@@ -609,12 +611,13 @@ export class MbrPageErrorsElement extends LitElement {
 
     return html`
       <button
-        class="errors-trigger"
+        class="errors-trigger mbr-icon-btn"
         @click=${() => this._toggle()}
         aria-label=${label}
+        aria-expanded=${this._isOpen ? 'true' : 'false'}
         title=${label}
       >
-        <span class="errors-icon">&#9888;</span>
+        ${icon(iconTriangleAlert)}
         <span class="errors-count">${count}</span>
       </button>
     `;
@@ -626,11 +629,12 @@ export class MbrPageErrorsElement extends LitElement {
       <aside class="errors-panel" aria-label="Page problems">
         <div class="errors-panel-content">
           <button
-            class="errors-panel-close"
+            class="errors-panel-close mbr-icon-btn"
             @click=${() => this._close()}
             aria-label="Close errors panel"
+            title="Close (Esc)"
           >
-            <span aria-hidden="true">&times;</span>
+            ${icon(iconX)}
           </button>
           <h2>
             Page Problems
@@ -668,45 +672,36 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
     }
 
-    .errors-trigger {
-      cursor: pointer;
+    .errors-trigger,
+    .errors-trigger[aria-expanded='true'] {
       width: auto;
-      min-width: 2rem;
-      height: 2rem;
-      padding: 0 0.4rem;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+      min-width: 36px;
+      padding-inline: 0.5rem;
       gap: 0.25rem;
-      border-radius: 4px;
-      border: 1px solid transparent;
-      background: transparent;
-      transition: background 0.15s ease, border-color 0.15s ease;
-      color: var(--pico-del-color, #b84a2b);
+      color: var(--mbr-danger, var(--pico-del-color, #b84a2b));
     }
 
-    .errors-trigger:hover {
-      border-color: var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.1));
-      background: var(
-        --pico-secondary-background,
-        rgba(184, 74, 43, 0.08)
-      );
+    @media (hover: hover) {
+      .errors-trigger:hover:not(:disabled) {
+        color: var(--mbr-danger, var(--pico-del-color, #b84a2b));
+        background: color-mix(in srgb, var(--mbr-danger, #b84a2b) 10%, transparent);
+      }
     }
 
-    .errors-icon {
-      font-size: 1.05rem;
-      line-height: 1;
+    .errors-trigger[aria-expanded='true'] {
+      background: color-mix(in srgb, var(--mbr-danger, #b84a2b) 14%, transparent);
     }
 
     .errors-count {
-      font-size: 0.85rem;
+      font-size: 0.8125rem;
       font-weight: 600;
       line-height: 1;
+      font-variant-numeric: tabular-nums;
     }
 
     /* Panel styling mirrors mbr-info's slide-out drawer for consistency. */
@@ -778,24 +773,8 @@ export class MbrPageErrorsElement extends LitElement {
 
     .errors-panel-close {
       position: absolute;
-      top: 1rem;
-      right: 1rem;
-      width: 2rem;
-      height: 2rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      border-radius: 4px;
-      border: none;
-      background: transparent;
-      font-size: 1.6rem;
-      line-height: 1;
-      color: var(--pico-color, #333);
-    }
-
-    .errors-panel-close:hover {
-      background-color: var(--pico-secondary-hover, #f0f0f0);
+      top: calc(0.75rem + env(safe-area-inset-top, 0px));
+      right: 0.75rem;
     }
 
     .summary {
@@ -908,5 +887,5 @@ export class MbrPageErrorsElement extends LitElement {
         padding: 1.5rem 1rem;
       }
     }
-  `;
+  `];
 }

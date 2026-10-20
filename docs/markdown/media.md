@@ -7,6 +7,10 @@ description: Embed videos, audio, and PDFs in markdown
 
 mbr extends the standard image syntax to support rich media embedding.
 
+![An embedded video player showing a landscape poster frame, with a chapter link and a transcript toggle under it](../images/screens/video-embed.png)
+
+*A video embedded with plain image syntax, with chapters and a transcript.*
+
 ## Image Syntax for Media
 
 The standard image syntax `![caption](url)` auto-detects media types:

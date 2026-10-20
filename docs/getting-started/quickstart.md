@@ -7,6 +7,10 @@ description: Get started with mbr in 5 minutes
 
 This guide gets you productive with mbr in 5 minutes.
 
+![The search modal open over a note, showing three results for "buoy" with matching lines](../images/screens/search-modal.png)
+
+*Press `/` anywhere to search titles, tags and note contents.*
+
 ## 1. Launch the GUI
 
 The simplest use case - open a markdown file in a native window:

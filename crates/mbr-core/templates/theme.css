@@ -1,5 +1,26 @@
 :root {
-  --mbr-icon-search: url("data:image/svg+xml,%20%20%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221.2em%22%20height%3D%221.2em%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M416%20208c0%2045.9-14.9%2088.3-40%20122.7l126.6%20126.7c12.5%2012.5%2012.5%2032.8%200%2045.3s-32.8%2012.5-45.3%200L330.7%20376c-34.4%2025.2-76.8%2040-122.7%2040C93.1%20416%200%20322.9%200%20208S93.1%200%20208%200s208%2093.1%20208%20208M208%20352a144%20144%200%201%200%200-288a144%20144%200%201%200%200%20288%22%2F%3E%3C%2Fsvg%3E");
+  /* Icons and icon buttons (components/src/controls.ts, icons.ts). One stroke
+   * weight for every outline icon; at 20px 1.75 draws about 1.46px. The rest
+   * colour is 72% of the text colour over the page, >= 3:1 against the header
+   * in both schemes (WCAG 1.4.11). Open panels (`aria-expanded="true"`) take
+   * the active colour and the press fill. */
+  --mbr-icon-stroke: 1.75;
+  --mbr-icon-color: color-mix(in srgb, var(--pico-color) 72%, var(--pico-background-color));
+  --mbr-icon-color-hover: var(--pico-color);
+  --mbr-icon-color-active: var(--pico-primary);
+  --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 7%, transparent);
+  --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 12%, transparent);
+  --mbr-field-bg: color-mix(in srgb, var(--pico-color) 5%, transparent);
+  --mbr-focus-ring: 0 0 0 2px var(--pico-background-color), 0 0 0 4px var(--pico-primary);
+  --mbr-control-radius: 8px;
+  --mbr-danger: var(--pico-del-color);
+  /* Key caps (`<kbd>`): one quiet style everywhere — the page, the shortcut
+   * help, panel footers, the flashcard deck (controls.ts `KBD_CSS` reads the
+   * same tokens inside shadow roots). Body-coloured text on a faint fill with
+   * a hairline, derived from the text colour so it holds in both schemes. */
+  --mbr-kbd-bg: var(--mbr-field-bg);
+  --mbr-kbd-border: color-mix(in srgb, var(--pico-color) 22%, transparent);
+  --mbr-kbd-color: var(--pico-color);
 
   /* Sidebar Navigation Variables (for mbr-browse-single) */
   --mbr-sidebar-width: 280px;
@@ -95,12 +116,19 @@
   --mbr-dl-transition-duration: 0.25s;
   --mbr-dl-transition-easing: ease;
 
-  /* Alert Icons (SVG Data URIs) */
-  --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cline x1='12' y1='16' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'%3E%3C/line%3E%3C/svg%3E");
-  --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z'%3E%3C/path%3E%3Cpath d='M9 21h6'%3E%3C/path%3E%3C/svg%3E");
-  --mbr-icon-important: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'%3E%3C/path%3E%3Cline x1='12' y1='8' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'%3E%3C/line%3E%3C/svg%3E");
-  --mbr-icon-warning: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'%3E%3C/path%3E%3Cline x1='12' y1='9' x2='12' y2='13'%3E%3C/line%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'%3E%3C/line%3E%3C/svg%3E");
-  --mbr-icon-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2'%3E%3C/polygon%3E%3Cline x1='12' y1='8' x2='12' y2='12'%3E%3C/line%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'%3E%3C/line%3E%3C/svg%3E");
+  /* Icon masks (SVG data URIs) for CSS-drawn icons: GitHub alerts, task
+   * chips, the breadcrumb divider. Each draws the same shapes as
+   * templates/icons/<name>.svg (the Lucide set the components use); the
+   * mapping and the shapes are pinned by components/src/icons.test.ts. */
+  --mbr-icon-note: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
+  --mbr-icon-tip: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5'/%3E%3Cpath d='M9 18h6'/%3E%3Cpath d='M10 22h4'/%3E%3C/svg%3E");
+  --mbr-icon-important: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z'/%3E%3Cpath d='M12 15h.01'/%3E%3Cpath d='M12 7v4'/%3E%3C/svg%3E");
+  --mbr-icon-warning: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+  --mbr-icon-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 16h.01'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z'/%3E%3C/svg%3E");
+  --mbr-icon-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v3'/%3E%3Cpath d='M16 2v3'/%3E%3Crect x='3' y='3' width='18' height='18' rx='2'/%3E%3Cpath d='M3 9h18'/%3E%3C/svg%3E");
+  --mbr-icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  --mbr-icon-arrow-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14'/%3E%3Cpath d='m12 5 7 7-7 7'/%3E%3C/svg%3E");
+  --mbr-icon-chevron-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E");
 
   /* tie reveal.js slides styles to our pico styles and theme */
   --r-background-color: var(--pico-background-color);
@@ -138,6 +166,20 @@
   --r-overlay-element-fg-color: var(--pico-color);
 }
 
+/* Replaces Pico's dark filled chip (see the --mbr-kbd-* tokens above). */
+kbd {
+  padding: 0.0625rem 0.3125rem;
+  border: 1px solid var(--mbr-kbd-border);
+  border-radius: 4px;
+  background: var(--mbr-kbd-bg);
+  box-shadow: none;
+  color: var(--mbr-kbd-color);
+  font-family: inherit;
+  font-size: 0.85em;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 main > section[data-theme="light"] {
   background-color: rgba(255, 255, 255, 0.85);
   padding: var(--pico-block-spacing-vertical) 0;
@@ -148,19 +190,11 @@ main > section[data-theme="dark"] {
   padding: var(--pico-block-spacing-vertical) 0;
 }
 
-.mbr-search-button {
-  width: 1.2em;
-  height: 1.2em;
-  mask-size: cover;
-  mask: var(--mbr-icon-search) no-repeat 100% 100%;
-  background-color: var(--pico-color);
-  border: none;
-  outline: none;
-}
 
 body > header {
   background-color: var(--pico-background-color);
-  border-bottom: 2px solid var(--pico-secondary-border);
+  /* A hairline: the 2px slate rule was the heaviest line on every page. */
+  border-bottom: 1px solid var(--pico-muted-border-color);
   position: sticky;
   top: 0;
   padding-block: 0;
@@ -178,6 +212,25 @@ body > header > nav {
   padding-block: 0;
   margin-block: 0;
 }
+
+/* The title is centred on the header (which spans the content column when the
+ * sidebar is docked), not merely between the two button groups: equal side
+ * tracks put it on the column's axis whenever there is room, and when there is
+ * not, the title track gives way first (it ellipsizes) while the buttons keep
+ * their size. */
+body > header > nav {
+  display: grid;
+  grid-template-columns: 1fr minmax(0, max-content) 1fr;
+  align-items: center;
+}
+
+body > header > nav > ul:first-child {
+  justify-self: start;
+}
+
+body > header > nav > ul:last-child {
+  justify-self: end;
+}
 body > header > nav > ul {
   height: 2.4em;
 }
@@ -194,11 +247,37 @@ body > header nav details[class="dropdown"] summary::after {
 
 nav[aria-label="breadcrumb"] ul li {
   padding-top: 0;
-  font-style: italic;
+}
+
+/* The divider is a chevron (templates/icons/chevron-right.svg as a mask), not
+ * Pico's ASCII ">": muted, 12px, centred in the gap Pico leaves. */
+nav[aria-label="breadcrumb"] ul li:not(:last-child)::after {
+  content: "";
+  position: static;
+  width: 12px;
+  height: 12px;
+  margin: 0 -8px 0 2px;
+  vertical-align: -1px;
+  background-color: var(--pico-muted-color);
+  opacity: 0.6;
+  -webkit-mask: var(--mbr-icon-chevron-right) center / 12px 12px no-repeat;
+  mask: var(--mbr-icon-chevron-right) center / 12px 12px no-repeat;
 }
 
 body > footer {
   border-top: 1px solid var(--pico-secondary-border);
+}
+
+/* Template icons (`{{ icon(name=…) }}`, templates/icons/). A labeled button
+ * puts 8px between its icon and its text. */
+.mbr-icon {
+  flex: none;
+}
+
+.mbr-icon-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 /* ==================== Sidebar Navigation Grid Layout ==================== */
@@ -380,6 +459,11 @@ li::marker {
 
 @media only screen and (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
+    /* Icon buttons - Dark Mode: a touch more fill to read on a dark page. */
+    --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 10%, transparent);
+    --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 16%, transparent);
+    --mbr-field-bg: color-mix(in srgb, var(--pico-color) 8%, transparent);
+
     /* Marginalia - Dark Mode */
     --mbr-marginalia-bg: rgba(32, 38, 50, 0.6);
 
@@ -423,6 +507,11 @@ li::marker {
 }
 
 [data-theme="dark"] {
+  /* Icon buttons - Dark Mode: a touch more fill to read on a dark page. */
+  --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 10%, transparent);
+  --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 16%, transparent);
+  --mbr-field-bg: color-mix(in srgb, var(--pico-color) 8%, transparent);
+
   /* Pull Quote - Dark Mode */
   --mbr-pullquote-bg: rgba(42, 49, 64, 0.4);
   --mbr-pullquote-border: var(--pico-primary-hover);
@@ -542,12 +631,19 @@ blockquote.markdown-alert-caution::before {
   content: "";
   position: absolute;
   left: calc(var(--pico-spacing) * 0.75);
-  top: calc(var(--pico-spacing) * 1.5);
-  width: 22px;
-  height: 22px;
+  top: calc(var(--pico-spacing) + 0.25rem);
+  width: 20px;
+  height: 20px;
   mask-size: contain;
   mask-repeat: no-repeat;
   mask-position: center;
+}
+
+/* Alert bodies are upright text at body size; only the title keeps the italic
+ * that plain quotes use. */
+blockquote[class*="markdown-alert-"] p {
+  font-style: normal;
+  font-size: 1em;
 }
 
 /* Alert title styling */
@@ -559,6 +655,7 @@ blockquote.markdown-alert-caution > p:first-of-type::before {
   --pico-font-weight: 700;
   display: block;
   margin-bottom: 0.25rem;
+  font-style: italic;
 }
 
 /* Note Alert (Blue) */
@@ -600,7 +697,7 @@ blockquote.markdown-alert-important {
 }
 
 blockquote.markdown-alert-important::before {
-  mask: var(--mbr-icon-important);
+  mask-image: var(--mbr-icon-important);
   background-color: var(--mbr-alert-important-icon-color);
 }
 
@@ -784,26 +881,34 @@ li.mbr-task-flash,
 }
 
 /*
- * Chip icons. The gap is a margin rather than a space inside `content`,
- * because CSS consumes one whitespace character as the terminator of a hex
- * escape -- `content: "\2713 "` renders the tick with no space after it.
+ * Chip icons: the shared Lucide shapes as masks in the text colour. Not a
+ * glyph: the calendar's text-presentation selector (U+1F5D3 U+FE0E) is
+ * ignored by Chromium, which drew a colour emoji in every due chip.
  */
 .mbr-task-due::before,
 .mbr-task-completed::before,
 .mbr-task-moved::before {
+  content: "";
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
   margin-inline-end: 0.3em;
+  vertical-align: -0.12em;
+  background-color: currentColor;
+  -webkit-mask: var(--mbr-chip-icon) center / contain no-repeat;
+  mask: var(--mbr-chip-icon) center / contain no-repeat;
 }
 
-.mbr-task-due::before {
-  content: "\1F5D3\FE0E"; /* 🗓 calendar, text presentation */
+.mbr-task-due {
+  --mbr-chip-icon: var(--mbr-icon-calendar);
 }
 
-.mbr-task-completed::before {
-  content: "\2713"; /* ✓ */
+.mbr-task-completed {
+  --mbr-chip-icon: var(--mbr-icon-check);
 }
 
-.mbr-task-moved::before {
-  content: "\2192"; /* → */
+.mbr-task-moved {
+  --mbr-chip-icon: var(--mbr-icon-arrow-right);
 }
 
 /* ==================== Marginalia (>>> - Level 3+ Nesting) ==================== */
@@ -1104,6 +1209,9 @@ nav.breadcrumbs li.mbr-crumbs-more {
 
 nav.breadcrumbs .mbr-crumbs-more button {
   all: unset;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
   cursor: pointer;
   padding: 0 0.35rem;
   min-height: 1.5rem;
@@ -1596,6 +1704,8 @@ a.mbr-link-enhanced[data-tooltip]::after {
   flex: none;
   width: 1.15em;
   height: 1.15em;
+  /* White on a colour disc at ~15px: a touch heavier than the UI weight. */
+  --mbr-icon-stroke: 2;
 }
 
 .mbr-review-marker:hover,
@@ -2247,6 +2357,11 @@ main .mbr-fc-pie-unreviewed {
   background: var(--pico-secondary, #6c757d);
 }
 
+.mbr-contact-card-avatar-default > svg {
+  width: 100%;
+  height: 100%;
+}
+
 /* The genealogy tint the old infobox carried, kept subtle and theme-relative. */
 .mbr-contact-card[data-gender="female"] .mbr-contact-card-avatar-default {
   background: color-mix(in srgb, var(--pico-secondary, #6c757d) 45%, #c2477a);
@@ -2738,34 +2853,6 @@ main .mbr-fc-pie-unreviewed {
     overflow: visible;
   }
 
-  /* Kanban boards lose cards on paper twice over: `height: 85vh` cuts off
-   * everything below one screenful, and the columns scroll horizontally past
-   * the width of the sheet. Flattening to a single column is the only shape
-   * that guarantees every card reaches the page -- the board reads as a run of
-   * headed lists rather than side-by-side columns, which is the right trade
-   * when the alternative is dropping cards silently.
-   *
-   * `break-after` has to be reset too: `always` is a *page* break once there
-   * is no multicol context to consume it, so each list would otherwise eject
-   * the rest of the board onto a fresh sheet.
-   *
-   * Unscoped on purpose -- `.kanban` lands on `<section>` for `--- {.kanban}`
-   * and on `<body>` itself when a note sets `style: kanban` in frontmatter. */
-  .kanban {
-    height: auto;
-    max-height: none;
-    columns: auto;
-    overflow: visible;
-  }
-
-  .kanban > ul,
-  .kanban > ol,
-  .kanban ul:last-child,
-  .kanban ol:last-child {
-    break-before: auto;
-    break-after: auto;
-  }
-
   /* Theater figures size themselves against the viewport and bleed to its full
    * width. The video is dropped below, but the caption is content and must not
    * be squeezed by a viewport-relative height. */
@@ -2975,7 +3062,12 @@ main .mbr-fc-pie-unreviewed {
 /* ============================= Kanban Display ========================= */
 
 /*
- * just use `--- {.kanban}` or put style: kanban in the frontmatter as appropriate
+ * A board is a section opened with `--- {.kanban}`: headings are columns and
+ * each item of a list directly inside the section is a card. There is no
+ * page-wide form. `style: kanban` in frontmatter puts the class on `<body>`,
+ * where `.kanban` pours the whole page into 85vh-tall columns and the
+ * `.kanban > ul` card rules match nothing, so docs/markdown/kanban.md tells
+ * authors not to use it.
  */
 
 .kanban {
@@ -3055,6 +3147,42 @@ main .mbr-fc-pie-unreviewed {
 .kanban ul:last-child,
 .kanban ol:last-child {
   break-after: always;
+}
+
+@media print {
+  /* Kanban boards lose cards on paper twice over: `height: 85vh` cuts off
+   * everything below one screenful, and the columns scroll horizontally past
+   * the width of the sheet. Flattening to a single column is the only shape
+   * that guarantees every card reaches the page -- the board reads as a run of
+   * headed lists rather than side-by-side columns, which is the right trade
+   * when the alternative is dropping cards silently.
+   *
+   * `break-after` has to be reset too: `always` is a *page* break once there
+   * is no multicol context to consume it, so each list would otherwise eject
+   * the rest of the board onto a fresh sheet.
+   *
+   * Unscoped like the screen rules: `.kanban` is the `<section>` that
+   * `--- {.kanban}` opens. (`style: kanban` in frontmatter puts it on
+   * `<body>`, which the docs warn against.)
+   *
+   * This block MUST stay after the screen rules above: it has the same
+   * specificity and `@media print` adds none, so it wins by source order
+   * alone. It used to sit in the main print section earlier in the file and
+   * silently lost. */
+  .kanban {
+    height: auto;
+    max-height: none;
+    columns: auto;
+    overflow: visible;
+  }
+
+  .kanban > ul,
+  .kanban > ol,
+  .kanban ul:last-child,
+  .kanban ol:last-child {
+    break-before: auto;
+    break-after: auto;
+  }
 }
 
 /************ OUTLINE **********************/

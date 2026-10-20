@@ -178,9 +178,17 @@ pub struct Args {
 
     /// Enable the in-browser markdown editing endpoints (server/GUI mode only).
     /// Loopback callers may edit without a token (still CSRF-protected); remote
-    /// callers require a token — see --generate-edit-token. Off by default.
-    #[arg(long)]
+    /// callers require a token — see --generate-edit-token. Default: on in the
+    /// GUI, off for the server (-s); `edit_enabled` in config wins over the
+    /// default.
+    #[arg(long, conflicts_with = "no_edit")]
     pub edit: bool,
+
+    /// Disable in-browser editing, whatever the configuration says. Mainly for
+    /// the GUI, where editing is on by default; applies to every folder the GUI
+    /// opens.
+    #[arg(long, conflicts_with = "edit")]
+    pub no_edit: bool,
 
     /// Generate a hashed editing token from a password (prompted; leave blank to
     /// auto-generate a random token), print the token and the `edit_token_hash`
@@ -231,6 +239,13 @@ impl Args {
 /// - `ConfigError::InvalidHost` if `--host` is unparseable or is IPv6 (only IPv4
 ///   binds are supported, since `Config::host` is a 4-octet array).
 /// - Whatever `Config::validate` returns when `--edit` re-validates the config.
+///
+/// A `--host` that is not loopback, given without `--edit` and with no token
+/// hash configured, turns editing **off** (with a warning) rather than failing:
+/// the GUI's editing default — or a repository's `edit_enabled = true` — must
+/// never become an unauthenticated write endpoint on the network just because
+/// the bind address came from the command line, where `Config::read`'s check
+/// never saw it.
 pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, ConfigError> {
     if let Some(timeout) = args.oembed_timeout_ms {
         config.oembed_timeout_ms = timeout;
@@ -319,6 +334,17 @@ pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, Config
     if let Some(ref suffix) = args.title_suffix {
         config.title_suffix = suffix.clone();
     }
+    if args.no_edit {
+        config.edit_enabled = false;
+    }
+    if args.host.is_some() && !args.edit && config.editing_needs_token() {
+        tracing::warn!(
+            "In-browser editing is off: --host {} is not loopback and no edit_token_hash is \
+             configured. Pass --edit with a token hash to edit over the network.",
+            config.host
+        );
+        config.edit_enabled = false;
+    }
     // Enable in-browser editing from CLI
     if args.edit {
         config.edit_enabled = true;
@@ -370,6 +396,7 @@ mod tests {
             #[cfg(feature = "media-metadata")]
             transcode: false,
             edit: false,
+            no_edit: false,
             generate_edit_token: false,
         }
     }
@@ -909,6 +936,56 @@ mod tests {
             matches!(&result, Err(ConfigError::CanonicalizeFailed { .. })),
             "expected CanonicalizeFailed, got {result:?}"
         );
+    }
+
+    #[test]
+    fn test_parse_no_edit_conflicts_with_edit() {
+        assert!(Args::parse_from(["mbr", "--no-edit"]).no_edit);
+        assert!(!Args::parse_from(["mbr"]).no_edit);
+        assert!(Args::try_parse_from(["mbr", "--edit", "--no-edit"]).is_err());
+    }
+
+    /// `--no-edit` beats a configuration (or the GUI default) that turned
+    /// editing on.
+    #[test]
+    fn test_apply_overrides_no_edit_disables_editing() {
+        for base in [Config::gui_defaults(), Config::default()] {
+            let config = apply_overrides(base, &Args::parse_from(["mbr", "--no-edit"])).unwrap();
+            assert!(!config.edit_enabled);
+        }
+    }
+
+    /// Without a flag, the mode's loaded value passes through untouched: the
+    /// GUI's default on, the server's default off.
+    #[test]
+    fn test_apply_overrides_keeps_the_loaded_edit_default() {
+        let gui = apply_overrides(Config::gui_defaults(), &Args::parse_from(["mbr", "-g"]));
+        assert!(gui.unwrap().edit_enabled);
+        assert!(!overridden(&["mbr", "-s"]).edit_enabled);
+        assert!(!overridden(&["mbr", "-b"]).edit_enabled);
+    }
+
+    /// A non-loopback `--host` must not turn a default (or config) `edit_enabled`
+    /// into an unauthenticated network write endpoint: editing goes off. With a
+    /// token hash it stays on, and `--edit` still fails without one.
+    #[test]
+    fn test_apply_overrides_non_loopback_host_drops_editing_without_a_token() {
+        let argv = ["mbr", "-g", "--host", "0.0.0.0"];
+        let config = apply_overrides(Config::gui_defaults(), &Args::parse_from(argv)).unwrap();
+        assert!(!config.edit_enabled);
+
+        let with_token = Config {
+            edit_token_hash: Some("$argon2id$x".into()),
+            ..Config::gui_defaults()
+        };
+        let config = apply_overrides(with_token, &Args::parse_from(argv)).unwrap();
+        assert!(config.edit_enabled);
+
+        let result = apply_overrides(
+            Config::default(),
+            &Args::parse_from(["mbr", "-s", "--host", "0.0.0.0", "--edit"]),
+        );
+        assert!(matches!(result, Err(ConfigError::EditingRequiresToken)));
     }
 
     #[test]

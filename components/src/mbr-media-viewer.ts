@@ -1,6 +1,7 @@
 import { LitElement, html, css, nothing, type CSSResultGroup, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { resolveUrl } from './shared.js';
+import { icon, iconMusic } from './icons.ts';
 import {
   buildMediaErrorNotice,
   findUnplayableMedia,
@@ -203,9 +204,7 @@ export class MbrMediaViewerElement extends LitElement {
     }
 
     .audio-cover-placeholder svg {
-      width: 64px;
-      height: 64px;
-      fill: currentColor;
+      --mbr-icon-stroke: 1.25;
     }
 
     audio {
@@ -457,9 +456,7 @@ export class MbrMediaViewerElement extends LitElement {
   private _renderAudioPlaceholder(): TemplateResult {
     return html`
       <div class="audio-cover-placeholder">
-        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
-        </svg>
+        ${icon(iconMusic, { size: 64 })}
       </div>
     `;
   }

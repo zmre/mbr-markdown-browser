@@ -6,6 +6,9 @@ import { getMbrAssetBase } from './dynamic-loader.js'
 import type { MbrOverlay } from './overlay.js'
 import { trackVisualViewport } from './visual-viewport.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
+import { isMacPlatform } from './mbr-keys.js'
+import { ICON_BUTTON_CSS, KBD_CSS } from './controls.ts'
+import { ICON_SM, icon, iconImage, iconSearch, iconX } from './icons.ts'
 
 // Dynamically import the media browser component when needed
 const loadMediaBrowser = () => import('./mbr-media-browser.js')
@@ -528,6 +531,15 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     this._isMediaBrowserOpen = false;
   }
 
+  /** The clear button: empty the field the way typing would, keep focus. */
+  private _clearQuery = (): void => {
+    const input = this.shadowRoot?.querySelector<HTMLInputElement>('#search-input');
+    if (!input) return;
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+  };
+
   private _handleInput(e: Event) {
     const target = e.target as HTMLInputElement;
     this._query = target.value;
@@ -882,7 +894,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       >
         <div class="result-header">
           <span class="result-title">${title}</span>
-          <span class="result-type">${result.filetype}</span>
+          ${result.filetype && result.filetype !== 'markdown'
+            ? html`<span class="result-type">${result.filetype}</span>`
+            : nothing}
         </div>
         <div class="result-path">${result.url_path}</div>
         ${result.snippetHtml ? html`
@@ -902,17 +916,22 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   }
 
   private _renderTrigger() {
-    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-    const shortcut = isMac ? '⌘K' : 'Ctrl+K';
+    const shortcut = isMacPlatform() ? '⌘K' : 'Ctrl+K';
 
+    // A filled field from 1024px, a ghost icon button like its neighbours
+    // below; the text and key hint are hidden by CSS, so one element serves
+    // both and keeps its accessible name.
     return html`
-      <button class="search-trigger" @click=${this._openSearch} title="Search (${shortcut})">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <span class="search-text">Search</span>
-        <kbd class="shortcut">${shortcut}</kbd>
+      <button
+        class="search-trigger mbr-icon-btn"
+        @click=${this._openSearch}
+        aria-label="Search"
+        aria-keyshortcuts=${isMacPlatform() ? 'Meta+K' : 'Control+K'}
+        title="Search (${shortcut})"
+      >
+        ${icon(iconSearch)}
+        <span class="search-text" aria-hidden="true">Search</span>
+        <kbd class="shortcut" aria-hidden="true">${shortcut}</kbd>
       </button>
     `;
   }
@@ -929,10 +948,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         <div class="modal" @click=${this._handleModalClick}>
           <div class="search-header">
             <div class="search-input-wrapper">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
-                <circle cx="11" cy="11" r="8"></circle>
-                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-              </svg>
+              ${icon(iconSearch, { className: 'search-icon' })}
               <input
                 id="search-input"
                 type="search"
@@ -947,6 +963,11 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 enterkeyhint="search"
               />
               ${this._isLoading ? html`<span class="loading-indicator" aria-busy="true">Searching...</span>` : nothing}
+              ${this._query
+                ? html`<button class="search-clear mbr-icon-btn sm" @click=${this._clearQuery} aria-label="Clear search" title="Clear">
+                    ${icon(iconX, { size: ICON_SM })}
+                  </button>`
+                : nothing}
             </div>
             ${showScopeSelector ? html`
               <select class="scope-select" @change=${this._handleScopeChange}>
@@ -1020,19 +1041,15 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
           </div>
 
           <div class="search-footer">
-            <button class="media-browser-button" @click=${this._openMediaBrowser} title="Browse media files (=)">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polygon points="23 7 16 12 23 17 23 7"></polygon>
-                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-              </svg>
-              <span>Browse Media</span>
+            <button class="media-browser-button mbr-icon-btn labeled" @click=${this._openMediaBrowser} title="Browse media files (=)">
+              ${icon(iconImage, { size: ICON_SM })}
+              <span>Media</span>
               <kbd>=</kbd>
             </button>
             <span class="footer-hint">
-              <kbd>^n</kbd><kbd>^p</kbd> navigate
-              <kbd>↵</kbd> select
-              <kbd>esc</kbd> close
-              <kbd>^d</kbd><kbd>^u</kbd> scroll
+              <span><kbd>^n</kbd><kbd>^p</kbd> navigate</span>
+              <span><kbd>↵</kbd> open</span>
+              <span><kbd>esc</kbd> close</span>
             </span>
           </div>
         </div>
@@ -1049,14 +1066,12 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
           <div class="media-browser-header">
             <h2>Browse Media</h2>
             <button
-              class="media-browser-close"
+              class="media-browser-close mbr-icon-btn"
               @click=${this._closeMediaBrowser}
               aria-label="Close media browser"
+              title="Close (Esc)"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
+              ${icon(iconX)}
             </button>
           </div>
           <div class="media-browser-content">
@@ -1075,56 +1090,56 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     `;
   }
 
-  static override styles = css`
+  // The trigger is a ghost icon button below 1024px and, from 1024px with a
+  // fine pointer, a filled borderless search field (the macOS toolbar field)
+  // with a muted "Search" and a hairline key hint. The modal hides the
+  // engine's search-cancel glyph (WebKit drew a bold blue one) for its own
+  // clear button. Result type labels appear only for non-markdown results.
+  static override styles = [ICON_BUTTON_CSS, KBD_CSS, css`
     :host {
       display: inline-block;
     }
 
-    /* Trigger button */
-    .search-trigger {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.4rem 0.75rem;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 6px;
-      background: var(--pico-background-color, #fff);
-      color: var(--pico-muted-color, #666);
-      cursor: pointer;
-      font-size: 0.875rem;
-      transition: all 0.15s ease;
+    :host {
+      vertical-align: middle;
     }
 
-    .search-trigger:hover {
-      border-color: var(--pico-primary, #0d6efd);
-      color: var(--pico-color, #333);
-    }
-
-    .search-text {
-      display: none;
-    }
-
-    @media (min-width: 640px) {
-      .search-text {
-        display: inline;
-      }
-    }
-
+    .search-text,
     .shortcut {
       display: none;
-      padding: 0.15rem 0.35rem;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 4px;
-      background: var(--pico-secondary-background, #f5f5f5);
-      color: var(--pico-primary-inverse, #eee);
-      font-size: 0.75rem;
-      font-family: inherit;
     }
 
-    @media (min-width: 640px) {
+    @media (min-width: 1024px) and (pointer: fine) {
+      .search-trigger.mbr-icon-btn {
+        width: auto;
+        min-width: 11rem;
+        height: 36px;
+        margin-inline-start: 0.5rem;
+        padding: 0 0.375rem 0 0.625rem;
+        justify-content: flex-start;
+        gap: 0.5rem;
+        background: var(--mbr-field-bg, rgba(127, 127, 127, 0.08));
+        font-size: 0.875rem;
+      }
+
+      .search-text {
+        display: inline;
+        flex: 1;
+        text-align: left;
+        color: var(--pico-muted-color, #666);
+      }
+
       .shortcut {
         display: inline;
       }
+    }
+
+    /* The field's own shortcut stays a muted, unfilled hint: it sits inside
+       the filled search field, like the placeholder beside it. */
+    .shortcut {
+      border-color: var(--pico-muted-border-color, #ccc);
+      background: transparent;
+      color: var(--pico-muted-color, #666);
     }
 
     /* Modal backdrop */
@@ -1183,8 +1198,15 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     }
 
     .search-icon {
-      color: var(--pico-muted-color, #999);
+      color: var(--mbr-icon-color, var(--pico-muted-color, #999));
       flex-shrink: 0;
+    }
+
+    #search-input::-webkit-search-cancel-button,
+    #search-input::-webkit-search-decoration {
+      -webkit-appearance: none;
+      appearance: none;
+      display: none;
     }
 
     #search-input {
@@ -1323,12 +1345,13 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
     .result-type {
       flex-shrink: 0;
-      padding: 0.1rem 0.4rem;
+      padding: 0.0625rem 0.375rem;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
       border-radius: 4px;
-      background: var(--pico-primary, #0d6efd);
-      color: var(--pico-primary-inverse, #fff);
-      font-size: 0.7rem;
+      color: var(--pico-muted-color, #666);
+      font-size: 0.6875rem;
       text-transform: uppercase;
+      letter-spacing: 0.03em;
     }
 
     .result-path {
@@ -1424,44 +1447,33 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       color: var(--pico-muted-color, #999);
     }
 
-    .media-browser-button {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      padding: 0.35rem 0.6rem;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 5px;
-      background: var(--pico-background-color, #fff);
-      color: var(--pico-muted-color, #666);
-      cursor: pointer;
+    .media-browser-button.mbr-icon-btn {
+      height: 30px;
+      margin-inline-start: -0.375rem;
+      padding-inline: 0.5rem;
+      gap: 0.375rem;
       font-size: 0.75rem;
-      transition: all 0.15s ease;
-    }
-
-    .media-browser-button:hover {
-      border-color: var(--pico-primary, #0d6efd);
-      color: var(--pico-primary, #0d6efd);
-      background: var(--pico-primary-focus, rgba(13, 110, 253, 0.1));
-    }
-
-    .media-browser-button svg {
-      flex-shrink: 0;
-    }
-
-    .media-browser-button kbd {
-      padding: 0.1rem 0.3rem;
-      margin-left: 0.25rem;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
-      background: var(--pico-secondary-background, #f5f5f5);
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 0.7rem;
     }
 
     .footer-hint {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.875rem;
+      white-space: nowrap;
+    }
+
+    .footer-hint kbd + kbd {
+      margin-inline-start: 0.125rem;
+    }
+
+    .footer-hint kbd:last-of-type {
+      margin-inline-end: 0.25rem;
+    }
+
+    @media (max-width: 600px) {
+      .footer-hint {
+        display: none;
+      }
     }
 
     /* On a touch screen with no keyboard the shortcut hints only take space.
@@ -1473,15 +1485,6 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       }
     }
 
-    .footer-hint kbd {
-      padding: 0.1rem 0.3rem;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
-      background: var(--pico-secondary-background, #f5f5f5);
-      color: var(--pico-primary-inverse, #eee);
-      font-family: inherit;
-      font-size: 0.7rem;
-    }
 
     /* Media Browser Popup */
     .media-browser-backdrop {
@@ -1538,25 +1541,6 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       color: var(--pico-color, #333);
     }
 
-    .media-browser-close {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      padding: 0;
-      border: none;
-      border-radius: 6px;
-      background: transparent;
-      color: var(--pico-muted-color, #666);
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-
-    .media-browser-close:hover {
-      background: var(--pico-secondary-background, #f5f5f5);
-      color: var(--pico-color, #333);
-    }
 
     .media-browser-content {
       flex: 1;
@@ -1584,7 +1568,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         padding: 0;
       }
     }
-  `;
+  `];
 }
 
 declare global {

@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { subscribeMediaNav, isNewTabModifier, openInNewTab } from './shared.js';
+import { ICON_LG, ICON_SM, icon, iconFileText, iconFilm, iconImage, iconMusic, iconSearch } from './icons.ts';
 import {
   type OtherFileInfo,
   type MediaType,
@@ -512,16 +513,8 @@ export class MbrMediaBrowserElement extends LitElement {
    * Get icon SVG for media type.
    */
   private _getTypeIcon(type: MediaType): TemplateResult {
-    switch (type) {
-      case 'video':
-        return html`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
-      case 'pdf':
-        return html`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>`;
-      case 'audio':
-        return html`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
-      case 'image':
-        return html`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
-    }
+    const shape = type === 'video' ? iconFilm : type === 'pdf' ? iconFileText : type === 'audio' ? iconMusic : iconImage;
+    return icon(shape, { size: ICON_LG });
   }
 
   /**
@@ -592,21 +585,7 @@ export class MbrMediaBrowserElement extends LitElement {
   private _renderTextFilter(): TemplateResult {
     return html`
       <div class="text-filter-wrapper">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="search-icon"
-        >
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
+        ${icon(iconSearch, { size: ICON_SM, className: 'search-icon' })}
         <input
           id="text-filter"
           type="search"
@@ -783,8 +762,8 @@ export class MbrMediaBrowserElement extends LitElement {
         </div>
         <div class="results-info">
           ${this._textFilter
-            ? html`Showing ${filteredCount} of ${totalCount} files`
-            : html`${totalCount} files`}
+            ? html`Showing ${filteredCount} of ${totalCount} ${totalCount === 1 ? 'file' : 'files'}`
+            : html`${totalCount} ${totalCount === 1 ? 'file' : 'files'}`}
         </div>
         <div class="browser-content">${this._renderGrid()}</div>
       </div>

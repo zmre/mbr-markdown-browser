@@ -10,6 +10,10 @@ Select a sentence, press `r`, and say what you think of it. Press `R` to see
 every note you have written across every file, and copy the lot as markdown to
 paste into a chat with an AI, a pull request, or an email to whoever wrote it.
 
+![The review notes panel listing a suggestion and a question, each with the quoted text and the comment, beside the highlighted page](../images/screens/review-notes.png)
+
+*Review notes (`R`): every comment with its quote, ready to copy as markdown.*
+
 That last step is the point. mbr does not send your review anywhere, does not
 file an issue, and does not write to your files. It collects the comments and
 hands them back as one block of markdown that reads the same whether the
@@ -51,7 +55,7 @@ floating button, which appears only once there is something to look at. The
 header is already crowded with controls that are useful on every page; a review
 button would be useful on the handful of pages where you are actually reviewing.
 
-On a phone or in the iOS app, slide decks and flashcard pages put a floating ▶
+On a phone or in the iOS app, slide decks and flashcard pages put a floating play
 button in the same corner. The review button then stacks above it, and both
 stay clear of the home indicator.
 

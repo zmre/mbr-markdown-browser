@@ -80,7 +80,8 @@ Supported media types are detected by file extension:
 | `--title-prefix <TEXT>` | Text to prepend to all page titles | `""` (empty) |
 | `--title-suffix <TEXT>` | Text to append to all page titles | `""` (empty) |
 | `--transcode` | [EXPERIMENTAL] Enable dynamic video transcoding to 720p/480p (server/GUI mode only). Not needed for [automatic playback recovery](configuration.md#automatic-playback-recovery), which is a stream copy and is always available. | `false` |
-| `--edit` | Enable the in-browser markdown editing endpoints (server/GUI mode). Loopback callers may edit without a token (still CSRF-protected); non-loopback callers require a token. See [editing](../modes/editing.md). | `false` |
+| `--edit` | Enable the in-browser markdown editing endpoints (server/GUI mode). Loopback callers may edit without a token (still CSRF-protected); non-loopback callers require a token. Beats `edit_enabled` in config. See [editing](../modes/editing.md). | GUI: on, server: off |
+| `--no-edit` | Disable in-browser editing, whatever `.mbr/config.toml` or `MBR_EDIT_ENABLED` says. Mainly for the GUI, where editing is on by default; applies to every folder the GUI opens. Conflicts with `--edit`. | (unset) |
 | `--generate-edit-token` | Prompt for a password (blank to auto-generate a random token), print the token and the `edit_token_hash` config line, then exit. Writes nothing to disk. | |
 | `-v, --verbose` | Increase log verbosity | warn level |
 | `-q, --quiet` | Suppress output except errors | |
@@ -149,6 +150,9 @@ mbr -s --oembed-timeout-ms 0 ~/notes
 # Enable in-browser editing (loopback: no token needed)
 mbr -s --edit ~/notes
 
+# Open the GUI read-only (editing is on by default there)
+mbr --no-edit ~/notes
+
 # Generate a hashed editing token for remote use
 mbr --generate-edit-token
 
@@ -157,7 +161,7 @@ MBR_EDIT_TOKEN_HASH='$argon2id$...' mbr -s --edit --host 0.0.0.0 ~/notes
 ```
 
 A startup failure (an invalid flag value, a broken `.mbr/config.toml`, `--edit`
-on a non-loopback host without an `edit_token_hash`) prints `Error: <message>`
+or `edit_enabled = true` on a non-loopback host without an `edit_token_hash`) prints `Error: <message>`
 to stderr, followed by one `caused by:` line per underlying cause, and exits
 with status 1.
 

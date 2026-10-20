@@ -533,7 +533,8 @@ async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), Bro
         BrowserError::ServerStartFailed
     })?;
 
-    let config = Config::read(&absolute_path).map_err(|e| {
+    // The GUI's defaults (editing on), like the first folder `main` opened.
+    let config = Config::read_for_gui(&absolute_path).map_err(|e| {
         tracing::error!("Failed to read config: {e}");
         BrowserError::ServerStartFailed
     })?;
