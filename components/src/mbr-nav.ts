@@ -2,6 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { getCanonicalPath, getSiteFolderTree, resolveUrl, siteNav } from './shared.js'
 import { scheduleIdleTask } from './dynamic-loader.js'
+import { ICON_SM, icon, iconChevronLeft, iconChevronRight } from './icons.ts'
 import {
   type FolderNode,
   type MarkdownFile,
@@ -122,30 +123,26 @@ export class MbrNavElement extends LitElement {
   }
 
   override render() {
+    // Two cards: the direction with its chevron, then the destination title.
+    // With no page in a direction the slot keeps a disabled (and invisible)
+    // button, so the layout and the "not yet loaded" state are unchanged.
+    const card = (file: MarkdownFile | null, dir: 'prev' | 'next') => {
+      const label = dir === 'prev'
+        ? html`${icon(iconChevronLeft, { size: ICON_SM })}Previous`
+        : html`Next${icon(iconChevronRight, { size: ICON_SM })}`;
+      return file
+        ? html`<a href="${resolveUrl(file.url_path)}" class="nav-button ${dir}">
+            <span class="nav-label">${label}</span>
+            <span class="nav-title">${this._getTitle(file)}</span>
+          </a>`
+        : html`<button disabled class="nav-button ${dir}" aria-hidden="true" tabindex="-1">
+            <span class="nav-label">${label}</span>
+          </button>`;
+    };
     return html`
-      <nav>
-        <ul>
-          <li>
-            ${this._prevFile ? html`
-              <a href="${resolveUrl(this._prevFile.url_path)}" class="nav-button prev" title="${this._getTitle(this._prevFile)}">
-                &lt; Previous
-              </a>
-            ` : html`
-              <button disabled class="nav-button prev">&lt; Previous</button>
-            `}
-          </li>
-        </ul>
-        <ul>
-          <li>
-            ${this._nextFile ? html`
-              <a href="${resolveUrl(this._nextFile.url_path)}" class="nav-button next" title="${this._getTitle(this._nextFile)}">
-                Next &gt;
-              </a>
-            ` : html`
-              <button disabled class="nav-button next">Next &gt;</button>
-            `}
-          </li>
-        </ul>
+      <nav aria-label="Previous and next page">
+        ${card(this._prevFile, 'prev')}
+        ${card(this._nextFile, 'next')}
       </nav>
     `;
   }
@@ -156,45 +153,61 @@ export class MbrNavElement extends LitElement {
     }
 
     nav {
-      display: flex;
-      justify-content: space-between;
-    }
-
-    ul {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-    }
-
-    li {
-      display: inline-block;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
     }
 
     .nav-button {
-      display: inline-block;
-      padding: 0.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+      min-width: 0;
+      margin: 0;
+      padding: 0.75rem 1rem;
       border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 4px;
-      background: var(--pico-background-color, #fff);
+      border-radius: var(--mbr-control-radius, 8px);
+      background: transparent;
       color: var(--pico-color, #333);
       text-decoration: none;
-      font-size: 0.9rem;
-      cursor: pointer;
-      transition: all 0.15s ease;
+      font: inherit;
+      transition: border-color 120ms ease, background-color 120ms ease;
     }
 
-    .nav-button:hover:not([disabled]) {
-      border-color: var(--pico-primary, #0d6efd);
+    .nav-button.next {
+      align-items: flex-end;
+      text-align: right;
+    }
+
+    .nav-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.8125rem;
+      color: var(--pico-muted-color, #666);
+    }
+
+    .nav-title {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
       color: var(--pico-primary, #0d6efd);
     }
 
-    .nav-button[disabled] {
-      opacity: 0.5;
-      cursor: not-allowed;
+    a.nav-button:hover {
+      border-color: var(--pico-primary, #0d6efd);
+      background: var(--mbr-control-hover-bg, rgba(127, 127, 127, 0.06));
     }
 
-    a.nav-button {
-      cursor: pointer;
+    a.nav-button:focus-visible {
+      outline: none;
+      box-shadow: var(--mbr-focus-ring, 0 0 0 2px var(--pico-primary, #0d6efd));
+    }
+
+    .nav-button[disabled] {
+      visibility: hidden;
     }
   `;
 }

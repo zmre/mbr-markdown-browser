@@ -34,6 +34,9 @@ import { DRAG_THRESHOLD_PX, clientPointToSvg, fitViewBox, parseViewBox, type Ext
 import { SvgViewportController } from './viewport-controller.js'
 import { separateLabels } from './label-separation.js'
 import { positionAnchored } from '../anchored-popover.js'
+import { ICON_BUTTON_CSS } from '../controls.js'
+import { CONTROL_GROUP_CSS } from '../control-group.js'
+import { ICON_SM, icon, iconMaximize2, iconMinus, iconPlus, iconScan, iconX } from '../icons.js'
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -354,7 +357,7 @@ export class MbrMiniGraphElement extends LitElement {
 
   /**
    * Fit the inline view to the laid-out graph (nodes + labels) with padding, at
-   * the canvas's own aspect ratio, and make it the ⤢ home. Runs after every
+   * the canvas's own aspect ratio, and make it the fit-to-view home. Runs after every
    * synchronous layout, so stepping depth re-fits too.
    */
   private _fitInline(): void {
@@ -848,12 +851,12 @@ export class MbrMiniGraphElement extends LitElement {
         </svg>
         <button
           type="button"
-          class="expand-btn"
+          class="expand-btn mbr-icon-btn sm"
           aria-label="Expand graph"
           title="Expand graph"
           @click=${() => this._openModal()}
         >
-          ⤢
+          ${icon(iconMaximize2, { size: ICON_SM })}
         </button>
         ${this._renderTruncationBadge(graph)}
       </div>
@@ -891,11 +894,12 @@ export class MbrMiniGraphElement extends LitElement {
             ${this._renderStepper()}
             <button
               type="button"
-              class="graph-modal-close"
+              class="graph-modal-close mbr-icon-btn"
               aria-label="Close graph"
+              title="Close (Esc)"
               @click=${() => this._closeModal()}
             >
-              &times;
+              ${icon(iconX)}
             </button>
           </div>
           <div class="graph-modal-canvas">
@@ -916,14 +920,14 @@ export class MbrMiniGraphElement extends LitElement {
 
   /** The depth stepper (expanded modal header and inline canvas). */
   private _renderStepper(): TemplateResult {
-    return html`<div class="depth-stepper rel-graph-controls" role="group" aria-label="Graph depth">
+    return html`<div class="depth-stepper mbr-control-group row rel-graph-controls" role="group" aria-label="Graph depth">
       <button
         type="button"
         aria-label="Decrease depth"
         ?disabled=${this._stepperDepth <= DEPTH_MIN}
         @click=${() => this._stepDepth(-1)}
       >
-        −
+        ${icon(iconMinus, { size: ICON_SM })}
       </button>
       <span class="depth-value" aria-live="polite">${this._stepperDepth}</span>
       <button
@@ -932,7 +936,7 @@ export class MbrMiniGraphElement extends LitElement {
         ?disabled=${this._stepperDepth >= DEPTH_MAX}
         @click=${() => this._stepDepth(1)}
       >
-        +
+        ${icon(iconPlus, { size: ICON_SM })}
       </button>
     </div>`
   }
@@ -947,10 +951,10 @@ export class MbrMiniGraphElement extends LitElement {
         >
           ${this._renderNodes(graph, true)}
         </svg>
-        <div class="zoom-controls rel-graph-controls">
-          <button type="button" aria-label="Zoom in" title="Zoom in" @click=${() => this._modalViewport?.zoomIn()}>+</button>
-          <button type="button" aria-label="Zoom out" title="Zoom out" @click=${() => this._modalViewport?.zoomOut()}>−</button>
-          <button type="button" aria-label="Reset view" title="Reset view" @click=${() => this._modalViewport?.reset()}>⤢</button>
+        <div class="zoom-controls mbr-control-group rel-graph-controls">
+          <button type="button" aria-label="Zoom in" title="Zoom in" @click=${() => this._modalViewport?.zoomIn()}>${icon(iconPlus)}</button>
+          <button type="button" aria-label="Zoom out" title="Zoom out" @click=${() => this._modalViewport?.zoomOut()}>${icon(iconMinus)}</button>
+          <button type="button" aria-label="Fit to view" title="Fit to view" @click=${() => this._modalViewport?.reset()}>${icon(iconScan)}</button>
         </div>
         <div class="inline-depth rel-graph-controls">
           <span class="inline-depth-label">Depth</span>
@@ -978,7 +982,7 @@ export class MbrMiniGraphElement extends LitElement {
   // Styles
   // =====================================================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, CONTROL_GROUP_CSS, css`
     :host {
       display: block;
     }
@@ -1087,30 +1091,6 @@ export class MbrMiniGraphElement extends LitElement {
       position: absolute;
       top: 0.5rem;
       right: 0.5rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .zoom-controls button {
-      width: 2rem;
-      height: 2rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.1rem;
-      line-height: 1;
-      cursor: pointer;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 4px;
-      background: var(--pico-background-color, #fff);
-      color: var(--pico-color, #333);
-      opacity: 0.85;
-    }
-
-    .zoom-controls button:hover {
-      opacity: 1;
     }
 
     .inline-depth {
@@ -1120,10 +1100,6 @@ export class MbrMiniGraphElement extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.4rem;
-      padding: 0.2rem 0.4rem;
-      border: 1px solid var(--pico-muted-border-color, #e0e0e0);
-      border-radius: 6px;
-      background: var(--pico-background-color, #fff);
       font-size: 0.8rem;
       color: var(--pico-muted-color, #666);
     }
@@ -1139,24 +1115,6 @@ export class MbrMiniGraphElement extends LitElement {
       position: absolute;
       top: 0.25rem;
       right: 0.25rem;
-      width: 1.6rem;
-      height: 1.6rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      border: none;
-      border-radius: 4px;
-      background: transparent;
-      color: var(--pico-muted-color, #666);
-      font-size: 0.9rem;
-      line-height: 1;
-    }
-
-    .expand-btn:hover {
-      background: var(--pico-secondary-hover-background, #f0f0f0);
-      color: var(--pico-color, #333);
     }
 
     .truncation-badge {
@@ -1217,45 +1175,23 @@ export class MbrMiniGraphElement extends LitElement {
     }
 
     .depth-stepper {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
+      align-items: stretch;
     }
 
-    .depth-stepper button {
-      width: 1.6rem;
-      height: 1.6rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 4px;
-      background: transparent;
-      color: var(--pico-color, #333);
-      line-height: 1;
-    }
-
-    .depth-stepper button:disabled {
-      opacity: 0.4;
-      cursor: default;
+    .depth-stepper > button {
+      width: 28px;
+      height: 28px;
     }
 
     .depth-value {
-      min-width: 1.2rem;
-      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.75rem;
+      font-size: 0.8125rem;
       font-variant-numeric: tabular-nums;
-    }
-
-    .graph-modal-close {
-      background: transparent;
-      border: none;
-      font-size: 1.4rem;
-      cursor: pointer;
-      color: inherit;
-      line-height: 1;
-      padding: 0.25rem 0.5rem;
+      color: var(--pico-color, #333);
+      border-inline: 1px solid var(--pico-muted-border-color, #e7eaf0);
     }
 
     .graph-modal-canvas {
@@ -1288,5 +1224,5 @@ export class MbrMiniGraphElement extends LitElement {
       margin-top: 0.25rem;
       color: var(--pico-muted-color, #666);
     }
-  `
+  `]
 }

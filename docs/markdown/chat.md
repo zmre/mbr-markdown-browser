@@ -11,6 +11,10 @@ speech bubble per message, each speaker in their own colour, some speakers on
 the right. It is rendered on the server into plain HTML and CSS, so it works in
 static builds, in QuickLook previews and with JavaScript off.
 
+![A chat transcript rendered as speech bubbles, each speaker in a different colour, one speaker aligned to the right](../images/screens/chat-transcript.png)
+
+*A chat block rendered as speech bubbles.*
+
 The syntax is the `chat` format of the Obsidian
 [Chat View](https://github.com/adifyr/obsidian-chat-view) plugin, so notes
 written for it render here without changes. Renderers that know nothing about

@@ -28,6 +28,7 @@
  */
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, property, query, state } from 'lit/decorators.js'
+import { KBD_CSS } from '../controls.ts'
 import { displayQuote } from './note-model.ts'
 import { DEFAULT_NOTE_TYPE, TYPE_DEFS, isNoteType } from './types.ts'
 import type { NoteAnchor, NoteType, ReviewNote, SourceRead, SourceReader } from './types.ts'
@@ -321,7 +322,7 @@ export class MbrReviewFormElement extends LitElement {
     `
   }
 
-  static override styles = css`
+  static override styles = [KBD_CSS, css`
     :host {
       display: contents;
     }
@@ -447,15 +448,7 @@ export class MbrReviewFormElement extends LitElement {
     }
 
     kbd {
-      display: inline-block;
-      padding: 0.05rem 0.3rem;
       margin-right: 0.1rem;
-      font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
-      font-size: 0.68rem;
-      color: var(--pico-color, #333);
-      background: var(--pico-secondary-background, #f5f5f5);
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
     }
-  `
+  `]
 }

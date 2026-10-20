@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { findOverlay, isAnyOverlayOpen } from './overlay.js'
 import { isGuiMode } from './shared.js'
+import { KBD_CSS } from './controls.js'
 import type { NavTab } from './mbr-fuzzy-nav.js'
 
 /**
@@ -594,7 +595,7 @@ export class MbrKeysElement extends LitElement {
     `;
   }
 
-  static override styles = css`
+  static override styles = [KBD_CSS, css`
     :host {
       display: contents;
     }
@@ -619,8 +620,9 @@ export class MbrKeysElement extends LitElement {
       background: var(--pico-background-color, #fff);
       border-radius: 12px;
       box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-      max-width: 700px;
-      max-height: 80vh;
+      max-width: 760px;
+      max-height: 85vh;
+      max-height: 85dvh;
       width: 90vw;
       display: flex;
       flex-direction: column;
@@ -670,9 +672,21 @@ export class MbrKeysElement extends LitElement {
       color: var(--pico-color, #333);
     }
 
+    /* min-height: 0 lets this flex child shrink below its content so it
+       scrolls inside the modal (the default min-height: auto clipped the
+       last rows with no way to reach them). The four backgrounds are the
+       scroll-shadow idiom: a shadow at an edge appears only while there is
+       more to scroll that way, so the cut-off is never silent. */
     .help-content {
+      min-height: 0;
       padding: 1rem 1.5rem;
       overflow-y: auto;
+      overscroll-behavior: contain;
+      background:
+        linear-gradient(var(--pico-background-color, #fff) 30%, transparent) top / 100% 2.5rem no-repeat local,
+        linear-gradient(transparent, var(--pico-background-color, #fff) 70%) bottom / 100% 2.5rem no-repeat local,
+        radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, 0.18), transparent) top / 100% 0.75rem no-repeat scroll,
+        radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.18), transparent) bottom / 100% 0.75rem no-repeat scroll;
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 1.5rem;
@@ -696,12 +710,12 @@ export class MbrKeysElement extends LitElement {
       display: flex;
       align-items: baseline;
       gap: 0.75rem;
-      padding: 0.35rem 0;
+      padding: 0.25rem 0;
     }
 
     .shortcut-item dt {
       flex-shrink: 0;
-      min-width: 100px;
+      min-width: 7.5rem;
     }
 
     .shortcut-item dd {
@@ -710,25 +724,10 @@ export class MbrKeysElement extends LitElement {
       font-size: 0.9rem;
     }
 
-    kbd {
-      display: inline-block;
-      padding: 0.15rem 0.4rem;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 0.8rem;
-      color: var(--pico-color, #333);
-      background: var(--pico-secondary-background, #f5f5f5);
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 4px;
-      box-shadow: 0 1px 0 var(--pico-muted-border-color, #ccc);
+    .help-modal {
+      --mbr-kbd-size: 0.8rem;
     }
-
-    /* Dark mode adjustments */
-    @media (prefers-color-scheme: dark) {
-      kbd {
-        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.1);
-      }
-    }
-  `;
+  `];
 }
 
 declare global {

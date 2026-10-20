@@ -3,6 +3,8 @@ import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
 import { isInputTarget } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
+import { ICON_BUTTON_CSS } from './controls.ts'
+import { ICON_SM, icon, iconChevronRight, iconX } from './icons.ts'
 import {
   type MarkdownFile,
   type SortField,
@@ -718,8 +720,8 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       <div class="sidebar-header">
         <h2>Navigate</h2>
         ${this._isOverlayMode ? html`
-          <button class="close-button" @click=${this.close} aria-label="Close">
-            <span aria-hidden="true">&times;</span>
+          <button class="close-button mbr-icon-btn" @click=${this.close} aria-label="Close" title="Close (Esc)">
+            ${icon(iconX)}
           </button>
         ` : nothing}
       </div>
@@ -798,9 +800,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
               aria-expanded=${isExpanded}
               aria-label="${isExpanded ? 'Collapse' : 'Expand'} ${folderTitle}"
             >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <path d="M4 2L8 6L4 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
+              ${icon(iconChevronRight, { size: ICON_SM })}
             </button>
           ` : html`<span class="expand-spacer"></span>`}
           <a href="${resolveUrl(node.path)}" class="folder-link">
@@ -929,7 +929,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: block;
     }
@@ -1009,25 +1009,13 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
 
     .sidebar-header h2 {
       margin: 0;
-      font-size: 0.9rem;
+      font-size: 0.8125rem;
       font-weight: 600;
       color: var(--pico-muted-color, #666);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
     }
 
     .close-button {
-      background: transparent;
-      border: none;
-      font-size: 1.5rem;
-      color: var(--pico-muted-color, #999);
-      cursor: pointer;
-      padding: 0.25rem;
-      line-height: 1;
-    }
-
-    .close-button:hover {
-      color: var(--pico-color, #333);
+      margin-inline-end: -0.5rem;
     }
 
     /* ==================== Sidebar Navigation ==================== */
@@ -1051,10 +1039,8 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
     }
 
     .section-header {
-      font-size: 0.75rem;
+      font-size: 0.8125rem;
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
       color: var(--pico-muted-color, #666);
       padding: 0.5rem 1rem;
       margin: 0;
@@ -1135,10 +1121,6 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       transform: rotate(90deg);
     }
 
-    .expand-toggle svg {
-      width: 12px;
-      height: 12px;
-    }
 
     .expand-spacer {
       width: 1.25rem;
@@ -1292,7 +1274,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       color: var(--pico-muted-color, #666);
       font-size: 0.875rem;
     }
-  `;
+  `];
 }
 
 declare global {

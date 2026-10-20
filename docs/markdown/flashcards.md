@@ -9,12 +9,16 @@ order: 8
 
 Give a note `type: flashcard` in its frontmatter and every definition list in it
 becomes a deck: each term is the front of a card, its definitions are the back.
-A **Review flashcards** button appears in the header — or press `p` — and the
+A **Review** button (a card stack) appears in the header — or press `p` — and the
 cards open full screen, one at a time, to flip through in order, at random, in a
 growing [Concentric (FSRS)](#concentric--fsrs) stack, or with
 [spaced repetition](#spaced-repetition--fsrs).
 
-On phones (600px wide or less) and in the iOS app, a floating ▶ button in the
+![The flashcard deck showing an answer card with Again, Hard, Good and Easy rating buttons below it](../images/screens/flashcard-deck.png)
+
+*The deck overlay after flipping a card, in Concentric (FSRS) mode.*
+
+On phones (600px wide or less) and in the iOS app, a floating card-stack button in the
 bottom-right corner starts the deck instead of the header button. On a page that
 is both slides and a deck, it starts the slides, the same as `p`.
 

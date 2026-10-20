@@ -6,7 +6,11 @@ order: 5
 
 # Kanban Display
 
-You can make sections display as trello-like kanban columns where each bullet in a list is a card.  You can also do this for an entire file by adding `style: kanban` to the frontmatter, but to do it just for a section in a document, use the `--- {.kanban}` divider to create a section with a kanban style.  Here's a quick example:
+You can make a section of a note display as trello-like kanban columns, where each heading is a column and each bullet in the list under it is a card. Start the section with a `--- {.kanban}` divider (see [section attributes](./#section-attributes) if that syntax is new) and end it with a plain `---` or the end of the file.  Here's a quick example:
+
+![A kanban board with Backlog, In progress and Done columns of cards, one card holding a checklist](../images/screens/kanban-board.png)
+
+*A `--- {.kanban}` section: each heading is a column and each bullet a card.*
 
 ```markdown
 --- {.kanban}
@@ -82,18 +86,41 @@ This is just for display -- if you want to move items, do it in the editor.  Her
 
 ---
 
-This is useful for tracking projects, issues, tasks, etc., and seeing them in a more visual way.  It keeps the markdown pretty standard (particularly if your whole doc is the kanban and you just add the `style: kanban` bit to the frontmatter).
+This is useful for tracking projects, issues, tasks, etc., and seeing them in a more visual way, and the markdown stays standard: a list of headings and bullets with one divider line in front.
 
-`kanban` is a presentation choice rather than a kind of note, which is why it stays in `style:` instead of `type:`.  See [Page Styles and Types](styles/) for the difference and for the other styles that ship with mbr.
+## A Whole File as a Board
 
-> [!NOTE]
-> This uses CSS columns and sometimes columns wrap despite being instructed not to.
+There is no page-wide switch: a board is always a `--- {.kanban}` section. To make a whole note a board, put the divider right after the frontmatter, or after a title and any introduction you want above the board. Headings inside the section become columns, so keep the note's `#` title above the divider:
+
+```markdown
+---
+title: Project board
+---
+# Project board
+
+--- {.kanban}
+
+## Backlog
+
+* Write the proposal
+
+## Done
+
+* Pick a name
+```
+
+> [!WARNING]
+> Do not put `style: kanban` in the frontmatter. Frontmatter styles become classes on the page's `<body>`, and the kanban rules apply to whatever element carries the class. On `<body>` they pour the whole page -- header, note and footer -- into narrow columns 85% of the window tall, while the lists stay plain bulleted lists, because the card rules only match lists directly inside the board. It does not help a page that also has a `--- {.kanban}` section either: the section still becomes a board, but the page around it is broken the same way.
+
+## How the Board Lays Out
+
+The board is CSS multi-column layout, so it takes no JavaScript and no new markdown syntax:
+
+* The board is 85% of the window tall, and each column is about 18rem wide, with as many columns as the headings need.
+* Columns that do not fit the width of the page scroll sideways inside the board.
+* A column whose cards are taller than the board continues at the top of the next column, and every column after it moves one place to the right. Keep each list short enough to fit, or split it under a second heading.
+* Each item of a top-level list in the section is a card. Nested bullets, checklists and text inside an item are that card's content, in normal weight under the card's bold first line.
 
 ## Printing
 
-On screen a board is one screenful tall (`85vh`) with columns that scroll
-sideways. Both of those drop cards on paper — anything below the fold is cut
-off, and any column past the width of the sheet is simply never printed. So
-**print flattens the board to a single column**: it reads as a run of headed
-lists rather than side-by-side columns, which is the right trade when the
-alternative is losing cards without any indication that they existed.
+When printed, a board flattens to a single column: each heading is followed by its list of cards, so every card reaches the page instead of being cut off at the board height or the sheet width.

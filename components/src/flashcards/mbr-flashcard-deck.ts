@@ -93,6 +93,7 @@ import {
   type ConcentricState,
 } from './concentric.js'
 import { offerReload } from '../stale-note.js'
+import { ICON_SM, icon, iconArrowLeftRight, iconChevronLeft, iconChevronRight, iconFunnel, iconX } from '../icons.js'
 import { fitFace } from './fit.js'
 import { shuffle } from './random.js'
 import { ensureDeckStyles } from './styles.js'
@@ -192,9 +193,7 @@ const MODE_LABELS: Readonly<Record<DeckMode, string>> = {
 }
 
 /** The section filter's funnel. */
-const FUNNEL = html`<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
-  <path d="M3 4h18l-7 8.5V19l-4 2v-8.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
-</svg>`
+const FUNNEL = icon(iconFunnel, { size: ICON_SM })
 
 /**
  * A clone of `source`'s children, safe to show a second time on the page:
@@ -953,7 +952,7 @@ export class MbrFlashcardDeckElement extends LitElement {
           title="Show the answer first"
           @click=${this._toggleSwap}
         >
-          <span aria-hidden="true">⇄</span><span class="mbr-fc-swap-label"> Swap sides</span>
+          ${icon(iconArrowLeftRight, { size: ICON_SM })}<span class="mbr-fc-swap-label">Swap sides</span>
         </button>
         ${this._renderFilter()}
         ${this._mode === 'concentric' && this._concentric
@@ -983,7 +982,7 @@ export class MbrFlashcardDeckElement extends LitElement {
           title="Close (Esc)"
           @click=${this._close}
         >
-          ×
+          ${icon(iconX)}
         </button>
       </header>
     `
@@ -1139,13 +1138,13 @@ export class MbrFlashcardDeckElement extends LitElement {
       return html`
         ${this._ordered
           ? html`<button type="button" class="secondary outline" ?disabled=${this._position === 0} @click=${this._back}>
-              ← Previous
+              ${icon(iconChevronLeft, { size: ICON_SM })}Previous
             </button>`
           : nothing}
         <button type="button" class="mbr-fc-primary" @click=${this._flip}>Show answer</button>
         ${this._ordered
           ? html`<button type="button" class="secondary outline" @click=${() => this._goTo(this._position + 1)}>
-              Next →
+              Next${icon(iconChevronRight, { size: ICON_SM })}
             </button>`
           : nothing}
       `
@@ -1192,9 +1191,9 @@ export class MbrFlashcardDeckElement extends LitElement {
     }
     return html`
       <button type="button" class="secondary outline" ?disabled=${this._position === 0} @click=${this._back}>
-        ← Previous
+        ${icon(iconChevronLeft, { size: ICON_SM })}Previous
       </button>
-      <button type="button" class="mbr-fc-primary" @click=${() => this._goTo(this._position + 1)}>Next →</button>
+      <button type="button" class="mbr-fc-primary" @click=${() => this._goTo(this._position + 1)}>Next${icon(iconChevronRight, { size: ICON_SM })}</button>
       ${history}
     `
   }

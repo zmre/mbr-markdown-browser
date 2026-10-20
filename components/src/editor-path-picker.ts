@@ -22,6 +22,7 @@ import {
   parentFolder,
   DEFAULT_MARKDOWN_EXTENSIONS,
 } from './editor-picker-shared.js';
+import { iconElement, iconX } from './icon-dom.ts';
 
 /** Minimal markdown-file shape read from site.json. */
 export interface SiteMarkdownFile {
@@ -115,7 +116,7 @@ export function openPathPicker(opts: PathPickerOptions): Promise<PathPickResult 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'mbr-picker-close';
     closeBtn.setAttribute('aria-label', 'Cancel');
-    closeBtn.textContent = '×';
+    closeBtn.append(iconElement(iconX));
     closeBtn.addEventListener('click', () => finish(null));
     header.append(h3, closeBtn);
 

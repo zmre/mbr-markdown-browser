@@ -213,3 +213,31 @@ describe('theme.css: nothing widens the page', () => {
     expect(clipping[0].conditions).toEqual([])
   })
 })
+
+describe('kanban print rules', () => {
+  // Same specificity as the screen rules and `@media print` adds none, so the
+  // print block wins only by coming later. It once sat earlier and lost, and a
+  // printed board kept its 85vh columns and dropped cards.
+  it('come after the screen rules they override', () => {
+    const rules = parseRules(__MBR_THEME_CSS__)
+    const lastIndex = (pred: (r: Rule) => boolean) =>
+      rules.reduce((last, r, i) => (pred(r) ? i : last), -1)
+    const isPrint = (r: Rule) => r.conditions.some((c) => /^@media\s+print/.test(c))
+    const lastScreen = lastIndex(
+      (r: Rule) => r.selector === '.kanban' && r.conditions.length === 0
+    )
+    const print = rules.findIndex(
+      (r) => r.selector === '.kanban' && isPrint(r) && /height:\s*auto/.test(r.body)
+    )
+    expect(lastScreen).toBeGreaterThanOrEqual(0)
+    expect(print).toBeGreaterThan(lastScreen)
+
+    const lastScreenBreak = lastIndex(
+      (r: Rule) => r.selector.includes('.kanban ul:last-child') && !isPrint(r)
+    )
+    const printBreak = rules.findIndex(
+      (r) => r.selector.includes('.kanban ul:last-child') && isPrint(r)
+    )
+    expect(printBreak).toBeGreaterThan(lastScreenBreak)
+  })
+})

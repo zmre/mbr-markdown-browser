@@ -62,9 +62,9 @@
         <ul>
           <li>
             {% if parent_path %}
-            <a href="{{ parent_path }}" role="button" class="outline secondary">&lt; Up to Parent Directory</a>
+            <a href="{{ parent_path }}" role="button" class="outline secondary mbr-icon-label">{{ icon(name="arrow-up", size=16) | safe }}Parent folder</a>
             {% else %}
-            <button disabled class="outline secondary">&lt; Up to Parent Directory</button>
+            <button disabled class="outline secondary mbr-icon-label">{{ icon(name="arrow-up", size=16) | safe }}Parent folder</button>
             {% endif %}
           </li>
         </ul>

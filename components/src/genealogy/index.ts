@@ -263,35 +263,51 @@ const BASE_CSS = `
   font-size: 0.9rem;
 }
 
-/* Zoom controls shared by every pan/zoom chart view. */
+/* Zoom controls shared by every pan/zoom chart view: one rounded pill with
+ * hairline separators (the same look as control-group.ts, restated here
+ * because this sheet is light-DOM CSS text). */
 .rel-graph-controls {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
   z-index: 2;
+  background: var(--pico-background-color, #fff);
+  border: 1px solid var(--pico-muted-border-color, #e7eaf0);
+  border-radius: var(--mbr-control-radius, 8px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
 }
 
 .rel-graph-controls button {
-  width: 2rem;
-  height: 2rem;
+  width: 32px;
+  height: 32px;
+  margin: 0;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.1rem;
-  line-height: 1;
   cursor: pointer;
-  border: 1px solid var(--pico-muted-border-color, #ccc);
-  border-radius: 4px;
-  background: var(--pico-background-color, #fff);
-  color: var(--pico-color, #333);
-  opacity: 0.85;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--mbr-icon-color, var(--pico-muted-color, #5c6b73));
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.rel-graph-controls button + button {
+  border-top: 1px solid var(--pico-muted-border-color, #e7eaf0);
 }
 
 .rel-graph-controls button:hover {
-  opacity: 1;
+  background: var(--mbr-control-hover-bg, rgba(127, 127, 127, 0.12));
+  color: var(--mbr-icon-color-hover, var(--pico-color, #373c44));
+}
+
+.rel-graph-controls button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--pico-primary, #0172ad);
 }
 `

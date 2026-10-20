@@ -11,6 +11,10 @@ reads a few well-known frontmatter fields and renders them as a **contact card**
 at the top of the page: avatar, name, role, phone numbers, email addresses,
 websites, postal addresses and dates.
 
+![A contact card for a fictional person with avatar, job title and company link, phone numbers, email addresses, website, address and dates](../images/screens/contact-card.png)
+
+*The contact card at the top of a `type: person` note.*
+
 ```yaml
 ---
 type: person
@@ -305,6 +309,10 @@ and doing so does not change your saved choice.
 
 ### Org chart
 
+![An org chart with the organization at the top, a director beneath it, and people grouped by department, with the current person highlighted](../images/screens/org-chart.png)
+
+*The org chart, grouped by department, with the current note highlighted.*
+
 - **On an organization's page** the organization is the root and its employees
   hang beneath it, arranged by who reports to whom. Someone whose manager does
   not list the employer is still placed under that manager.
@@ -320,7 +328,7 @@ and doing so does not change your saved choice.
 - Charts are capped at 80 people. Whatever does not fit becomes a **+N more**
   card; clicking it opens the page of the person those reports belong to, where
   they are drawn in full.
-- Click a card to go to that note. Drag to pan, scroll or pinch to zoom; `⤢`
+- Click a card to go to that note. Drag to pan, scroll or pinch to zoom; the fit-to-view button
   resets the view.
 
 ### All people and All

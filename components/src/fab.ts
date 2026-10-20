@@ -30,7 +30,7 @@ import { css, type ReactiveController, type ReactiveControllerHost } from 'lit'
 export const PLAY_FAB_QUERY = '(max-width: 600px)'
 
 /** How far the review button moves up while a play button is showing. */
-export const FAB_STACK_OFFSET = '3.75rem'
+export const FAB_STACK_OFFSET = '4.25rem'
 
 const STACK_PROPERTY = '--mbr-fab-stack-offset'
 const STACK_COUNT = 'mbrFabStack'
@@ -45,14 +45,16 @@ export function isEmbeddedPage(): boolean {
  * over. Shown in the app at every width, but there the nav button is inside a
  * collapsed header already.
  */
+// The play glyph is nudged 1.5px right: a filled triangle's visual centre is
+// right of its box centre.
 export const FAB_CSS = css`
   .mbr-fab {
     position: fixed;
     z-index: 800;
     right: calc(1rem + env(safe-area-inset-right, 0px));
     bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
-    width: 3rem;
-    height: 3rem;
+    width: 56px;
+    height: 56px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -66,15 +68,18 @@ export const FAB_CSS = css`
   }
 
   .mbr-fab:focus-visible {
-    outline: 3px solid var(--pico-primary-focus, rgba(1, 114, 173, 0.5));
-    outline-offset: 2px;
+    outline: none;
+    box-shadow:
+      0 8px 20px -6px rgba(0, 0, 0, 0.45),
+      var(--mbr-focus-ring, 0 0 0 2px #fff, 0 0 0 4px var(--pico-primary, #0172ad));
   }
 
-  .mbr-fab .play-icon {
-    border-left-width: 14px;
-    border-top-width: 9px;
-    border-bottom-width: 9px;
-    margin: 0 0 0 4px;
+  .mbr-fab:active {
+    filter: brightness(0.92);
+  }
+
+  .mbr-fab .mbr-icon.play-glyph {
+    margin-inline-start: 1.5px;
   }
 
   @media (max-width: 600px) {

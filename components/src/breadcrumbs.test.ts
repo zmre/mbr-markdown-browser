@@ -115,7 +115,7 @@ describe('narrow-screen rules', () => {
     expect(infoSource).toContain('height: 100dvh')
     // The close button clears the native bar / notch (it is absolute in the
     // fixed panel, so the panel's own padding does not move it).
-    expect(infoSource).toContain('top: calc(0.5rem + env(safe-area-inset-top, 0px))')
+    expect(infoSource).toContain('top: calc(0.75rem + env(safe-area-inset-top, 0px))')
     expect(pageErrorsSource).toContain('height: 100dvh')
     // Capped by the visual viewport too (visual-viewport.test.ts).
     expect(searchSource).toContain('max-height: min(70dvh,')

@@ -57,6 +57,7 @@ pub mod embedded_pico;
 pub mod errors;
 pub mod flashcards;
 pub mod html;
+pub mod icons;
 pub mod link_index;
 pub mod link_transform;
 pub mod markdown;

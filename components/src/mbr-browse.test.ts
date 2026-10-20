@@ -834,7 +834,7 @@ describe('MbrBrowseElement with site data', () => {
  * ("No files found"), showed a blank screen with nothing to tap.
  */
 describe('MbrBrowseElement narrow layout', () => {
-  const css = (customElements.get('mbr-browse') as unknown as { styles: { cssText: string } }).styles.cssText
+  const css = [(customElements.get('mbr-browse') as unknown as { styles: { cssText: string } | { cssText: string }[] }).styles].flat().map((s) => s.cssText).join('\n')
   const narrow = css.slice(css.indexOf('@media (max-width: 768px)'))
   const middlePane = narrow.slice(narrow.indexOf('.middle-pane {'), narrow.indexOf('}', narrow.indexOf('.middle-pane {')))
 
@@ -855,7 +855,7 @@ describe('MbrBrowseElement narrow layout', () => {
  * colours, which left the title and metadata nearly unreadable.
  */
 describe('MbrBrowseElement current file card', () => {
-  const css = (customElements.get('mbr-browse') as unknown as { styles: { cssText: string } }).styles.cssText
+  const css = [(customElements.get('mbr-browse') as unknown as { styles: { cssText: string } | { cssText: string }[] }).styles].flat().map((s) => s.cssText).join('\n')
   const start = css.indexOf('.file-card.current {')
   const rule = css.slice(start, css.indexOf('}', start))
 

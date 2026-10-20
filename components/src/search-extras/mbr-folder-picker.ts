@@ -13,6 +13,8 @@
  */
 import { LitElement, html, css, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { ICON_BUTTON_CSS } from '../controls.ts'
+import { ICON_SM, icon, iconFolder } from '../icons.ts'
 
 /** Most folders listed at once; the filter narrows the rest. */
 const MAX_LISTED_FOLDERS = 200
@@ -148,51 +150,25 @@ export class MbrFolderPickerElement extends LitElement {
     return html`
       <button
         type="button"
+        class="mbr-icon-btn sm"
         title="Choose a folder to search in"
         aria-label="Choose a folder to search in"
         aria-haspopup="listbox"
         aria-expanded=${this._open ? 'true' : 'false'}
         @click=${() => (this._open ? this.close() : this.open())}
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-        </svg>
+        ${icon(iconFolder, { size: ICON_SM })}
       </button>
       ${this._open ? this._renderList() : nothing}
     `
   }
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       position: relative;
       display: inline-flex;
     }
 
-    button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 1.5rem;
-      height: 1.5rem;
-      margin: 0;
-      padding: 0;
-      border: 1px solid transparent;
-      border-radius: 4px;
-      background: transparent;
-      color: var(--pico-muted-color, #666);
-      cursor: pointer;
-    }
-
-    button:hover,
-    button[aria-expanded='true'] {
-      color: var(--pico-color, #333);
-      border-color: var(--pico-muted-border-color, #ccc);
-    }
-
-    button:focus-visible {
-      outline: 2px solid var(--pico-primary, #0172ad);
-      outline-offset: 1px;
-    }
 
     .picker {
       position: absolute;
@@ -256,5 +232,5 @@ export class MbrFolderPickerElement extends LitElement {
       color: var(--pico-muted-color, #888);
       font-family: inherit;
     }
-  `
+  `]
 }

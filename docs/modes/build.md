@@ -178,6 +178,10 @@ The `build/` folder contains plain HTML/CSS/JS that works anywhere:
 
 Pagefind search is automatically configured and works out of the box.
 
+![Full-text search results with highlighted matches on a statically built site](../images/screens/static-site-search.png)
+
+*Search in a static build, powered by the Pagefind index generated at build time.*
+
 ### Search Features
 
 - **Instant results**: Searches as you type

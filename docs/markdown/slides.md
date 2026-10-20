@@ -8,6 +8,10 @@ order: 5
 
 mbr can transform any markdown document into a presentation using [Reveal.js](https://revealjs.com/).
 
+![A slide titled "Why buoys?" with three bullet points, playing full screen](../images/screens/slides-playing.png)
+
+*A `type: slides` note playing as a Reveal.js deck.*
+
 ## Quick Start
 
 Add `type: slides` to your frontmatter:
@@ -53,8 +57,8 @@ Final slide
 
 ## Playing the Slides
 
-Click **Play Slides (P)** in the header, or press `p`. On phones (600px wide or
-less) and in the iOS app, the header button gives way to a floating ▶ button in
+Click **Play** in the header, or press `p`. On phones (600px wide or
+less) and in the iOS app, the header button gives way to a floating play button in
 the bottom-right corner that starts the slides. There, a small ✕ button in the
 bottom-left corner leaves the presentation and reloads the page, since a touch
 screen has no `Esc`. While the slides play, the iOS app hides its navigation

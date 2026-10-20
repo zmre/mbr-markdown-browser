@@ -1,6 +1,8 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 import type { MbrOverlay } from './overlay.js';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { ICON_SM, icon, iconCaseSensitive, iconChevronDown, iconChevronUp, iconX } from './icons.ts';
 import {
   FIND_REVEAL_CLASS,
   SEARCH_ROOT_SELECTOR,
@@ -833,15 +835,15 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
         />
         <span class="status" role="status" aria-live="polite">${status}</span>
         <button
-          class="toggle ${this._caseSensitive ? 'active' : ''}"
+          class="toggle mbr-icon-btn sm"
           title="Match case"
           aria-label="Match case"
-          aria-pressed=${this._caseSensitive}
+          aria-pressed=${this._caseSensitive ? 'true' : 'false'}
           @click=${this._toggleCaseSensitive}
-        >Aa</button>
-        <button class="step" title="Previous match" aria-label="Previous match" ?disabled=${disabled} @click=${() => this.findPrevious()}>&#8593;</button>
-        <button class="step" title="Next match" aria-label="Next match" ?disabled=${disabled} @click=${() => this.findNext()}>&#8595;</button>
-        <button class="step" title="Close" aria-label="Close find bar" @click=${() => this.close()}>&#10005;</button>
+        >${icon(iconCaseSensitive)}</button>
+        <button class="step mbr-icon-btn sm" title="Previous match" aria-label="Previous match" ?disabled=${disabled} @click=${() => this.findPrevious()}>${icon(iconChevronUp, { size: ICON_SM })}</button>
+        <button class="step mbr-icon-btn sm" title="Next match" aria-label="Next match" ?disabled=${disabled} @click=${() => this.findNext()}>${icon(iconChevronDown, { size: ICON_SM })}</button>
+        <button class="step mbr-icon-btn sm" title="Close" aria-label="Close find bar" @click=${() => this.close()}>${icon(iconX, { size: ICON_SM })}</button>
       </div>
     `;
   }
@@ -850,7 +852,7 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
     }
@@ -893,35 +895,6 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
       font-variant-numeric: tabular-nums;
     }
 
-    .toggle,
-    .step {
-      flex-shrink: 0;
-      padding: 0.15rem 0.4rem;
-      background: transparent;
-      border: 1px solid transparent;
-      border-radius: 4px;
-      color: var(--pico-muted-color, #666);
-      font-size: 0.8rem;
-      font-family: inherit;
-      line-height: 1.4;
-      cursor: pointer;
-    }
-
-    .toggle:hover,
-    .step:hover:not(:disabled) {
-      background: var(--pico-secondary-background, #f5f5f5);
-      color: var(--pico-color, #333);
-    }
-
-    .toggle.active {
-      border-color: var(--pico-primary, #0d6efd);
-      color: var(--pico-primary, #0d6efd);
-    }
-
-    .step:disabled {
-      opacity: 0.4;
-      cursor: default;
-    }
 
     @media (max-width: 480px) {
       .find-bar {
@@ -934,5 +907,5 @@ export class MbrFindBarElement extends LitElement implements MbrOverlay {
         width: auto;
       }
     }
-  `;
+  `];
 }

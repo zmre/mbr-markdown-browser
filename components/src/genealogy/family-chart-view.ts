@@ -22,6 +22,7 @@ import type { Data, Datum, TreeDatum } from 'family-chart'
 import familyChartCss from 'family-chart/styles/family-chart.css?inline'
 import { familyGraph, formatLifespan, hasFamilyEdges } from '../graph/relationship-graph.js'
 import { DRAG_THRESHOLD_PX } from '../graph/viewport.js'
+import { iconElement, iconScan } from '../icon-dom.ts'
 import { findParentChildCycle, toFamilyChartData } from './family-chart-data.js'
 import { computeInitialViewBox } from './timeline-layout.js'
 import {
@@ -256,7 +257,7 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
   controls.className = 'rel-graph-controls'
   const recenter = document.createElement('button')
   recenter.type = 'button'
-  recenter.textContent = '⤢'
+  recenter.append(iconElement(iconScan))
   recenter.setAttribute('aria-label', 'Recenter')
   recenter.title = 'Recenter'
   recenter.addEventListener(

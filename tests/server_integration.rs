@@ -6714,6 +6714,50 @@ async fn test_page_edit_enabled_follows_the_host_gate_without_a_token() {
 }
 
 #[tokio::test]
+async fn test_edit_enabled_is_not_note_frontmatter() {
+    // Regression: the flag rode in the page's frontmatter, so it reached
+    // `window.frontmatter` and the info panel listed "Edit enabled: true" as
+    // note metadata on every page once editing was on (the GUI default).
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "---\ntitle: Note\n---\n# Note\n\nbody");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let html = server
+        .client
+        .get(server.url("/note/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("editEnabled: true,"),
+        "page must still enable editing"
+    );
+    assert!(
+        html.contains("<mbr-editor>"),
+        "editor button must still render"
+    );
+    let frontmatter_line = html
+        .lines()
+        .find(|line| line.contains("window.frontmatter = "))
+        .expect("page carries window.frontmatter");
+    assert!(
+        frontmatter_line.contains("\"title\":\"Note\""),
+        "frontmatter line found: {frontmatter_line}"
+    );
+    assert!(
+        !frontmatter_line.contains("edit_enabled"),
+        "edit_enabled leaked into window.frontmatter: {frontmatter_line}"
+    );
+}
+
+#[tokio::test]
 async fn test_page_edit_enabled_on_any_host_when_a_token_is_configured() {
     // With a token the Host is not checked; the 401 → enter-token flow is how a
     // remote reader edits, so the page must keep offering it.

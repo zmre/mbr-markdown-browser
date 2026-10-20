@@ -11,6 +11,16 @@
  * the lazy chunk, so it must stay free of state, DOM and fetches.
  */
 
+import {
+  iconCircleHelp,
+  iconElement,
+  iconFileText,
+  iconLightbulb,
+  iconPencilLine,
+  iconStar,
+  iconTriangleAlert,
+} from '../icon-dom.ts'
+
 /**
  * Element-id prefix for a note's marker: `mbr-review-<id>`.
  *
@@ -44,16 +54,7 @@ export interface NoteTypeDef {
   readonly description: string
 }
 
-/**
- * The six types, in pwnvim's order.
- *
- * No artwork here on purpose. Each type's icon is an outline SVG defined once
- * in `templates/theme.css` as `--mbr-review-icon-<id>` and painted as a CSS
- * mask, so the in-document marker and the panel's badge cannot disagree and a
- * repository can retheme both by overriding those properties. Emoji lived here
- * first and were the wrong tool: their per-platform metrics differ enough that
- * no single box centres all six.
- */
+/** The six types, in pwnvim's order. Artwork is {@link NOTE_TYPE_ICONS}. */
 export const TYPE_DEFS: readonly NoteTypeDef[] = [
   { id: 'issue', label: 'Issue', description: 'Problems to fix' },
   { id: 'suggestion', label: 'Suggestion', description: 'Improvements' },
@@ -62,6 +63,31 @@ export const TYPE_DEFS: readonly NoteTypeDef[] = [
   { id: 'question', label: 'Question', description: 'Clarification needed' },
   { id: 'insight', label: 'Insight', description: 'Useful observations' },
 ] as const
+
+/**
+ * Each type's icon, from the shared set (`icons.ts`). The in-document marker
+ * and the panel's badge both draw through {@link noteTypeIcon}, so they cannot
+ * disagree. `insight` is `lightbulb`, the same glyph as an alert's "Tip".
+ * Emoji lived here first and were the wrong tool: their per-platform metrics
+ * differ enough that no single box centres all six.
+ */
+export const NOTE_TYPE_ICONS: Readonly<Record<NoteType, string>> = {
+  issue: iconTriangleAlert,
+  suggestion: iconPencilLine,
+  note: iconFileText,
+  praise: iconStar,
+  question: iconCircleHelp,
+  insight: iconLightbulb,
+}
+
+/**
+ * A fresh, decorative `<svg>` for `type`, or `null` for an unknown one. An
+ * `<svg>` adds nothing to `textContent`, so a marker stays unselectable.
+ */
+export function noteTypeIcon(type: NoteType): SVGSVGElement | null {
+  const shape = NOTE_TYPE_ICONS[type]
+  return shape === undefined ? null : iconElement(shape, { size: 24 })
+}
 
 /** The default type a new note starts on. */
 export const DEFAULT_NOTE_TYPE: NoteType = 'note'

@@ -6,11 +6,18 @@
   * Super sad. The argument is that AI can do it now.  But they're going to leave up the CDN and there are community forks.
   * I like how minimal it is, how nice the defaults look, the themes, forms, and extensibility.
   * As of 2026-10-15, I think we keep using it.  I've never run into a bug of any note, but if we do, we can just edit the files directly now.
-* **Quicklook**
-  * Lets setup the thumbnail generation, too
 * **GUI**
-  * Right now our icons for things are all different styles.  We don't have a single style language. For example, the i button for info is a heavy solid thing that might be a unicode character. Tasks is a clipboard (which doesnt read as tasks) that's a simple outline.  There are more examples through the interface, like the folders used in the browser.  Also, it's inconcistent in the header how we have a border around the magnifying glass icon but not around other icons.
-  * I want to do a full review of buttons that use icons throughout the interface, pick a design language for them, and bring consistency so it looks well designed.
+  * [ ] Kanban: frontmatter `style: kanban` breaks the page (`.kanban` lands on `<body>`, pouring header, note and footer into 85vh columns, while `.kanban > ul` never matches); docs now say to use `--- {.kanban}` only. Make the frontmatter form work or reject it. The rightmost visible column's cards are clipped at the right edge, and a 4th column overflows with no scroll hint (~1700px).
+  * [ ] Editor: ~120px blank band between the frontmatter bar and the first heading (frontmatter open or collapsed).
+  * [ ] Task browser shows raw wikilinks in task text ("Ask [[Maya Okafor]] about…"); render them as names/links.
+  * [ ] Review markers are clipped at the right edge of the viewport when the sidebar is docked. In the review panel, the first note's card shows an unlabeled monospace source excerpt and a truncated location ("tidepool-sensors.md…") while others show ":15".
+  * [ ] Slides: a two-line first-slide title wraps with its second line left of center; a thin rule shows across the very top of the deck.
+  * [ ] Static build home: a file card ("Field Notes") shows an empty band between the title and "Modified".
+  * [ ] Media browser cards: the "VIDEO" label band is nearly invisible.
+  * [ ] With the docked sidebar the breadcrumbs disappear and the H1 sits tight under the header.
+  * [ ] Flashcard deck header reads "5 in play · 0 left" while a card is still showing.
+  * [ ] Org chart: the selected node's orange accent bar pokes slightly outside its rounded border.
+  * [ ] Design follow-ups from the icon pass: segmented controls, a shared panel/drawer shell, motion, empty states; the editor's media placeholder icon is an `<img>` data URI that can't take `currentColor`.
 * **Mobile**
   * [ ] No way to enter review mode on mobile (via text selection or "..." menu)
   * [ ] Plain browsers have no visible "New note" control outside the editor (only the editor's ⋯ menu); consider a shortcut or a button on listings.

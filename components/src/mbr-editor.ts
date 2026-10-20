@@ -10,6 +10,8 @@ import {
 } from './edit-token.js';
 import { isSocketReachable } from './mbr-live-reload.js';
 import { noteSelfWrite, readSourceLines } from './task-toggle.js';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { icon, iconPencil } from './icons.ts';
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -276,13 +278,13 @@ export class MbrEditorElement extends LitElement {
   private _renderTrigger(): TemplateResult {
     return html`
       <button
-        class="edit-trigger"
+        class="edit-trigger mbr-icon-btn"
         @click=${() => void this._open()}
         aria-label="Edit this page"
-        title="Edit (e)"
+        title="Edit (E)"
         ?aria-busy=${this._loading}
       >
-        <span class="edit-icon">✎</span>
+        ${icon(iconPencil)}
       </button>
     `;
   }
@@ -297,31 +299,9 @@ export class MbrEditorElement extends LitElement {
     `;
   }
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
-    }
-    .edit-trigger {
-      cursor: pointer;
-      width: 2rem;
-      height: 2rem;
-      padding: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 4px;
-      border: none;
-      background: transparent;
-      transition: background 0.15s ease;
-    }
-    .edit-trigger:hover {
-      border: 1px solid var(--pico-contrast-hover-border, rgba(0, 0, 0, 0.05));
-    }
-    .edit-icon {
-      font-size: 1.1rem;
-      line-height: 1;
-      font-style: normal;
-      color: var(--pico-color, #333);
     }
 
     /* Instant loading overlay shown while the editor chunk downloads */
@@ -357,5 +337,5 @@ export class MbrEditorElement extends LitElement {
         transform: rotate(360deg);
       }
     }
-  `;
+  `];
 }

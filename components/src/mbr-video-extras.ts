@@ -1,4 +1,6 @@
-import { LitElement, html, svg, css, nothing, type CSSResultGroup } from 'lit';
+import { LitElement, html, css, nothing, type CSSResultGroup } from 'lit';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { icon, iconExpand, iconShrink, iconX } from './icons.ts';
 import { customElement, property, state } from 'lit/decorators.js';
 import {
   PAGE_ERRORS_LOADED_EVENT,
@@ -172,6 +174,7 @@ function loadProgress(key: string): number | null {
 export class MbrVideoExtrasElement extends LitElement {
   static override styles: CSSResultGroup = [
     mediaErrorStyles,
+    ICON_BUTTON_CSS,
     css`
     :host {
       display: block;
@@ -316,24 +319,7 @@ export class MbrVideoExtrasElement extends LitElement {
     }
 
     .modal-close {
-      background: none;
-      border: none;
-      font-size: 1.5rem;
-      line-height: 1;
-      cursor: pointer;
-      color: var(--pico-muted-color, #666);
-      padding: 0;
-      width: 2rem;
-      height: 2rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 4px;
-    }
-
-    .modal-close:hover {
-      background: var(--pico-secondary-background, #f0f0f0);
-      color: var(--pico-color, #333);
+      margin-inline-end: -0.5rem;
     }
 
     .modal-body {
@@ -1110,13 +1096,10 @@ export class MbrVideoExtrasElement extends LitElement {
                 class="theater-button ${this._theaterMode ? 'active' : ''}"
                 @click=${this._toggleTheater}
                 title="${this._theaterMode ? 'Exit theater mode' : 'Theater mode'}"
+                aria-label="${this._theaterMode ? 'Exit theater mode' : 'Theater mode'}"
+                aria-pressed=${this._theaterMode ? 'true' : 'false'}
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  ${this._theaterMode
-            ? svg`<polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline>`
-            : svg`<polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>`
-          }
-                </svg>
+                ${icon(this._theaterMode ? iconShrink : iconExpand)}
               </button>
             `
         : nothing
@@ -1171,7 +1154,7 @@ export class MbrVideoExtrasElement extends LitElement {
               <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="chapters-title">
                 <div class="modal-header">
                   <h3 id="chapters-title">Chapters</h3>
-                  <button class="modal-close" @click=${this._closeChaptersModal} aria-label="Close">&times;</button>
+                  <button class="modal-close mbr-icon-btn" @click=${this._closeChaptersModal} aria-label="Close">${icon(iconX)}</button>
                 </div>
                 <div class="modal-body">
                   <ul class="chapter-list">

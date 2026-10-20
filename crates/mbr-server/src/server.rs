@@ -7558,12 +7558,6 @@ impl Server {
             "gui_mode".into(),
             if config.gui_mode { "true" } else { "" }.into(),
         );
-        // Whether this page may edit (drives the edit button, task checkboxes and
-        // flashcard reviews): off when the request's Host would be refused.
-        frontmatter.insert(
-            "edit_enabled".into(),
-            if edit_enabled { "true" } else { "" }.into(),
-        );
 
         // Compute breadcrumbs based on the URL path, not the file path
         // For a file like docs/guide.md, the URL is /docs/guide/ so breadcrumbs should include docs
@@ -7649,6 +7643,16 @@ impl Server {
                 root_dir: Some(&config.base_dir),
             },
             &page_context::UrlMode::Absolute,
+        );
+        // Whether this page may edit (drives the edit button, task checkboxes and
+        // flashcard reviews): off when the request's Host would be refused.
+        // A template variable, not a frontmatter entry: frontmatter is
+        // serialized into `window.frontmatter`, where the info panel lists every
+        // key as note metadata ("Edit enabled: true"). The page reads the flag
+        // from `window.__MBR_CONFIG__.editEnabled` (`_head.html`).
+        extra_context.insert(
+            "edit_enabled".to_string(),
+            serde_json::Value::Bool(edit_enabled),
         );
         if contact.is_some() {
             let relationships = if config.relationship_tracking {

@@ -789,8 +789,13 @@ pub struct Config {
     /// `/.mbr/raw` + `/.mbr/edit` (read/save an existing file) and the
     /// file-management endpoints `/.mbr/create` (new file), `/.mbr/move`
     /// (move/rename with repo-wide link rewrite), and `/.mbr/mkdir` (new
-    /// folder). Off by default. Intended for private use (e.g. GUI on
-    /// localhost). CLI flag `--edit` also enables it.
+    /// folder).
+    ///
+    /// The default depends on the mode: **on in the GUI** ([`Config::read_for_gui`],
+    /// a private window on loopback), **off everywhere else** ([`Config::read`]:
+    /// `mbr -s` must be asked). A value in `.mbr/config.toml` or
+    /// `MBR_EDIT_ENABLED` wins over either default; `--edit` / `--no-edit` win
+    /// over everything. Static builds never edit, whatever this says.
     #[serde(default)]
     pub edit_enabled: bool,
     /// Argon2 PHC hash of the shared editing token. Required when editing is
@@ -1000,6 +1005,21 @@ pub fn disable_symlink_mounts_for_process() {
     NO_SYMLINK_MOUNTS_FOR_PROCESS.store(true, Ordering::Relaxed);
 }
 
+/// Set once by the binary when it was started with `--no-edit`
+/// ([`disable_editing_for_process`]).
+static EDITING_DISABLED_FOR_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// Records `--no-edit` for every later [`Config::read`] /
+/// [`Config::read_for_gui`] in this process.
+///
+/// Process-wide for the reason [`disable_symlink_mounts_for_process`] is: the
+/// GUI reads configuration again for every folder it opens, those reads never
+/// see the command line, and the GUI's default is editing *on*. It can only
+/// ever turn editing off.
+pub fn disable_editing_for_process() {
+    EDITING_DISABLED_FOR_PROCESS.store(true, Ordering::Relaxed);
+}
+
 /// Whether [`NO_SYMLINK_MOUNTS_ENV`] asks for symlink mounts to be disabled.
 ///
 /// Any value other than an explicit "off" (`0`, `false`, `no`, `off`, empty —
@@ -1126,7 +1146,42 @@ impl Config {
     /// ships inside the markdown repository, so an operator serving a repo they
     /// did not author must be able to override it from the outside.
     pub fn read(search_config_from: &Path) -> Result<Self, crate::MbrError> {
-        Self::read_with_root(find_root_dir(search_config_from), search_config_from)
+        Self::read_with_root(
+            find_root_dir(search_config_from),
+            search_config_from,
+            Config::default(),
+        )
+    }
+
+    /// [`Config::read`] for the GUI: the same layers over
+    /// [`Config::gui_defaults`] instead of [`Config::default`], so in-browser
+    /// editing is on unless `.mbr/config.toml` or `MBR_EDIT_ENABLED` says
+    /// otherwise.
+    ///
+    /// Every GUI read must come through here — the first folder and every
+    /// folder opened later in the window — or the default would depend on how
+    /// the folder was opened.
+    ///
+    /// The default yields to the network check [`Config::validate`] enforces:
+    /// when the configured host is not loopback and no `edit_token_hash` is
+    /// set, an editing default that nobody asked for is dropped (with a WARN)
+    /// rather than failing the launch. An *explicit* `edit_enabled = true`
+    /// there still fails, exactly as in [`Config::read`].
+    pub fn read_for_gui(search_config_from: &Path) -> Result<Self, crate::MbrError> {
+        Self::read_with_root(
+            find_root_dir(search_config_from),
+            search_config_from,
+            Config::gui_defaults(),
+        )
+    }
+
+    /// The compiled-in defaults the GUI starts from: [`Config::default`] with
+    /// `edit_enabled` on. The one place the modes' defaults differ.
+    pub fn gui_defaults() -> Self {
+        Config {
+            edit_enabled: true,
+            ..Config::default()
+        }
     }
 
     /// [`Config::read`] for a repository whose root is already known: no
@@ -1138,25 +1193,42 @@ impl Config {
     /// outside it. Everything else (environment overrides, validation) is
     /// exactly [`Config::read`]'s.
     pub fn read_at_root(root_dir: &Path) -> Result<Self, crate::MbrError> {
-        Self::read_with_root(root_dir.to_path_buf(), root_dir)
+        Self::read_with_root(root_dir.to_path_buf(), root_dir, Config::default())
     }
 
     fn read_with_root(
         root_dir: PathBuf,
         search_config_from: &Path,
+        default_config: Config,
     ) -> Result<Self, crate::MbrError> {
-        let default_config = Config::default();
+        // The layers someone wrote down, apart from the defaults below them,
+        // so a default can be told from an explicit value (`edit_enabled`).
+        let explicit = Figment::new()
+            .merge(Toml::file(root_dir.join(".mbr/config.toml")))
+            .merge(Env::prefixed("MBR_"));
+        let edit_enabled_is_explicit = explicit.find_value("edit_enabled").is_ok();
         // Kept rather than discarded: figment is the only thing that knows which
         // layer supplied each key, and `static_folder` is trusted differently
         // depending on that (see `reject_repo_supplied_absolute_static_folder`).
         let figment = Figment::new()
             .merge(Serialized::defaults(default_config))
-            .merge(Toml::file(root_dir.join(".mbr/config.toml")))
-            .merge(Env::prefixed("MBR_"));
+            .merge(explicit);
         let mut config: Config = figment
             .extract()
             .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
         tracing::debug!("Loaded config: {:?}", &config);
+        if !edit_enabled_is_explicit && config.editing_needs_token() {
+            tracing::warn!(
+                "In-browser editing is off: it is on by default here, but host {} is not \
+                 loopback and no edit_token_hash is configured. Set edit_token_hash (see \
+                 `mbr --generate-edit-token`) or bind to 127.0.0.1 to edit.",
+                config.host
+            );
+            config.edit_enabled = false;
+        }
+        if EDITING_DISABLED_FOR_PROCESS.load(Ordering::Relaxed) {
+            config.edit_enabled = false;
+        }
         config.root_dir = root_dir;
         // Assigned here, beside `root_dir`, because this is the only place that
         // holds both halves of the derivation at once: the discovered root and
@@ -1309,14 +1381,20 @@ impl Config {
 
         // Refuse to expose an unauthenticated writable endpoint to the network:
         // editing on a non-loopback host requires a token hash.
-        if self.edit_enabled
-            && !std::net::Ipv4Addr::from(self.host.0).is_loopback()
-            && self.edit_token_hash.is_none()
-        {
+        if self.editing_needs_token() {
             return Err(ConfigError::EditingRequiresToken);
         }
 
         Ok(())
+    }
+
+    /// Editing is on, the host is not loopback, and there is no token hash:
+    /// the combination [`Config::validate`] refuses, because the `Host` gate
+    /// alone cannot keep a remote caller out.
+    pub fn editing_needs_token(&self) -> bool {
+        self.edit_enabled
+            && !std::net::Ipv4Addr::from(self.host.0).is_loopback()
+            && self.edit_token_hash.is_none()
     }
 
     /// Rejects a `static_folder` that reaches further above the markdown root
@@ -3079,6 +3157,116 @@ mod tests {
         assert_eq!(
             config.edit_token_hash.as_deref(),
             Some("$argon2id$from-env")
+        );
+    }
+
+    // ==================== edit_enabled defaults per mode ====================
+
+    #[test]
+    fn test_edit_enabled_defaults_off_for_read_and_on_for_gui() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+
+        assert!(
+            !Config::read(repo.path()).unwrap().edit_enabled,
+            "server/build"
+        );
+        assert!(!Config::read_at_root(repo.path()).unwrap().edit_enabled);
+        assert!(
+            Config::read_for_gui(repo.path()).unwrap().edit_enabled,
+            "GUI"
+        );
+        assert!(!Config::default().edit_enabled);
+        assert!(Config::gui_defaults().edit_enabled);
+    }
+
+    /// The GUI default is only a default: the repository's config turns it off.
+    #[test]
+    fn test_gui_edit_default_yields_to_config_false() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("edit_enabled = false\n"));
+
+        assert!(!Config::read_for_gui(repo.path()).unwrap().edit_enabled);
+    }
+
+    /// ... and so does the environment, over the config file as usual.
+    #[test]
+    fn test_gui_edit_default_yields_to_env_false() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+        let _env = EnvVars::set(&[("MBR_EDIT_ENABLED", "false")]);
+        assert!(!Config::read_for_gui(repo.path()).unwrap().edit_enabled);
+        drop(_env);
+
+        let repo = repo_with_mbr_dir(Some("edit_enabled = true\n"));
+        let _env = EnvVars::set(&[("MBR_EDIT_ENABLED", "false")]);
+        assert!(!Config::read_for_gui(repo.path()).unwrap().edit_enabled);
+    }
+
+    /// The server is off unless asked, and the config or env can ask.
+    #[test]
+    fn test_server_edit_enabled_by_config_or_env() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("edit_enabled = true\n"));
+        assert!(Config::read(repo.path()).unwrap().edit_enabled);
+
+        let repo = repo_with_mbr_dir(None);
+        let _env = EnvVars::set(&[("MBR_EDIT_ENABLED", "true")]);
+        assert!(Config::read(repo.path()).unwrap().edit_enabled);
+    }
+
+    /// A GUI default on a non-loopback host without a token is dropped rather
+    /// than failing the launch; asked for explicitly, it still fails.
+    #[test]
+    fn test_gui_edit_default_dropped_on_a_non_loopback_host_without_a_token() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("host = \"0.0.0.0\"\n"));
+        let config = Config::read_for_gui(repo.path()).expect("default must not fail");
+        assert!(!config.edit_enabled);
+
+        let repo = repo_with_mbr_dir(Some(
+            "host = \"0.0.0.0\"\nedit_token_hash = \"$argon2id$x\"\n",
+        ));
+        assert!(
+            Config::read_for_gui(repo.path()).unwrap().edit_enabled,
+            "token"
+        );
+
+        let repo = repo_with_mbr_dir(Some("host = \"0.0.0.0\"\nedit_enabled = true\n"));
+        assert!(matches!(
+            Config::read_for_gui(repo.path()),
+            Err(crate::MbrError::Config(ConfigError::EditingRequiresToken))
+        ));
+    }
+
+    #[test]
+    fn test_editing_needs_token() {
+        let base = Config {
+            edit_enabled: true,
+            host: IpArray([0, 0, 0, 0]),
+            ..Config::default()
+        };
+        assert!(base.editing_needs_token());
+        assert!(
+            !Config {
+                edit_token_hash: Some("h".into()),
+                ..base.clone()
+            }
+            .editing_needs_token()
+        );
+        assert!(
+            !Config {
+                host: IpArray([127, 0, 0, 1]),
+                ..base.clone()
+            }
+            .editing_needs_token()
+        );
+        assert!(
+            !Config {
+                edit_enabled: false,
+                ..base
+            }
+            .editing_needs_token()
         );
     }
 

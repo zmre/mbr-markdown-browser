@@ -6,9 +6,13 @@ order: 6
 
 # Task Browser
 
-Press `t` — or click the clipboard icon in the header — to open the task
+Press `t` — or click the checklist icon in the header — to open the task
 browser: a two-pane view of every task in the repository, filtered and grouped
 however you need to look at them today.
+
+![The task browser with a folder tree on the left and open tasks grouped by note, with due dates, tags and priority dots](../images/screens/task-browser.png)
+
+*The task browser (`t`), grouped by note. The overdue date is shown in red.*
 
 The syntax it reads is documented in [Markdown Extensions](./#tasks): the four
 markers, `@due(...)`, `@done(...)`, `#tag` and the `!!` / `!!!` priorities.
@@ -24,12 +28,12 @@ Nothing here requires any change to your notes — if you already write
 ## Layout
 
 ```
-┌─ folders ────┬─ [filter field.....................] [⚙ filters] ─┐
-│ ▼ 📁 Home 42 │        ( ▤ category | ▦ calendar )                │
-│   ▶ docs  12 │  ┌──────────────────────────────────────────────┐ │
-│   ▶ notes 30 │  │ Weekly notes            3/7 ▓▓▓░░░░          │ │
+┌─ folders ────┬─ [filter field.....................] [filters]   ─┐
+│ v  Home   42 │        ( category | calendar )                    │
+│   > docs  12 │  ┌──────────────────────────────────────────────┐ │
+│   > notes 30 │  │ Weekly notes            3/7 ▓▓▓░░░░          │ │
 │              │  │   docs/notes                                 │ │
-│              │  │  ● [ ] write the report  #work  🗓 Aug 5      │ │
+│              │  │  ● [ ] write the report  #work  [Aug 5]       │ │
 │              │  │    [ ] follow up                             │ │
 └──────────────┴──┴──────────────────────────────────────────────┘ │
 ```
@@ -113,7 +117,7 @@ matches tags only:
 | `#work` | Tasks tagged `#work` (prefix match, so `#wo` finds it while you type) |
 | `report #work` | Both conditions |
 
-The ⚙ button opens the rest of the filters:
+The filter-options button (sliders) opens the rest of the filters:
 
 - **Status** — a multi-select of Incomplete / Complete / Canceled. It starts on
   **Incomplete only**, and the last box cannot be cleared (an empty selection

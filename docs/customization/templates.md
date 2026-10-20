@@ -154,6 +154,16 @@ The `subdirs` JSON array contains:
 {% include "_head.html" %}
 ```
 
+### Icons
+
+The `icon()` function draws one of mbr's built-in icons (the [Lucide](https://lucide.dev) set the rest of the interface uses) as an inline SVG in the current text colour:
+
+```html
+<a href="/" role="button" class="outline secondary mbr-icon-label">{{ icon(name="house", size=16) | safe }}Home</a>
+```
+
+`name` is required; `size` is in CSS pixels and defaults to 20. The names available are the files in `crates/mbr-core/templates/icons/` (for example `chevron-left`, `chevron-right`, `arrow-up`, `house`, `info`, `search`, `x`, `user`, `building-2`). An unknown name is a template error rather than an empty space. Icons are decorative (`aria-hidden`), so give the surrounding link or button its own text or `aria-label`. The `mbr-icon-label` class puts an 8px gap between an icon and its label.
+
 ## Common Gotchas
 
 ### Chained Defaults Don't Work

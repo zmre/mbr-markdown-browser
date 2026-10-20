@@ -26,6 +26,7 @@ import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.
 import { currentDocumentPath, readSourceLines, type SourceRead as RawRead } from './task-toggle.js'
 import { positionAnchored, positionAt } from './anchored-popover.js'
 import type { MbrOverlay } from './overlay.js'
+import { ICON_LG, icon, iconMessageSquareText } from './icons.ts'
 import {
   addNote,
   allNotes,
@@ -689,20 +690,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
         aria-label="Open review notes (R)"
         title="Review notes (R)"
       >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
-        </svg>
+        ${icon(iconMessageSquareText, { size: ICON_LG })}
         <span class="fab-count">${this._count}</span>
       </button>
     `
@@ -780,8 +768,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
       right: calc(1rem + env(safe-area-inset-right, 0px));
       bottom: calc(1rem + env(safe-area-inset-bottom, 0px) + var(--mbr-fab-stack-offset, 0px));
       z-index: 800;
-      width: 3rem;
-      height: 3rem;
+      width: 56px;
+      height: 56px;
       display: flex;
       align-items: center;
       justify-content: center;

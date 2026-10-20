@@ -1,6 +1,19 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, property, query, state } from 'lit/decorators.js'
 import { safeHref } from '../safe-href.js'
+import { DISCLOSURE_CSS, ICON_BUTTON_CSS, KBD_CSS } from '../controls.js'
+import {
+  ICON_SM,
+  icon,
+  iconCalendarDays,
+  iconChevronRight,
+  iconFileText,
+  iconFolder,
+  iconFolderOpen,
+  iconFolderTree,
+  iconSlidersHorizontal,
+  iconX,
+} from '../icons.js'
 import { renderTaskCard } from './task-card.js'
 import {
   buildDisplayGroups,
@@ -1001,11 +1014,11 @@ export class MbrTasksPanelElement extends LitElement {
                   this._toggleFolderExpansion(node.path)
                 }}
               >
-                ${expanded ? '▼' : '▶'}
+                ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron' })}
               </button>`
             : html`<span class="tree-spacer"></span>`}
           <button class="tree-label" @click=${() => this._selectFolder(isRoot ? null : node.path)}>
-            <span class="folder-icon" aria-hidden="true">📁</span>
+            ${icon(expanded && hasChildren ? iconFolderOpen : iconFolder, { size: ICON_SM, className: 'folder-icon' })}
             <span class="label-text">${node.name}</span>
             <span class="label-count">${node.count}</span>
           </button>
@@ -1022,13 +1035,13 @@ export class MbrTasksPanelElement extends LitElement {
       <div class="results-pane ${this._activePaneIndex === 1 ? 'active' : ''}">
         <div class="filter-bar">
           <button
-            class="folders-button ${this._foldersOpen ? 'open' : ''}"
+            class="folders-button mbr-icon-btn"
             @click=${() => (this._foldersOpen = !this._foldersOpen)}
             aria-expanded=${this._foldersOpen}
             aria-label="Folders"
             title="Folders"
           >
-            📁
+            ${icon(iconFolderTree)}
           </button>
           <input
             id="tasks-filter"
@@ -1041,15 +1054,15 @@ export class MbrTasksPanelElement extends LitElement {
             aria-label="Filter tasks"
           />
           <button
-            class="filter-button ${this._filtersOpen ? 'open' : ''}"
+            class="filter-button mbr-icon-btn"
             @click=${() => (this._filtersOpen = !this._filtersOpen)}
             aria-expanded=${this._filtersOpen}
             aria-label="Filter options"
             title="Filter options"
           >
-            ⚙
+            ${icon(iconSlidersHorizontal)}
           </button>
-          <button class="close-button" @click=${() => this._close()} aria-label="Close">✕</button>
+          <button class="close-button mbr-icon-btn" @click=${() => this._close()} aria-label="Close" title="Close (Esc)">${icon(iconX)}</button>
         </div>
         ${this._filtersOpen ? this._renderFilterPopover() : nothing} ${this._renderModeTabs()}
         ${this._renderStatusLine()} ${this._renderNotice()}
@@ -1167,19 +1180,19 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   private _renderModeTabs(): TemplateResult {
-    const tab = (mode: TaskMode, icon: string, label: string) => html`
+    const tab = (mode: TaskMode, shape: string, label: string) => html`
       <button
         class="mode-tab ${this._mode === mode ? 'active' : ''}"
         role="tab"
         aria-selected=${this._mode === mode}
         @click=${() => this._setMode(mode)}
       >
-        <span aria-hidden="true">${icon}</span> ${label}
+        ${icon(shape, { size: ICON_SM })} ${label}
       </button>
     `
     return html`
       <div class="mode-tabs" role="tablist" aria-label="Grouping mode">
-        ${tab('category', '▤', 'By Note')} ${tab('calendar', '▦', 'By Due')}
+        ${tab('category', iconFileText, 'By Note')} ${tab('calendar', iconCalendarDays, 'By Due')}
       </div>
     `
   }
@@ -1212,8 +1225,8 @@ export class MbrTasksPanelElement extends LitElement {
     return html`
       <div class="results-notice" role="status">
         ${this._notice}
-        <button class="notice-dismiss" @click=${() => (this._notice = null)} aria-label="Dismiss">
-          ✕
+        <button class="notice-dismiss mbr-icon-btn sm" @click=${() => (this._notice = null)} aria-label="Dismiss">
+          ${icon(iconX, { size: ICON_SM })}
         </button>
       </div>
     `
@@ -1259,7 +1272,7 @@ export class MbrTasksPanelElement extends LitElement {
         @mouseenter=${() => (this._focusRow = rowIndex)}
         @click=${() => this._toggleCollapse(group.key)}
       >
-        <span class="group-twisty" aria-hidden="true">${collapsed ? '▶' : '▼'}</span>
+        ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron group-twisty' })}
         <span class="group-titles">
           <span class="group-label">${label}</span>
           ${group.sublabel ? html`<span class="group-sublabel">${group.sublabel}</span>` : nothing}
@@ -1313,11 +1326,10 @@ export class MbrTasksPanelElement extends LitElement {
     return html`
       <div class="tasks-footer">
         <span class="footer-hint">
-          <kbd>^n</kbd><kbd>^p</kbd> navigate <kbd>↵</kbd> open
-          ${this.editEnabled
-            ? html`<kbd>space</kbd> done <kbd>x</kbd> cancel `
-            : nothing}<kbd>←</kbd><kbd>→</kbd> collapse <kbd>⇥</kbd> pane <kbd>^d</kbd><kbd>^u</kbd>
-          scroll <kbd>esc</kbd> close
+          <span><kbd>^n</kbd><kbd>^p</kbd> navigate</span>
+          <span><kbd>↵</kbd> open</span>
+          ${this.editEnabled ? html`<span><kbd>space</kbd> done</span>` : nothing}
+          <span><kbd>esc</kbd> close</span>
         </span>
       </div>
     `
@@ -1327,7 +1339,7 @@ export class MbrTasksPanelElement extends LitElement {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, KBD_CSS, css`
     :host {
       display: contents;
     }
@@ -1464,12 +1476,12 @@ export class MbrTasksPanelElement extends LitElement {
     }
 
     .tree-toggle {
-      width: 1rem;
-      height: 1rem;
+      width: 1.25rem;
+      height: 1.25rem;
+      margin: 0;
       background: transparent;
       border: none;
       cursor: pointer;
-      font-size: 0.6rem;
       color: var(--pico-muted-color, #999);
       display: flex;
       align-items: center;
@@ -1478,8 +1490,17 @@ export class MbrTasksPanelElement extends LitElement {
       padding: 0;
     }
 
+    .folder-icon {
+      flex: none;
+      color: var(--mbr-icon-color, var(--pico-muted-color, #666));
+    }
+
+    .tree-row.selected .folder-icon {
+      color: inherit;
+    }
+
     .tree-spacer {
-      width: 1rem;
+      width: 1.25rem;
       flex-shrink: 0;
     }
 
@@ -1535,27 +1556,6 @@ export class MbrTasksPanelElement extends LitElement {
       color: var(--pico-color, #333);
     }
 
-    .folders-button,
-    .filter-button,
-    .close-button {
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      font-size: 1rem;
-      line-height: 1;
-      padding: 0.3rem 0.4rem;
-      border-radius: 4px;
-      color: var(--pico-muted-color, #999);
-    }
-
-    .folders-button:hover,
-    .folders-button.open,
-    .filter-button:hover,
-    .close-button:hover,
-    .filter-button.open {
-      color: var(--pico-color, #333);
-      background: var(--pico-secondary-background, #f5f5f5);
-    }
 
     .filter-popover {
       display: flex;
@@ -1623,6 +1623,9 @@ export class MbrTasksPanelElement extends LitElement {
     }
 
     .mode-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
       background: transparent;
       border: 1px solid transparent;
       border-radius: 999px;
@@ -1671,12 +1674,6 @@ export class MbrTasksPanelElement extends LitElement {
 
     .notice-dismiss {
       margin-inline-start: auto;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      font-size: 0.75rem;
-      line-height: 1;
-      padding: 0.1rem 0.2rem;
       color: inherit;
     }
 
@@ -1712,11 +1709,7 @@ export class MbrTasksPanelElement extends LitElement {
       outline-offset: -2px;
     }
 
-    .group-twisty {
-      font-size: 0.6rem;
-      color: var(--pico-muted-color, #999);
-      flex-shrink: 0;
-    }
+
 
     .group-titles {
       flex: 1;
@@ -1894,17 +1887,9 @@ export class MbrTasksPanelElement extends LitElement {
       white-space: nowrap;
     }
 
-    .mbr-task-due::before,
-    .mbr-task-completed::before {
+    .chip-icon {
       margin-inline-end: 0.3em;
-    }
-
-    .mbr-task-due::before {
-      content: '\\1F5D3\\FE0E'; /* 🗓 calendar, text presentation */
-    }
-
-    .mbr-task-completed::before {
-      content: '\\2713'; /* ✓ */
+      vertical-align: -0.1em;
     }
 
     /*
@@ -1934,20 +1919,16 @@ export class MbrTasksPanelElement extends LitElement {
     }
 
     .footer-hint {
+      display: flex;
+      gap: 0.875rem;
+      white-space: nowrap;
+      overflow: hidden;
       font-size: 0.7rem;
       color: var(--pico-muted-color, #999);
     }
 
     kbd {
-      display: inline-block;
-      padding: 0.05rem 0.3rem;
-      margin-right: 0.1rem;
-      font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
-      font-size: 0.68rem;
-      color: var(--pico-color, #333);
-      background: var(--pico-secondary-background, #f5f5f5);
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
+      margin-right: 0.125rem;
     }
 
     /* ---- Responsive ---- */
@@ -2026,15 +2007,6 @@ export class MbrTasksPanelElement extends LitElement {
         display: inline-flex;
       }
 
-      .folders-button,
-      .filter-button,
-      .close-button {
-        align-items: center;
-        justify-content: center;
-        min-width: 44px;
-        min-height: 44px;
-        font-size: 1.1rem;
-      }
 
       .filter-bar input[type='search'] {
         min-height: 44px;
@@ -2046,5 +2018,5 @@ export class MbrTasksPanelElement extends LitElement {
         overflow-y: auto;
       }
     }
-  `
+  `]
 }

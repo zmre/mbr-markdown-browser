@@ -36,7 +36,7 @@ vi.mock('./shared.js', async (importOriginal) => {
 })
 
 import './mbr-info.js'
-import { setGraphChunkImporter } from './mbr-info.js'
+import { isEmptyMetadataValue, setGraphChunkImporter } from './mbr-info.js'
 import { fetchPageLinks } from './graph/links-cache.js'
 import { resolveUrl } from './shared.js'
 
@@ -166,10 +166,40 @@ describe('MbrInfoElement metadata on contact pages', () => {
     expect(text).not.toContain('abc123def')
   })
 
+  it('never lists edit_enabled, and skips rows with nothing in them', async () => {
+    const text = await metadataText({
+      type: 'person',
+      title: 'Jane Doe',
+      edit_enabled: 'true',
+      relationships: [],
+      aliases: {},
+      nickname: '  ',
+      middle_name: null,
+      draft: false,
+      rank: 0,
+    })
+    expect(text).toContain('Jane Doe')
+    expect(text).not.toMatch(/edit enabled/i)
+    expect(text).not.toContain('Relationships')
+    expect(text).not.toContain('Aliases')
+    expect(text).not.toContain('Nickname')
+    expect(text).not.toContain('Middle name')
+    // false and 0 are values, not blanks.
+    expect(text).toContain('Draft')
+    expect(text).toContain('Rank')
+  })
+
   it('shows everything on other note types', async () => {
     const text = await metadataText({ type: 'event', ...fields })
     expect(text).toContain('jane@abc.example')
     expect(text).toContain('--06-10')
+  })
+})
+
+describe('isEmptyMetadataValue', () => {
+  it('treats absent, blank and empty containers as empty, and nothing else', () => {
+    for (const v of [null, undefined, '', ' \t', [], {}]) expect(isEmptyMetadataValue(v)).toBe(true)
+    for (const v of ['x', 0, false, ['a'], { a: 1 }]) expect(isEmptyMetadataValue(v)).toBe(false)
   })
 })
 

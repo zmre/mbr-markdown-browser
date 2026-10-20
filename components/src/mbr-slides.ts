@@ -20,6 +20,8 @@ import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
 import { isPlayKey } from './mbr-keys.js'
 import { FAB_CSS, PlayFabController } from './fab.ts'
+import { ICON_BUTTON_CSS } from './controls.ts'
+import { ICON_LG, ICON_SM, icon, iconElement, iconPlay, iconX } from './icons.ts'
 import { mermaidSettled } from './mbr-mermaid.ts'
 
 /**
@@ -142,48 +144,14 @@ export class MbrSlidesElement extends LitElement {
    */
   private _exitButton: HTMLButtonElement | null = null
 
-  static override styles = [css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
-    }
-
-    .play-slides-btn {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.35rem 0.7rem;
-      background: var(--pico-primary-background, #1095c1);
-      color: var(--pico-primary-inverse, #fff);
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.85rem;
-      font-weight: 500;
-      transition: background 0.15s ease, transform 0.1s ease;
-      white-space: nowrap;
-    }
-
-    .play-slides-btn:hover {
-      background: var(--pico-primary-hover-background, #0d7a9c);
-      transform: translateY(-1px);
-    }
-
-    .play-slides-btn:active {
-      transform: translateY(0);
     }
 
     .play-slides-btn:disabled {
       opacity: 0.7;
       cursor: wait;
-    }
-
-    .play-icon {
-      width: 0;
-      height: 0;
-      border-left: 8px solid currentColor;
-      border-top: 5px solid transparent;
-      border-bottom: 5px solid transparent;
-      margin-right: 2px;
     }
 
     .loading-spinner {
@@ -486,14 +454,15 @@ export class MbrSlidesElement extends LitElement {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'mbr-slides-exit'
-      button.textContent = '\u2715'
+      button.append(iconElement(iconX))
       button.setAttribute('aria-label', 'Exit slides')
       button.title = 'Exit slides'
       // Light DOM, so the styles travel inline; theme.css is not ours to rely on.
       button.style.cssText =
         'position:fixed;z-index:1000;left:calc(0.75rem + env(safe-area-inset-left,0px));' +
-        'bottom:calc(0.75rem + env(safe-area-inset-bottom,0px));width:2.5rem;height:2.5rem;' +
-        'margin:0;padding:0;border:none;border-radius:50%;font-size:1rem;line-height:1;' +
+        'bottom:calc(0.75rem + env(safe-area-inset-bottom,0px));width:44px;height:44px;' +
+        'display:flex;align-items:center;justify-content:center;' +
+        'margin:0;padding:0;border:none;border-radius:50%;line-height:1;' +
         'background:rgba(0,0,0,0.45);color:#fff;cursor:pointer;opacity:0.7'
       button.addEventListener('click', () => this._exitPresentation())
       document.body.append(button)
@@ -522,19 +491,20 @@ export class MbrSlidesElement extends LitElement {
       return nothing
     }
 
-    const icon = this._isLoading
+    const glyph = this._isLoading
       ? html`<span class="loading-spinner"></span>`
-      : html`<span class="play-icon"></span>`
+      : icon(iconPlay, { size: ICON_SM })
 
     return html`
       <button
-        class="play-slides-btn"
+        class="play-slides-btn mbr-icon-btn labeled"
         @click=${this._startPresentation}
         ?disabled=${this._isLoading}
-        title="Start presentation mode (P)"
+        aria-label="Play slides"
+        title="Play slides (P)"
       >
-        ${icon}
-        <span>${this._isLoading ? 'Loading...' : 'Play Slides (P)'}</span>
+        ${glyph}
+        <span>${this._isLoading ? 'Loading…' : 'Play'}</span>
       </button>
       ${this._showsPlayFab()
         ? html`<button
@@ -544,7 +514,9 @@ export class MbrSlidesElement extends LitElement {
             ?disabled=${this._isLoading}
             aria-label="Play slides"
             title="Play slides (P)"
-          >${icon}</button>`
+          >${this._isLoading
+            ? html`<span class="loading-spinner"></span>`
+            : icon(iconPlay, { size: ICON_LG, filled: true, className: 'play-glyph' })}</button>`
         : nothing}
     `
   }

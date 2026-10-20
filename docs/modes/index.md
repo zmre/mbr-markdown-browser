@@ -103,5 +103,5 @@ mbr -b --output ./public ~/notes
 Two capabilities need live files behind the page, so they exist in server and
 GUI mode and are absent from a static build:
 
-- [In-Browser Editing](editing/) - Edit markdown from the browser (off by default; `--edit`)
+- [In-Browser Editing](editing/) - Edit markdown from the browser (on by default in the GUI; `--edit` for the server)
 - [Review Notes](review/) - Annotate a page and copy the review out as markdown (`r` / `R`)

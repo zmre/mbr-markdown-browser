@@ -16,6 +16,9 @@ import {
 import { DECK_HTML, SECTIONED_DECK_HTML, installDeckPage } from './test-fixtures.js'
 import { DECK_CSS } from './styles.js'
 
+/** Pico's `pico.min.css`, injected by vitest.config.ts. */
+declare const __MBR_PICO_CSS__: string
+
 afterEach(() => {
   document.body.className = ''
   document.body.innerHTML = ''
@@ -241,5 +244,42 @@ describe('deck stylesheet', () => {
     const outsideMedia = DECK_CSS.replace(/@media \(hover: hover\) \{[\s\S]*?\n\}/g, '')
     expect(outsideMedia).not.toMatch(/\.mbr-fc-ratings button:hover/)
     expect(DECK_CSS).toMatch(/@media \(hover: hover\) \{\s*\.mbr-fc-ratings button:hover/)
+  })
+
+  it("keeps every corner of both faces and the rating buttons round under Pico's [role=group] rules", () => {
+    // Pico styles any [role=group] as a joined button group, squaring the
+    // corners its children share. The card and the rating row carry that
+    // role for assistive technology, so the faces lost two corners each
+    // (front: right, back: left; the focus ring followed). Pico is loaded
+    // *after* the deck sheet here, so only specificity can win.
+    document.head.innerHTML = `<style>${DECK_CSS}</style><style>${__MBR_PICO_CSS__}</style>`
+    document.body.innerHTML = `
+      <div class="mbr-fc-overlay">
+        <div class="mbr-fc-card" role="group" tabindex="0">
+          <section class="mbr-fc-face mbr-fc-front"></section>
+          <section class="mbr-fc-face mbr-fc-back"></section>
+        </div>
+        <div class="mbr-fc-ratings" role="group">
+          <button>1</button><button>2</button><button>3</button><button>4</button>
+        </div>
+      </div>`
+    try {
+      const corners = ['top-left', 'top-right', 'bottom-right', 'bottom-left']
+      const radii = (el: Element) =>
+        corners.map((c) => getComputedStyle(el).getPropertyValue(`border-${c}-radius`))
+      for (const face of document.querySelectorAll('.mbr-fc-face')) {
+        expect(radii(face)).not.toContain('0')
+        expect(radii(face)).not.toContain('0px')
+        expect(new Set(radii(face)).size).toBe(1)
+        expect(getComputedStyle(face).marginLeft).not.toMatch(/^-/)
+      }
+      for (const button of document.querySelectorAll('.mbr-fc-ratings > button')) {
+        expect(radii(button)).not.toContain('0')
+        expect(radii(button)).not.toContain('0px')
+        expect(getComputedStyle(button).marginLeft).not.toMatch(/^-/)
+      }
+    } finally {
+      document.head.innerHTML = ''
+    }
   })
 })

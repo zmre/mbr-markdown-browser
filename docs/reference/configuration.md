@@ -212,7 +212,7 @@ Environment variable: `MBR_GUI_MENU_BAR`. There is no CLI flag.
 | Viewport | Behavior |
 |----------|----------|
 | \>= 1024px (desktop) | Sidebar appears beside content via CSS grid |
-| < 1024px (mobile) | Hamburger menu triggers slide-in drawer overlay |
+| < 1024px (mobile) | The sidebar button triggers a slide-in drawer overlay |
 
 **CSS variables for customization:**
 
@@ -297,7 +297,7 @@ tasks_enabled = false
 
 **Where the Show filter starts (`tasks_default_include`):**
 
-The panel's ⚙ **Show** filter chooses between checkbox tasks, `TODO:`-style
+The panel's filter-options **Show** setting chooses between checkbox tasks, `TODO:`-style
 [incomplete markers](#incomplete-marker-highlighting), or both. This option sets
 where it starts:
 
@@ -399,13 +399,16 @@ pointed at directories that change underneath it.
 
 ### Editing Settings
 
-In-browser editing (server/GUI mode only) is **off by default**. When enabled, a
+In-browser editing is **on by default in the GUI** and **off by default for the
+server** (`mbr -s`); static builds never edit. A value set here or in
+`MBR_EDIT_ENABLED` beats either default (so `edit_enabled = false` keeps a
+repository read-only in the GUI too), and `--edit` / `--no-edit` beat both. When enabled, a
 pencil button appears next to the info button and opens a Milkdown/Crepe editor
 for the current markdown file. See the [editing guide](../modes/editing.md).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `edit_enabled` | bool | `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. Also enabled by `--edit`. Without an `edit_token_hash`, pages reached under a non-loopback `Host` (e.g. `tailscale serve`, a reverse proxy) render read-only, since their writes would be refused. |
+| `edit_enabled` | bool | GUI: `true`, server: `false` | Enable the `/.mbr/raw` and `/.mbr/edit` endpoints and the edit button. `--edit` forces it on, `--no-edit` off. The GUI's default is dropped (with a warning) when the host is not loopback and no `edit_token_hash` is set; an explicit `true` there fails startup instead. Without an `edit_token_hash`, pages reached under a non-loopback `Host` (e.g. `tailscale serve`, a reverse proxy) render read-only, since their writes would be refused. |
 | `edit_token_hash` | string / unset | (unset) | Argon2 PHC hash of the shared editing token. **Required** when editing is enabled on a non-loopback host. Generate with `mbr --generate-edit-token`. Never sent to the frontend. |
 | `edit_require_token_on_loopback` | bool | `false` | Require the token even for loopback callers. When `false`, local (127.0.0.1) edits need no token but are still CSRF-protected. |
 | `upload_max_bytes` | number | `26214400` (25 MiB) | Maximum size in bytes of a single asset uploaded via `/.mbr/upload` (the editor's image uploader). Larger bodies are rejected with `413 Payload Too Large`. |
@@ -421,7 +424,8 @@ Environment variables use the `MBR_` prefix (e.g. `MBR_EDIT_ENABLED=true`).
   `edit_require_token_on_loopback = true`.
 - **Non-loopback callers** must present the token as
   `Authorization: Bearer <token>`; startup validation refuses to enable editing
-  on a non-loopback host without an `edit_token_hash`.
+  on a non-loopback host without an `edit_token_hash` (a mode default, or a
+  non-loopback `--host` without `--edit`, turns editing off instead).
 - **Concurrency:** saves include the hash of the loaded content and are rejected
   with `409 Conflict` if the file changed on disk since it was loaded.
 - **Transport:** mbr serves plain HTTP. For remote editing, put mbr behind a
@@ -1280,7 +1284,7 @@ MBR_TASKS_DEFAULT_INCLUDE=all  # where the panel's Show filter starts
 MBR_TASKS_IGNORE_GLOBS='["templates/**","**/archive/**"]'  # kept out of the task browser
 
 # Editing
-MBR_EDIT_ENABLED=true
+MBR_EDIT_ENABLED=true   # or false to keep the GUI read-only
 MBR_UPLOAD_MAX_BYTES=26214400  # 25 MiB cap for editor asset uploads
 ```
 

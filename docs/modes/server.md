@@ -73,6 +73,14 @@ The sidebar shows a tag tree for filtering files.
 
 mbr tracks recently viewed files (stored in browser localStorage), providing quick access to your working set.
 
+### Editing Is Off Unless Asked For
+
+Unlike the GUI, `mbr -s` serves **read-only** by default. Turn
+[in-browser editing](editing.md) on with `--edit`, `edit_enabled = true` in
+`.mbr/config.toml`, or `MBR_EDIT_ENABLED=true`; `--no-edit` turns it off
+whatever the configuration says. On a non-loopback `--host`, editing also needs
+an `edit_token_hash`.
+
 ### External Links
 
 **Server mode deliberately does nothing with external links.** `https://` links,
@@ -225,6 +233,10 @@ Press **`/`** (forward slash) to open the search dialog.
 ## Link Explorer
 
 Press **`f`**, **`F`**, or **`T`** to open the Link Explorer - a quick navigation modal for jumping between pages and headings.
+
+![The info panel open beside a note, with the link graph at the top and the note's metadata below](../images/screens/info-panel.png)
+
+*The info panel (`Ctrl/Cmd+G`): a mini link graph, frontmatter and document stats.*
 
 ### Tabs
 

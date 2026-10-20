@@ -7,6 +7,10 @@ description: Customize colors and styles
 
 mbr uses [Pico CSS](https://picocss.com/) as its base framework, making customization straightforward through CSS variables.
 
+![The same note in three themes side by side: default in light mode, amber in light mode, and jade in dark mode](../images/screens/themes-comparison.png)
+
+*Left to right: default, amber, and jade in dark mode.*
+
 ## Theme Selection
 
 The `theme` configuration option lets you select a pre-built Pico CSS color variant without writing any CSS:
@@ -167,6 +171,27 @@ When `theme.css` exists, mbr uses it instead of the built-in theme.
 ## mbr-Specific Variables
 
 mbr adds custom CSS variables for its unique features:
+
+### Icons and Icon Buttons
+
+Every icon in the interface is an outline drawn in the text colour, and every icon-only button is borderless, with a soft fill on hover and press. These variables tune all of them at once:
+
+```css
+:root {
+  --mbr-icon-stroke: 1.75;          /* stroke weight of every outline icon */
+  --mbr-icon-color: color-mix(in srgb, var(--pico-color) 72%, var(--pico-background-color));
+  --mbr-icon-color-hover: var(--pico-color);
+  --mbr-icon-color-active: var(--pico-primary); /* a button whose panel is open */
+  --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 7%, transparent);
+  --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 12%, transparent);
+  --mbr-field-bg: color-mix(in srgb, var(--pico-color) 5%, transparent); /* the header search field */
+  --mbr-focus-ring: 0 0 0 2px var(--pico-background-color), 0 0 0 4px var(--pico-primary);
+  --mbr-control-radius: 8px;
+  --mbr-danger: var(--pico-del-color); /* the page-problems button */
+}
+```
+
+The CSS-drawn icons (GitHub alerts, task date chips, the breadcrumb divider) are masks in `--mbr-icon-note`, `--mbr-icon-tip`, `--mbr-icon-important`, `--mbr-icon-warning`, `--mbr-icon-caution`, `--mbr-icon-calendar`, `--mbr-icon-check`, `--mbr-icon-arrow-right` and `--mbr-icon-chevron-right`; override one with any `url("data:image/svg+xml,…")` to change it.
 
 ### Pull Quotes
 

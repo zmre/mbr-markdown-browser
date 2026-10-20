@@ -77,12 +77,12 @@ describe('MbrTasksElement', () => {
       staticEl.remove()
     })
 
-    it('renders a clipboard trigger with the shortcut in its title when enabled', async () => {
+    it('renders a list-checks trigger with the shortcut in its title when enabled', async () => {
       await element.updateComplete
       const button = element.shadowRoot?.querySelector('button.tasks-trigger')
       expect(button).not.toBeNull()
-      expect(button?.getAttribute('title')).toBe('Tasks (t)')
-      // Feather-style icon: stroked, not filled, so it tracks the text color.
+      expect(button?.getAttribute('title')).toBe('Tasks (T)')
+      // Lucide icon: stroked, not filled, so it tracks the text color.
       const svg = button?.querySelector('svg')
       expect(svg?.getAttribute('stroke')).toBe('currentColor')
       expect(svg?.getAttribute('fill')).toBe('none')

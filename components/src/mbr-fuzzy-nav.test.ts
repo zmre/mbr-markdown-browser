@@ -231,7 +231,7 @@ describe('MbrFuzzyNavElement app-menu gates', () => {
  * it needs its own close button.
  */
 describe('MbrFuzzyNavElement narrow layout', () => {
-  const css = (customElements.get('mbr-fuzzy-nav') as unknown as { styles: { cssText: string } }).styles.cssText
+  const css = [(customElements.get('mbr-fuzzy-nav') as unknown as { styles: { cssText: string } | { cssText: string }[] }).styles].flat().map((x) => x.cssText).join('\n')
   const narrow = css.slice(css.indexOf('@media (max-width: 600px)'))
 
   it('is a full-screen sheet clear of the safe areas', () => {

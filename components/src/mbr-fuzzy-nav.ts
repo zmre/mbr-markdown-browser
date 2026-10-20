@@ -12,6 +12,8 @@ import { fetchPageLinksResult } from './graph/links-cache.js';
 import type { PageLinks } from './graph/relationship-graph.js';
 import { safeHref } from './safe-href.js';
 import type { MbrOverlay } from './overlay.js';
+import { ICON_BUTTON_CSS } from './controls.ts';
+import { ICON_SM, icon, iconArrowLeft, iconArrowRight, iconArrowUpRight, iconSearch, iconX } from './icons.ts';
 
 /**
  * Markdown file from site.json.
@@ -605,10 +607,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
 
     return html`
       <div class="search-wrapper">
-        <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
+        ${icon(iconSearch, { className: 'search-icon' })}
         <input
           id="fuzzy-search-input"
           type="text"
@@ -677,11 +676,11 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
         </span>
       ` : html`
         <span class="link-icon">
-          ${item.type === 'link-in' ? html`<span class="icon-arrow">&#8592;</span>` : html`<span class="icon-arrow">&#8594;</span>`}
+          ${icon(item.type === 'link-in' ? iconArrowLeft : iconArrowRight, { size: ICON_SM, className: 'icon-arrow' })}
         </span>
       `}
       <span class="item-text">${item.text}</span>
-      ${isExternal ? html`<span class="external-badge" title="External link">&#8599;</span>` : nothing}
+      ${isExternal ? html`<span class="external-badge" title="External link">${icon(iconArrowUpRight, { size: 14 })}</span>` : nothing}
       ${item.isVisible ? html`<span class="visible-badge" title="Currently visible">&#9679;</span>` : nothing}
     `;
 
@@ -749,7 +748,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
         <div class="modal" @click=${this._handleModalClick}>
           <div class="modal-header">
             ${this._renderTabs()}
-            <button class="close-button" @click=${() => this.close()} aria-label="Close">✕</button>
+            <button class="close-button mbr-icon-btn" @click=${() => this.close()} aria-label="Close">${icon(iconX)}</button>
           </div>
           ${this._renderSearchInput()}
           ${this._renderResults()}
@@ -763,7 +762,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = css`
+  static override styles = [ICON_BUTTON_CSS, css`
     :host {
       display: contents;
     }
@@ -830,17 +829,8 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     /* Only the full-screen (narrow) layout has no backdrop to tap. */
     .close-button {
       display: none;
-      flex-shrink: 0;
-      align-items: center;
-      justify-content: center;
-      width: 44px;
-      margin: 0;
-      padding: 0;
-      border: none;
-      background: transparent;
-      color: var(--pico-muted-color, #666);
-      font-size: 1.1rem;
-      cursor: pointer;
+      align-self: center;
+      margin-inline: 0.25rem;
     }
 
     .tab {
@@ -893,7 +883,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     }
 
     .search-icon {
-      color: var(--pico-muted-color, #999);
+      color: var(--mbr-icon-color, var(--pico-muted-color, #999));
       flex-shrink: 0;
     }
 
@@ -966,8 +956,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     }
 
     .icon-arrow {
-      font-size: 1rem;
-      color: var(--pico-muted-color, #666);
+      color: var(--mbr-icon-color, var(--pico-muted-color, #666));
     }
 
     /* Item text */
@@ -982,7 +971,7 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
 
     /* Badges */
     .external-badge {
-      font-size: 0.8rem;
+      display: inline-flex;
       color: var(--pico-muted-color, #666);
       flex-shrink: 0;
     }
@@ -1023,13 +1012,15 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     }
 
     kbd {
-      padding: 0.1rem 0.3rem;
+      padding: 0.0625rem 0.3125rem;
       border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 3px;
-      background: var(--pico-secondary-background, #f5f5f5);
-      color: var(--pico-color, #333);
+      border-radius: 4px;
+      background: transparent;
+      box-shadow: none;
+      color: var(--pico-muted-color, #666);
       font-family: inherit;
-      font-size: 0.7rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
     }
 
     /* Phones and the iOS app: one full-screen sheet, the way the task browser
@@ -1097,5 +1088,5 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
         display: none;
       }
     }
-  `;
+  `];
 }
