@@ -28,23 +28,27 @@ use mbr_core::embedded_hljs;
 use mbr_core::embedded_pico;
 use mbr_core::link_transform::LinkTransformConfig;
 use mbr_core::markdown;
+use mbr_core::url_path::{self, url_scheme};
+use percent_encoding::percent_decode_str;
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tera::{Context, Tera};
 use thiserror::Error;
 
-// Match src="/.../", href="/.../", poster="/.../..." attributes. Two separate
+// Match every src="...", href="...", poster="..." attribute; which values name
+// a local asset is decided per match by `asset_url_path`. Two separate
 // patterns (double- and single-quoted) since Rust's regex crate doesn't
 // support backreferences. Compiled once: these are literal patterns that
 // cannot fail to compile.
-static ROOT_RELATIVE_DOUBLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(src|href|poster)="(/[^"]*)""#)
+static ASSET_ATTRIBUTE_DOUBLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(src|href|poster)="([^"]*)""#)
         .expect("literal attribute regex is valid and cannot fail to compile")
 });
-static ROOT_RELATIVE_SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(src|href|poster)='(/[^']*)'"#)
+static ASSET_ATTRIBUTE_SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(src|href|poster)='([^']*)'"#)
         .expect("literal attribute regex is valid and cannot fail to compile")
 });
 
@@ -325,6 +329,7 @@ pub fn render_preview_with_config(
                 &target.path,
                 mode,
                 &target.root_path,
+                &target.base_dir_url(),
                 &ql_config,
                 &target.config,
             );
@@ -342,6 +347,7 @@ pub fn render_preview_with_config(
         rendered.frontmatter,
         rendered.headings,
         &target.root_path,
+        &target.base_dir_url(),
         &ql_config,
         &target.config,
     )
@@ -400,6 +406,7 @@ pub fn render_thumbnail(
         rendered.frontmatter,
         rendered.headings,
         &target.root_path,
+        &target.base_dir_url(),
         &THUMBNAIL_CONFIG,
         &target.config,
     )
@@ -449,6 +456,36 @@ impl QuickLookTarget {
         self.root_path.canonicalize().ok()
     }
 
+    /// The URL of the folder holding this file, ending in `/` (`/notes/` for
+    /// both `notes/note.md` and `notes/index.md`, `/` for a note at the root):
+    /// what the rendered HTML's relative URLs are relative to.
+    ///
+    /// A preview has no served, trailing-slash page URL; it is the file in its
+    /// folder. [`Self::render_markdown`] therefore writes markdown links without
+    /// `link_transform`'s `../` compensation, so a relative URL, markdown or raw
+    /// HTML alike, means what it means on GitHub or in an editor.
+    ///
+    /// Computed on canonical paths so a root reached through a symlink (macOS's
+    /// `/tmp` -> `/private/tmp`) agrees with the note's own path.
+    fn base_dir_url(&self) -> String {
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let note = canonical(&self.path);
+        let root = canonical(&self.root_path);
+        // A note outside its root (only possible with an explicit
+        // `config_root`) falls back to the root itself; containment of what the
+        // URLs then name is still judged by `resolve_asset_path`.
+        let relative_dir = note
+            .parent()
+            .and_then(|dir| dir.strip_prefix(&root).ok())
+            .unwrap_or(Path::new(""));
+        let dir = url_path::path_to_url(relative_dir);
+        if dir.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{dir}/")
+        }
+    }
+
     /// Render `source` (this file's markdown, or the top of it) to HTML.
     ///
     /// Synchronous `render_str` rather than the async `render`: with oEmbed
@@ -460,17 +497,16 @@ impl QuickLookTarget {
     ) -> Result<markdown::MarkdownRenderResult, QuickLookError> {
         let config = &self.config;
 
-        // Determine if this is an index file (affects link transformation)
-        let is_index_file = self
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|name| name == config.index_file);
-
         let link_transform_config = LinkTransformConfig {
             markdown_extensions: config.markdown_extensions.clone(),
             index_file: config.index_file.clone(),
-            is_index_file,
+            // Always "index": a preview has no trailing-slash page URL (the
+            // file is shown from its folder), so markdown links must not get
+            // the `../` compensation a served non-index page needs. Relative
+            // URLs then mean what they mean on GitHub or in an editor, the same
+            // as raw HTML `<img src>`, which `link_transform` never touches,
+            // and both resolve against `base_dir_url`.
+            is_index_file: true,
             url_depth: None,
             // QuickLook previews a single file with no repo index, so body
             // wikilinks never resolve globally; the page URL is unused.
@@ -660,6 +696,7 @@ fn render_text_preview(
     path: &Path,
     mode: PreviewMode,
     root_path: &Path,
+    base_dir_url: &str,
     ql_config: &QuickLookConfig,
     config: &Config,
 ) -> Result<PreviewDocument, QuickLookError> {
@@ -679,6 +716,7 @@ fn render_text_preview(
         frontmatter,
         Vec::new(), // no headings: a text preview has no table of contents
         root_path,
+        base_dir_url,
         ql_config,
         config,
     )
@@ -748,6 +786,65 @@ fn resolve_asset_path(
     })
 }
 
+/// The root-relative, decoded file path an attribute value names, or `None` when
+/// it does not name a local file and must be left as authored.
+///
+/// `value` is the attribute exactly as it appears in the HTML, so it is first
+/// HTML-unescaped (`a&amp;b.png`), then cut at its query or fragment, then
+/// percent-decoded (`Pasted%20image.png`): the renderer encodes the URLs it
+/// writes, and the file on disk has the decoded name. Root-relative values
+/// (`/images/a.png`) are returned as they are; relative ones (`img/a.png`,
+/// `../b.png`) are resolved against `base_dir_url` by [`resolve_relative_url`].
+/// Anything with a scheme (`https:`, `data:`, `mailto:`, `cid:`), a
+/// protocol-relative `//host/...`, and a bare `#fragment` or `?query` is left
+/// alone.
+///
+/// This is *not* a containment check: the result is attacker-controlled and may
+/// still name `/../../etc/passwd` after decoding. [`resolve_asset_path`] judges
+/// it on the canonical path, as it does every root-relative URL.
+fn asset_url_path(base_dir_url: &str, value: &str) -> Option<String> {
+    let value = html_escape::decode_html_entities(value);
+    if value.is_empty()
+        || value.starts_with("//")
+        || value.starts_with(['#', '?'])
+        || url_scheme(&value).is_some()
+    {
+        return None;
+    }
+
+    let path = value.split(['?', '#']).next().unwrap_or_default();
+    let decoded = percent_decode_str(path).decode_utf8().ok()?;
+    if decoded.starts_with('/') {
+        Some(decoded.into_owned())
+    } else {
+        resolve_relative_url(base_dir_url, &decoded)
+    }
+}
+
+/// `relative` resolved lexically against `base_dir_url` (a folder URL ending in
+/// `/`; anything after its last `/` is ignored, as a browser would), with `.`
+/// segments dropped and `..` removing one directory.
+///
+/// `None` when `..` climbs above the root: such a URL names nothing in the
+/// repository, so it is left as authored rather than clamped onto a file the
+/// author did not name.
+fn resolve_relative_url(base_dir_url: &str, relative: &str) -> Option<String> {
+    let base_dir = base_dir_url.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let segments = base_dir
+        .split('/')
+        .chain(relative.split('/'))
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .try_fold(Vec::new(), |mut segments, segment| {
+            if segment == ".." {
+                segments.pop()?;
+            } else {
+                segments.push(segment);
+            }
+            Some(segments)
+        })?;
+    Some(format!("/{}", segments.join("/")))
+}
+
 /// Builds the attachment list for one preview while the HTML is rewritten.
 ///
 /// Stateful because the two regex passes (double- then single-quoted attributes)
@@ -756,6 +853,9 @@ fn resolve_asset_path(
 struct AttachmentCollector<'a> {
     canonical_root: &'a Path,
     static_folder: &'a str,
+    /// The URL of the previewed file's folder; relative attribute values
+    /// resolve against it (see [`asset_url_path`]).
+    base_dir_url: &'a str,
     /// Resolved path -> already-assigned `cid` id.
     seen: HashMap<PathBuf, String>,
     attachments: Vec<PreviewAttachment>,
@@ -763,18 +863,19 @@ struct AttachmentCollector<'a> {
 }
 
 impl<'a> AttachmentCollector<'a> {
-    fn new(canonical_root: &'a Path, static_folder: &'a str) -> Self {
+    fn new(canonical_root: &'a Path, static_folder: &'a str, base_dir_url: &'a str) -> Self {
         Self {
             canonical_root,
             static_folder,
+            base_dir_url,
             seen: HashMap::new(),
             attachments: Vec::new(),
             attached_bytes: 0,
         }
     }
 
-    /// The `cid:` URL for a root-relative `url_path`, or `None` to leave the URL
-    /// as authored.
+    /// The `cid:` URL for a root-relative, decoded `url_path`, or `None` to leave
+    /// the URL as authored.
     ///
     /// `None` means "this preview will not show that file", for any of the
     /// reasons that can apply: it does not exist, it is not a regular file, it
@@ -810,20 +911,25 @@ impl<'a> AttachmentCollector<'a> {
     /// Rewrite one matched `src`/`href`/`poster` attribute, attaching its target.
     fn rewrite(&mut self, caps: &regex::Captures<'_>, quote: char) -> String {
         let attr = &caps[1];
-        let url_path = &caps[2];
-        let target = self
-            .cid_for(url_path)
-            .unwrap_or_else(|| url_path.to_string());
+        let value = &caps[2];
+        let target = asset_url_path(self.base_dir_url, value)
+            .and_then(|url_path| self.cid_for(&url_path))
+            .map_or(Cow::Borrowed(value), Cow::Owned);
         format!("{}={}{}{}", attr, quote, target, quote)
     }
 }
 
-/// Rewrite root-relative asset URLs (starting with `/`) to `cid:` references and
-/// return the files they name.
+/// Rewrite local asset URLs to `cid:` references and return the files they name.
 ///
 /// A data-based `QLPreviewReply` carries local resources as attachments keyed by
-/// id; `cid:{id}` is how HTML addresses one. Assets are resolved with the same
-/// fallback the server uses: the direct path first, then the static folder.
+/// id; `cid:{id}` is how HTML addresses one. The reply has no `<base>` (it is
+/// served from QuickLook's own `x-apple-ql-id2://` URL), so relative URLs are
+/// resolved here against `base_dir_url`, the note's folder: QuickLook renders
+/// markdown links without the trailing-slash `../` compensation, so relative
+/// markdown and raw-HTML URLs both mean what they do on GitHub or in an
+/// editor. Assets are then resolved with the
+/// same fallback the server uses: the direct path first, then the static
+/// folder.
 ///
 /// # Security
 ///
@@ -837,6 +943,7 @@ fn collect_preview_attachments(
     html: &str,
     root_path: &Path,
     static_folder: &str,
+    base_dir_url: &str,
 ) -> (String, Vec<PreviewAttachment>) {
     // Canonicalize the root once: every containment check compares against it,
     // and per-attribute canonicalization of the root would be wasted syscalls.
@@ -844,15 +951,15 @@ fn collect_preview_attachments(
         return (html.to_string(), Vec::new());
     };
 
-    let mut collector = AttachmentCollector::new(&canonical_root, static_folder);
+    let mut collector = AttachmentCollector::new(&canonical_root, static_folder, base_dir_url);
 
     // First pass: handle double-quoted attributes
-    let result = ROOT_RELATIVE_DOUBLE_QUOTED
+    let result = ASSET_ATTRIBUTE_DOUBLE_QUOTED
         .replace_all(html, |caps: &regex::Captures| collector.rewrite(caps, '"'))
         .into_owned();
 
     // Second pass: handle single-quoted attributes
-    let result = ROOT_RELATIVE_SINGLE_QUOTED
+    let result = ASSET_ATTRIBUTE_SINGLE_QUOTED
         .replace_all(&result, |caps: &regex::Captures| {
             collector.rewrite(caps, '\'')
         })
@@ -867,14 +974,19 @@ fn render_quicklook_template(
     frontmatter: markdown::SimpleMetadata,
     headings: Vec<markdown::HeadingInfo>,
     root_path: &Path,
+    base_dir_url: &str,
     ql_config: &QuickLookConfig,
     config: &Config,
 ) -> Result<PreviewDocument, QuickLookError> {
-    // Turn root-relative URLs into cid: references and collect the files they
-    // name. Uses static_folder fallback logic to find files in the correct
-    // location.
-    let (markdown_html, attachments) =
-        collect_preview_attachments(markdown_html, root_path, &config.static_folder);
+    // Turn local asset URLs (root-relative, or relative to `base_dir_url`) into
+    // cid: references and collect the files they name. Uses static_folder
+    // fallback logic to find files in the correct location.
+    let (markdown_html, attachments) = collect_preview_attachments(
+        markdown_html,
+        root_path,
+        &config.static_folder,
+        base_dir_url,
+    );
 
     // Load custom theme CSS if available
     let custom_theme = load_custom_theme(root_path);
@@ -1411,7 +1523,7 @@ mod tests {
     fn test_collect_attachments_double_quotes() {
         let (_tmp, root) = repo_with_file("images/test.png");
         let html = r#"<img src="/images/test.png" alt="test">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/test.png"));
         assert_eq!(result, format!(r#"<img src="{cid}" alt="test">"#));
@@ -1422,7 +1534,7 @@ mod tests {
     fn test_collect_attachments_single_quotes() {
         let (_tmp, root) = repo_with_file("videos/test.mp4");
         let html = r#"<source src='/videos/test.mp4' type="video/mp4">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("videos/test.mp4"));
         assert_eq!(result, format!(r#"<source src='{cid}' type="video/mp4">"#));
@@ -1432,7 +1544,7 @@ mod tests {
     fn test_collect_attachments_href() {
         let (_tmp, root) = repo_with_file("docs/readme.md");
         let html = r#"<a href="/docs/readme.md">Link</a>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("docs/readme.md"));
         assert_eq!(result, format!(r#"<a href="{cid}">Link</a>"#));
@@ -1442,7 +1554,7 @@ mod tests {
     fn test_collect_attachments_poster() {
         let (_tmp, root) = repo_with_file("images/thumb.jpg");
         let html = r#"<video poster="/images/thumb.jpg"></video>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/thumb.jpg"));
         assert_eq!(result, format!(r#"<video poster="{cid}"></video>"#));
@@ -1458,7 +1570,7 @@ mod tests {
             r#"<img src='/images/test.png'>"#,
             r#"<a href="/images/test.png">x</a>"#,
         );
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         assert_eq!(attachments.len(), 1);
         let cid = cid_of(&attachments, &root.join("images/test.png"));
@@ -1471,19 +1583,124 @@ mod tests {
         // so the HTML must be left alone rather than rewritten optimistically.
         let html = r#"<img src="/images/test.png">"#;
         let (result, attachments) =
-            collect_preview_attachments(html, Path::new("/no/such/root"), "static");
+            collect_preview_attachments(html, Path::new("/no/such/root"), "static", "/");
         assert_eq!(result, html);
         assert!(attachments.is_empty());
     }
 
     #[test]
-    fn test_collect_attachments_preserves_relative() {
-        // Relative paths (not starting with /) should NOT be converted
-        let html = r#"<img src="./images/test.png" alt="test">"#;
-        let (_tmp, root) = repo_with_file("images/test.png");
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
-        // Should remain unchanged
-        assert_eq!(result, r#"<img src="./images/test.png" alt="test">"#);
+    fn test_resolve_relative_url_against_base_dir_url() {
+        // The base is the note's folder: `/notes/` for both `notes/note.md`
+        // and `notes/index.md`, `/` for a note at the root.
+        let cases = [
+            ("/notes/", "img/a.png", Some("/notes/img/a.png")),
+            ("/notes/", "./img/./a.png", Some("/notes/img/a.png")),
+            ("/notes/", "../images/b.png", Some("/images/b.png")),
+            ("/notes/", "./../images/b.png", Some("/images/b.png")),
+            ("/a/b/", "../../c.png", Some("/c.png")),
+            ("/", "a.png", Some("/a.png")),
+            ("/", "docs/images/x.png", Some("/docs/images/x.png")),
+            ("/notes/", "../../etc/passwd", None),
+            ("/", "../a.png", None),
+        ];
+        for (base_dir_url, relative, expected) in cases {
+            assert_eq!(
+                resolve_relative_url(base_dir_url, relative).as_deref(),
+                expected,
+                "{relative} against {base_dir_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_asset_url_path_classifies_and_decodes() {
+        let base = "/notes/";
+        let cases = [
+            // Local: root-relative as is, relative resolved against the folder.
+            ("/images/b.png", Some("/images/b.png")),
+            ("img/a.png", Some("/notes/img/a.png")),
+            ("../images/b.png", Some("/images/b.png")),
+            // Decoded the way the file is named on disk.
+            ("Pasted%20image%201.png", Some("/notes/Pasted image 1.png")),
+            ("/x/my%20photo.png", Some("/x/my photo.png")),
+            ("caf%C3%A9.png", Some("/notes/café.png")),
+            ("a&amp;b.png", Some("/notes/a&b.png")),
+            // Query and fragment are not part of the file name; an encoded
+            // `?` is.
+            ("a.png?v=2#top", Some("/notes/a.png")),
+            ("what%3F.png", Some("/notes/what?.png")),
+            // Not local: left as authored.
+            ("", None),
+            ("#heading", None),
+            ("?q=1", None),
+            ("//example.com/x.png", None),
+            ("https://example.com/x.png", None),
+            ("data:image/png;base64,AAAA", None),
+            ("mailto:me@example.com", None),
+            ("cid:mbr-asset-0", None),
+            ("../../x.png", None),
+            ("bad%FF.png", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(asset_url_path(base, value).as_deref(), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn test_collect_attachments_resolves_relative_against_base_dir_url() {
+        let (_tmp, root) = repo_with_file("notes/img/a.png");
+        let html = r#"<img src="img/a.png"><img src='./img/a.png'>"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/notes/");
+
+        let cid = cid_of(&attachments, &root.join("notes/img/a.png"));
+        assert_eq!(result, format!(r#"<img src="{cid}"><img src='{cid}'>"#));
+        assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_attachments_relative_uses_static_folder_fallback() {
+        let (_tmp, root) = repo_with_file("static/pics/c.png");
+        let html = r#"<img src="pics/c.png">"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "static", "/");
+
+        let cid = cid_of(&attachments, &root.join("static/pics/c.png"));
+        assert_eq!(result, format!(r#"<img src="{cid}">"#));
+    }
+
+    #[test]
+    fn test_collect_attachments_decodes_root_relative_paths() {
+        // The renderer percent-encodes the URLs it writes, so before this a
+        // root-relative image with a space in its name never loaded either.
+        let (_tmp, root) = repo_with_file("images/my photo.png");
+        let html = r#"<img src="/images/my%20photo.png">"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+
+        let cid = cid_of(&attachments, &root.join("images/my photo.png"));
+        assert_eq!(result, format!(r#"<img src="{cid}">"#));
+    }
+
+    #[test]
+    fn test_collect_attachments_encoded_traversal_stays_contained() {
+        // Decoding happens before containment, so `%2E%2E` is just `..` and
+        // the canonical check still refuses it.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(temp_dir.path().join("secret.txt"), b"secret").unwrap();
+        let html = r#"<a href="/%2E%2E/secret.txt">x</a><a href="/..%2Fsecret.txt">y</a>"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        assert_eq!(result, html);
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn test_collect_attachments_leaves_protocol_relative_alone() {
+        // `//host/x.png` is a remote URL, even when a `host/x.png` exists in
+        // the repository.
+        let (_tmp, root) = repo_with_file("host/x.png");
+        let html = r#"<img src="//host/x.png">"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        assert_eq!(result, html);
         assert!(attachments.is_empty());
     }
 
@@ -1492,7 +1709,7 @@ mod tests {
         // HTTP URLs should NOT be converted
         let html = r#"<img src="https://example.com/image.png">"#;
         let (_tmp, root) = repo_with_file("images/test.png");
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
         assert_eq!(result, r#"<img src="https://example.com/image.png">"#);
         assert!(attachments.is_empty());
     }
@@ -1506,7 +1723,8 @@ mod tests {
         std::fs::write(static_images.join("photo.jpg"), b"image data").unwrap();
 
         let html = r#"<img src="/images/photo.jpg">"#;
-        let (result, attachments) = collect_preview_attachments(html, temp_dir.path(), "static");
+        let (result, attachments) =
+            collect_preview_attachments(html, temp_dir.path(), "static", "/");
 
         // Should resolve to static/images/photo.jpg since /images/photo.jpg doesn't exist
         let expected_path = static_images.canonicalize().unwrap().join("photo.jpg");
@@ -1530,7 +1748,8 @@ mod tests {
         std::fs::write(static_images.join("photo.jpg"), b"static image").unwrap();
 
         let html = r#"<img src="/images/photo.jpg">"#;
-        let (_result, attachments) = collect_preview_attachments(html, temp_dir.path(), "static");
+        let (_result, attachments) =
+            collect_preview_attachments(html, temp_dir.path(), "static", "/");
 
         // Should resolve to direct path since it exists
         let expected_path = direct_images.canonicalize().unwrap().join("photo.jpg");
@@ -1551,7 +1770,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let html = r#"<img src="/images/missing.jpg">"#;
-        let (result, attachments) = collect_preview_attachments(html, temp_dir.path(), "static");
+        let (result, attachments) =
+            collect_preview_attachments(html, temp_dir.path(), "static", "/");
 
         assert_eq!(result, html);
         assert!(attachments.is_empty());
@@ -1568,7 +1788,7 @@ mod tests {
         drop(file);
 
         let html = r#"<img src="/images/small.png"><video src="/images/huge.mp4"></video>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/small.png"));
         assert_eq!(attachments.len(), 1, "only the small asset is attached");
@@ -1597,7 +1817,7 @@ mod tests {
             .iter()
             .map(|name| format!(r#"<img src="/images/{name}">"#))
             .collect();
-        let (result, attachments) = collect_preview_attachments(&html, &root, "");
+        let (result, attachments) = collect_preview_attachments(&html, &root, "", "/");
 
         assert_eq!(attachments.len(), fit, "the last asset busts the budget");
         assert_eq!(
@@ -1617,7 +1837,7 @@ mod tests {
         let (_tmp, root) = repo_with_file("images/test.png");
 
         let html = r#"<img src="/"><img src="/images"><img src="/images/">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "");
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
 
         assert!(attachments.is_empty(), "got {attachments:?}");
         assert_eq!(result, html);
@@ -1772,7 +1992,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, root.join("images/leak.png")).unwrap();
 
         let html = r#"<img src="/images/leak.png"><img src='/../id_rsa'>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "static");
+        let (result, attachments) = collect_preview_attachments(html, &root, "static", "/");
 
         assert_eq!(result, html);
         assert!(attachments.is_empty(), "got {attachments:?}");
@@ -2230,6 +2450,209 @@ mod tests {
             result.unwrap_err(),
             QuickLookError::FileReadError { .. }
         ));
+    }
+
+    // MARK: relative asset URLs
+
+    /// Markdown referencing local assets every way the renderer can write a
+    /// relative URL, for `regression_repo`.
+    const RELATIVE_ASSET_NOTE: &str = concat!(
+        "rel ![a](img/a.png)\n\n",
+        "dotrel ![a2](./img/a.png)\n\n",
+        "same ![d](d.png)\n\n",
+        "up ![b](../images/b.png)\n\n",
+        "wiki ![[d.png]]\n\n",
+        "spaces ![s](<Pasted image 1.png>)\n\n",
+        "rootrel ![b2](/images/b.png)\n\n",
+        "escape ![e](../../outside.png)\n\n",
+        "link [doc](img/doc.pdf) and [page](other.md)\n\n",
+        "remote ![r](https://example.com/r.png) ![p](//example.com/p.png) ",
+        "[m](mailto:me@example.com) [f](#frag)\n\n",
+        "data ![x](data:image/png;base64,AAAA)\n",
+    );
+
+    /// A repository with `note` (in `notes/`) holding `contents`, the assets
+    /// [`RELATIVE_ASSET_NOTE`] names, a sibling note, and a file *outside* the
+    /// repository. Returns the temp dir, canonical root and the note's path.
+    fn regression_repo(note: &str, contents: &str) -> (tempfile::TempDir, PathBuf, String) {
+        let (tmp, root, note) = thumbnail_repo(note, contents);
+        for asset in [
+            "notes/img/a.png",
+            "notes/img/doc.pdf",
+            "notes/d.png",
+            "notes/Pasted image 1.png",
+            "images/b.png",
+            "notes/other.md",
+        ] {
+            write_file(&root.join(asset), asset.as_bytes());
+        }
+        write_file(&tmp.path().join("outside.png"), b"outside");
+        (tmp, root, note)
+    }
+
+    fn src_of<'a>(html: &'a str, alt: &str) -> &'a str {
+        let marker = format!(r#"alt="{alt}""#);
+        let tag_start = html[..html.find(&marker).unwrap_or_else(|| panic!("no {marker}"))]
+            .rfind("<img")
+            .unwrap();
+        let tag = &html[tag_start..];
+        let src = &tag[tag.find(r#"src=""#).unwrap() + 5..];
+        &src[..src.find('"').unwrap()]
+    }
+
+    #[test]
+    fn test_render_preview_attaches_relative_assets() {
+        let (_tmp, root, note) = regression_repo("notes/note.md", RELATIVE_ASSET_NOTE);
+        let document = render_preview(note, None).unwrap();
+        let html = &document.html;
+        let cid = |path: &str| cid_of(&document.attachments, &root.join(path));
+
+        assert_eq!(src_of(html, "a"), cid("notes/img/a.png"));
+        assert_eq!(src_of(html, "a2"), cid("notes/img/a.png"));
+        assert_eq!(src_of(html, "d"), cid("notes/d.png"));
+        assert_eq!(src_of(html, "b"), cid("images/b.png"));
+        assert_eq!(src_of(html, "d.png"), cid("notes/d.png"), "![[d.png]]");
+        assert_eq!(src_of(html, "s"), cid("notes/Pasted image 1.png"));
+        assert!(html.contains(&format!(r#"href="{}""#, cid("notes/img/doc.pdf"))));
+
+        // One attachment per file, however it was referenced: a.png twice
+        // relatively, b.png relatively and root-relatively, d.png twice.
+        assert_eq!(src_of(html, "b2"), cid("images/b.png"));
+        assert_eq!(document.attachments.len(), 5, "{:?}", document.attachments);
+
+        // Escaping the root is left as authored (no `../` compensation is
+        // added in a preview), not clamped or attached.
+        assert_eq!(src_of(html, "e"), "../../outside.png");
+        // A link to another page is not an asset; it is written relative to
+        // the note's folder, as the author wrote it.
+        assert!(html.contains(r#"href="other/""#), "page link untouched");
+        // Remote, data, mail and fragment URLs are untouched.
+        assert_eq!(src_of(html, "r"), "https://example.com/r.png");
+        assert_eq!(src_of(html, "p"), "//example.com/p.png");
+        assert_eq!(src_of(html, "x"), "data:image/png;base64,AAAA");
+        assert!(html.contains(r#"href="mailto:me@example.com""#));
+        assert!(html.contains(r##"href="#frag""##));
+    }
+
+    #[test]
+    fn test_render_preview_index_and_non_index_notes_resolve_alike() {
+        // Served, `notes/index.md` is `/notes/` and `notes/note.md` is
+        // `/notes/note/`, and their links differ by a `../`. A preview is the
+        // file in its folder, so both resolve every relative URL the same way.
+        let contents = concat!(
+            "![a](img/a.png)\n\n",
+            "<img src=\"img/a.png\" alt=\"h\">\n\n",
+            "up ![b](../images/b.png) [page](other.md)\n",
+        );
+        let rendered: Vec<_> = ["notes/index.md", "notes/note.md"]
+            .into_iter()
+            .map(|name| {
+                let (tmp, root, note) = regression_repo(name, contents);
+                let document = render_preview(note, None).unwrap();
+                let cid = |path: &str| cid_of(&document.attachments, &root.join(path));
+                assert_eq!(
+                    src_of(&document.html, "a"),
+                    cid("notes/img/a.png"),
+                    "{name}"
+                );
+                assert_eq!(
+                    src_of(&document.html, "h"),
+                    cid("notes/img/a.png"),
+                    "{name}"
+                );
+                assert_eq!(src_of(&document.html, "b"), cid("images/b.png"), "{name}");
+                assert!(document.html.contains(r#"href="other/""#), "{name}");
+                assert_eq!(document.attachments.len(), 2, "{name}");
+                drop(tmp);
+                (
+                    src_of(&document.html, "a").to_string(),
+                    src_of(&document.html, "b").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(rendered[0], rendered[1]);
+    }
+
+    #[test]
+    fn test_render_preview_root_readme_attaches_raw_html_images() {
+        // The reported bug: a root README's `<img>` in an HTML block (a
+        // centered hero image) was resolved against `/README/` and never
+        // attached, while the markdown image beside it was.
+        let contents = concat!(
+            "<p align=\"center\">\n",
+            "  <img src=\"docs/images/x.png\" width=\"900\" alt=\"hero\">\n",
+            "</p>\n\n",
+            "Inline <img src=\"docs/images/x.png\" alt=\"inline\"> in a paragraph.\n\n",
+            "![b](docs/images/x.png)\n",
+        );
+        let (_tmp, root, note) = thumbnail_repo("README.md", contents);
+        write_file(&root.join("docs/images/x.png"), b"png bytes");
+
+        let document = render_preview(note, None).unwrap();
+        let cid = cid_of(&document.attachments, &root.join("docs/images/x.png"));
+        assert_eq!(src_of(&document.html, "hero"), cid);
+        assert_eq!(src_of(&document.html, "inline"), cid);
+        assert_eq!(src_of(&document.html, "b"), cid);
+        assert_eq!(document.attachments.len(), 1, "{:?}", document.attachments);
+    }
+
+    #[test]
+    fn test_render_preview_subfolder_raw_html_resolves_against_folder() {
+        let contents = concat!(
+            "<div>\n<img src=\"img/a.png\" alt=\"a\">\n",
+            "<img src='../images/b.png' alt='b'>\n</div>\n",
+        );
+        let (_tmp, root, note) = regression_repo("notes/note.md", contents);
+        let document = render_preview(note, None).unwrap();
+        let cid = |path: &str| cid_of(&document.attachments, &root.join(path));
+
+        assert_eq!(src_of(&document.html, "a"), cid("notes/img/a.png"));
+        assert!(
+            document
+                .html
+                .contains(&format!("src='{}'", cid("images/b.png"))),
+            "{}",
+            document.html
+        );
+        assert_eq!(document.attachments.len(), 2, "{:?}", document.attachments);
+    }
+
+    #[test]
+    fn test_render_preview_relative_symlink_out_of_repo_not_attached() {
+        let (tmp, _root, note) = regression_repo("notes/note.md", "![l](img/link.png)\n");
+        std::os::unix::fs::symlink(
+            tmp.path().join("outside.png"),
+            tmp.path().join("repo/notes/img/link.png"),
+        )
+        .unwrap();
+        let document = render_preview(note, None).unwrap();
+        assert!(
+            document.attachments.is_empty(),
+            "{:?}",
+            document.attachments
+        );
+        assert_eq!(src_of(&document.html, "l"), "img/link.png");
+    }
+
+    #[test]
+    fn test_thumbnail_page_attaches_relative_image() {
+        let (_tmp, root, note) = regression_repo("notes/note.md", "# Hi\n\n![a](img/a.png)\n");
+        let document = thumbnail_page(render_thumbnail(note, None).unwrap());
+        assert_eq!(
+            src_of(&document.html, "a"),
+            cid_of(&document.attachments, &root.join("notes/img/a.png"))
+        );
+    }
+
+    #[test]
+    fn test_thumbnail_page_attaches_raw_html_image() {
+        let contents = "# Hi\n\n<p align=\"center\"><img src=\"../images/b.png\" alt=\"b\"></p>\n";
+        let (_tmp, root, note) = regression_repo("notes/note.md", contents);
+        let document = thumbnail_page(render_thumbnail(note, None).unwrap());
+        assert_eq!(
+            src_of(&document.html, "b"),
+            cid_of(&document.attachments, &root.join("images/b.png"))
+        );
     }
 
     // MARK: thumbnails

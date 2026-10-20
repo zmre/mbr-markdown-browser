@@ -218,10 +218,13 @@ The QuickLook preview is simplified compared to the full mbr experience:
 A QuickLook preview is a single self-contained document, so any local file it
 shows has to travel with it. Two consequences:
 
-- **Reference assets from the repository root.** `![diagram](/images/x.png)`
-  works; so does anything the `static_folder` overlay resolves. An image
-  authored relative to the note (`![diagram](x.png)`) does not display in a
-  preview — it renders fine everywhere else in mbr.
+- **Assets must live inside the repository.** Relative URLs, in markdown
+  (`![diagram](x.png)`, `![diagram](../images/x.png)`, `![[x.png]]`) or raw
+  HTML (`<img src="x.png">`), are resolved against the folder the note is in,
+  as GitHub or an editor would, and root-relative ones (`![diagram](/images/x.png)`) against the
+  repository root; both also resolve through the `static_folder` overlay. A
+  file outside the repository — by a `../` climbing above the root, or a
+  symlink pointing out of it — is not shown.
 - **Large assets are skipped.** A single file over 16 MB, or one that would push
   a page's assets past 64 MB in total, is left out rather than read into the
   preview. Assets are attached in document order, so what is at the top of the

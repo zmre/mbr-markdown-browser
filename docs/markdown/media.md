@@ -294,6 +294,8 @@ docs/
     └── diagram.png
 ```
 
+The same goes for raw HTML in a note. A relative URL in a quoted `src`, `href` or `poster` attribute, such as `<img src="docs/images/hero.png" width="900">` in a README, resolves the way the equivalent markdown image or link does. mbr adjusts it for the trailing-slash URL the page is served at and for static builds. A `.md` target in `href` becomes the page's URL. Absolute URLs, `#anchors`, `mailto:`, `data:` and the like are left as written. Unquoted values, `srcset`, and an attribute whose name and value sit on different lines are not rewritten.
+
 ### Static Folder
 
 Files in the `static/` folder (configurable) are served directly:

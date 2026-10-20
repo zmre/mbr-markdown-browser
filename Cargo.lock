@@ -3174,6 +3174,7 @@ dependencies = [
  "html-escape",
  "mbr-core",
  "mbr-server",
+ "percent-encoding",
  "rayon",
  "regex",
  "serde_json",
