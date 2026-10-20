@@ -49,8 +49,8 @@ makes highlight.js and mermaid work). It cannot, however, reach the filesystem:
   script to name a file that is not already in it.
 - The dictionary is built by `collect_preview_attachments` (`crates/mbr-ffi/src/quicklook.rs`),
   which attaches a file only when `Path::canonicalize` puts it inside the
-  previewed repository root **and** it is a regular file. Relative URLs are
-  (markdown and raw HTML alike) are first resolved lexically against the
+  previewed repository root **and** it is a regular file. Relative URLs
+  (markdown and raw HTML alike, each candidate of a `srcset` on its own) are first resolved lexically against the
   note's folder (`/notes/` for `notes/note.md`) and percent-decoded, root-relative ones only decoded; the
   containment check then runs on the canonical result. `..` (encoded or not),
   extra leading slashes and symlinks pointing out of the repo all resolve away
@@ -529,7 +529,8 @@ Check:
 2. **Config root detection** - the `configRoot =` log line; images resolve
    relative to it.
 3. **Static folder** - verify images exist in the repo or its `static/` folder.
-4. **Relative image URLs** (`![x](y.png)`, and raw HTML `<img src="y.png">`)
+4. **Relative image URLs** (`![x](y.png)`, and raw HTML `<img src="y.png">` or
+   `<source srcset="y.png 2x">`)
    are resolved against the note's folder (`/notes/` for both `notes/note.md`
    and `notes/index.md`), as on GitHub or in an editor, so they attach like
    root-relative ones. One that climbs above the repository

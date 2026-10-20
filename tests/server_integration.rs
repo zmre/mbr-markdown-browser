@@ -215,7 +215,14 @@ async fn test_raw_html_relative_urls_resolve_like_markdown() {
     let repo = TestRepo::new();
     repo.create_markdown(
         "README.md",
-        "<p align=\"center\">\n    <img src=\"docs/images/hero.png\" width=\"900\" alt=\"hero\">\n</p>\n\n![md](docs/images/hero.png)\n",
+        concat!(
+            "<p align=\"center\">\n    <img src=\"docs/images/hero.png\" width=\"900\" alt=\"hero\">\n</p>\n\n",
+            "<picture>\n",
+            "  <source media=\"(prefers-color-scheme: dark)\" srcset=\"docs/images/hero-dark.png 1x, docs/images/hero-dark@2x.png 2x\">\n",
+            "  <img src=\"docs/images/hero.png\" alt=\"pic\">\n",
+            "</picture>\n\n",
+            "![md](docs/images/hero.png)\n",
+        ),
     );
 
     let server = TestServer::start(&repo).await;
@@ -228,6 +235,13 @@ async fn test_raw_html_relative_urls_resolve_like_markdown() {
         r#"<img src="../docs/images/hero.png" width="900" alt="hero">"#,
     );
     assert_html_contains(&html, r#"src="../docs/images/hero.png" alt="md""#);
+    // A `<picture>`'s dark-mode `<source srcset>`: every candidate URL gets
+    // the same `../`, descriptors kept.
+    assert_html_contains(
+        &html,
+        r#"srcset="../docs/images/hero-dark.png 1x, ../docs/images/hero-dark@2x.png 2x""#,
+    );
+    assert_html_contains(&html, r#"<img src="../docs/images/hero.png" alt="pic">"#);
 }
 
 #[tokio::test]

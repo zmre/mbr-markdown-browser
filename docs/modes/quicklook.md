@@ -220,7 +220,7 @@ shows has to travel with it. Two consequences:
 
 - **Assets must live inside the repository.** Relative URLs, in markdown
   (`![diagram](x.png)`, `![diagram](../images/x.png)`, `![[x.png]]`) or raw
-  HTML (`<img src="x.png">`), are resolved against the folder the note is in,
+  HTML (`<img src="x.png">`, each URL of a `<source srcset="x.png 1x, x@2x.png 2x">`), are resolved against the folder the note is in,
   as GitHub or an editor would, and root-relative ones (`![diagram](/images/x.png)`) against the
   repository root; both also resolve through the `static_folder` overlay. A
   file outside the repository — by a `../` climbing above the root, or a

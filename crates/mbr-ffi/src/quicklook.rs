@@ -38,17 +38,17 @@ use std::sync::LazyLock;
 use tera::{Context, Tera};
 use thiserror::Error;
 
-// Match every src="...", href="...", poster="..." attribute; which values name
-// a local asset is decided per match by `asset_url_path`. Two separate
-// patterns (double- and single-quoted) since Rust's regex crate doesn't
-// support backreferences. Compiled once: these are literal patterns that
-// cannot fail to compile.
+// Match every src="...", srcset="...", href="...", poster="..." attribute;
+// which values name a local asset is decided per match by `asset_url_path`
+// (per candidate, for a `srcset`). Two separate patterns (double- and
+// single-quoted) since Rust's regex crate doesn't support backreferences.
+// Compiled once: these are literal patterns that cannot fail to compile.
 static ASSET_ATTRIBUTE_DOUBLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(src|href|poster)="([^"]*)""#)
+    Regex::new(r#"(srcset|src|href|poster)="([^"]*)""#)
         .expect("literal attribute regex is valid and cannot fail to compile")
 });
 static ASSET_ATTRIBUTE_SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(src|href|poster)='([^']*)'"#)
+    Regex::new(r#"(srcset|src|href|poster)='([^']*)'"#)
         .expect("literal attribute regex is valid and cannot fail to compile")
 });
 
@@ -908,13 +908,26 @@ impl<'a> AttachmentCollector<'a> {
         Some(format!("cid:{id}"))
     }
 
-    /// Rewrite one matched `src`/`href`/`poster` attribute, attaching its target.
+    /// The `cid:` URL for one authored URL (still HTML-escaped), or `None` to
+    /// leave it as authored.
+    fn cid_for_value(&mut self, value: &str) -> Option<String> {
+        asset_url_path(self.base_dir_url, value).and_then(|url_path| self.cid_for(&url_path))
+    }
+
+    /// Rewrite one matched `src`/`srcset`/`href`/`poster` attribute, attaching
+    /// its target. A `srcset` attaches each candidate URL on its own, through
+    /// the same [`Self::cid_for`] (so containment, dedup and budgets apply per
+    /// file), keeping descriptors and any candidate it cannot attach as
+    /// authored ([`url_path::rewrite_srcset`], the renderer's own reading).
     fn rewrite(&mut self, caps: &regex::Captures<'_>, quote: char) -> String {
         let attr = &caps[1];
         let value = &caps[2];
-        let target = asset_url_path(self.base_dir_url, value)
-            .and_then(|url_path| self.cid_for(&url_path))
-            .map_or(Cow::Borrowed(value), Cow::Owned);
+        let target = if attr == "srcset" {
+            url_path::rewrite_srcset(value, |url| self.cid_for_value(url))
+        } else {
+            self.cid_for_value(value)
+                .map_or(Cow::Borrowed(value), Cow::Owned)
+        };
         format!("{}={}{}{}", attr, quote, target, quote)
     }
 }
@@ -2615,6 +2628,84 @@ mod tests {
             document.html
         );
         assert_eq!(document.attachments.len(), 2, "{:?}", document.attachments);
+    }
+
+    #[test]
+    fn test_render_preview_root_readme_attaches_picture_srcset() {
+        // The README's hero: dark mode reads the `<source srcset>`, which was
+        // never attached, so the preview showed a broken image in dark mode.
+        let contents = concat!(
+            "<p align=\"center\">\n",
+            "  <picture>\n",
+            "    <source media=\"(prefers-color-scheme: dark)\" srcset=\"docs/images/screens/hero-dark.png\">\n",
+            "    <img src=\"docs/images/screens/hero-light.png\" width=\"900\" alt=\"hero\">\n",
+            "  </picture>\n",
+            "</p>\n",
+        );
+        let (_tmp, root, note) = thumbnail_repo("README.md", contents);
+        write_file(&root.join("docs/images/screens/hero-dark.png"), b"dark");
+        write_file(&root.join("docs/images/screens/hero-light.png"), b"light");
+
+        let document = render_preview(note, None).unwrap();
+        let cid = |path: &str| cid_of(&document.attachments, &root.join(path));
+        assert_eq!(
+            src_of(&document.html, "hero"),
+            cid("docs/images/screens/hero-light.png")
+        );
+        assert!(
+            document.html.contains(&format!(
+                r#"srcset="{}""#,
+                cid("docs/images/screens/hero-dark.png")
+            )),
+            "{}",
+            document.html
+        );
+        assert_eq!(document.attachments.len(), 2, "{:?}", document.attachments);
+    }
+
+    #[test]
+    fn test_collect_attachments_srcset_partially_resolvable() {
+        let (_tmp, root) = repo_with_file("img/a.png");
+        let html = concat!(
+            r#"<img srcset="img/a.png 1x, img/missing.png 2x,"#,
+            "\n   ",
+            r#"https://example.com/c.png 3x, ../../outside.png 4x">"#,
+        );
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+
+        let cid = cid_of(&attachments, &root.join("img/a.png"));
+        assert_eq!(
+            result,
+            format!(
+                "<img srcset=\"{cid} 1x, img/missing.png 2x,\n   https://example.com/c.png 3x, ../../outside.png 4x\">"
+            )
+        );
+        assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_attachments_srcset_single_quoted_and_deduped_with_src() {
+        let (_tmp, root) = repo_with_file("img/a.png");
+        let html = r#"<picture><source srcset='img/a.png 640w'><img src="img/a.png" srcset="/img/a.png 2x"></picture>"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+
+        assert_eq!(attachments.len(), 1, "{attachments:?}");
+        let cid = cid_of(&attachments, &root.join("img/a.png"));
+        assert_eq!(
+            result,
+            format!(
+                r#"<picture><source srcset='{cid} 640w'><img src="{cid}" srcset="{cid} 2x"></picture>"#
+            )
+        );
+    }
+
+    #[test]
+    fn test_collect_attachments_srcset_nothing_local_is_untouched() {
+        let (_tmp, root) = repo_with_file("img/a.png");
+        let html = r#"<img srcset="https://x/a.png 1x, img/none.png 2x">"#;
+        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        assert_eq!(result, html);
+        assert!(attachments.is_empty());
     }
 
     #[test]

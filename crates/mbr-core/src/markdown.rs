@@ -6,6 +6,7 @@ use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
 use crate::tasks::{self, MarkerRule, TaskStatus};
+use crate::url_path;
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
@@ -1832,18 +1833,20 @@ pub(crate) fn is_reveal_background_url(value: &str) -> bool {
     })
 }
 
-/// A quoted `src`, `href` or `poster` attribute in raw HTML. The name must
-/// stand alone — preceded by whitespace or the start of the chunk — so
-/// `data-src=` and `xlink:href=` do not match. Group 1 is everything up to the
-/// opening quote, group 2 a double-quoted value, group 3 a single-quoted one.
+/// A quoted `src`, `srcset`, `href` or `poster` attribute in raw HTML. The
+/// name must stand alone — preceded by whitespace or the start of the chunk —
+/// so `data-src=`, `data-srcset=` and `xlink:href=` do not match. Group 1 is
+/// everything up to the opening quote, group 2 the attribute name, group 3 a
+/// double-quoted value, group 4 a single-quoted one.
 static HTML_URL_ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)((?:^|\s)(?:src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#)
+    Regex::new(r#"(?i)((?:^|\s)(srcset|src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#)
         .expect("HTML_URL_ATTR is a valid regex")
 });
 
 /// Whether `html` names any attribute [`HTML_URL_ATTR`] can match, ASCII
 /// case-insensitively. A byte scan, so the common chunk (`<div>`, `</p>`)
-/// never reaches the regex and nothing is allocated.
+/// never reaches the regex and nothing is allocated. `srcset` needs no entry
+/// of its own: it contains `src`.
 fn mentions_url_attr(html: &str) -> bool {
     const NAMES: [&[u8]; 3] = [b"src", b"href", b"poster"];
     let bytes = html.as_bytes();
@@ -1854,10 +1857,13 @@ fn mentions_url_attr(html: &str) -> bool {
     })
 }
 
-/// Rewrites the relative URLs of quoted `src`, `href` and `poster` attributes
-/// in a chunk of raw HTML through [`transform_link`], exactly as pass 2
-/// rewrites a markdown image or link — the raw-HTML counterpart of
-/// [`transform_section_background_urls`].
+/// Rewrites the relative URLs of quoted `src`, `srcset`, `href` and `poster`
+/// attributes in a chunk of raw HTML through [`transform_link`], exactly as
+/// pass 2 rewrites a markdown image or link — the raw-HTML counterpart of
+/// [`transform_section_background_urls`]. A `srcset` is a list of candidates
+/// (`a.png 1x, b.png 2x`): each candidate's URL is transformed on its own and
+/// its descriptor and separators kept (see [`url_path::rewrite_srcset`]), so a
+/// `<picture>`'s dark-mode `<source>` resolves like its `<img>`.
 ///
 /// Pages are served at trailing-slash URLs (`README.md` → `/README/`), so a
 /// README's `<img src="docs/images/x.png">` left verbatim resolves to
@@ -1870,7 +1876,8 @@ fn mentions_url_attr(html: &str) -> bool {
 ///
 /// Known limits, accepted: an attribute whose name and value sit on different
 /// lines is not matched (pulldown-cmark hands an HTML block over a line at a
-/// time); unquoted values and `srcset` are left alone; a `<script>`/`<style>`
+/// time); unquoted values are left alone, as are `srcset` URLs containing
+/// commas (see [`url_path::srcset_url_spans`]); a `<script>`/`<style>`
 /// body containing `src="…"` is rewritten too (harmless for the absolute URLs
 /// such bodies normally hold).
 fn transform_raw_html_urls<'h>(html: &'h str, config: &LinkTransformConfig) -> Cow<'h, str> {
@@ -1880,16 +1887,30 @@ fn transform_raw_html_urls<'h>(html: &'h str, config: &LinkTransformConfig) -> C
     let mut rewritten: Option<String> = None;
     let mut copied_to = 0;
     for caps in HTML_URL_ATTR.captures_iter(html) {
-        let (value, double_quoted) = match (caps.get(2), caps.get(3)) {
+        let (value, double_quoted) = match (caps.get(3), caps.get(4)) {
             (Some(v), _) => (v, true),
             (None, Some(v)) => (v, false),
             (None, None) => continue,
         };
         let decoded = html_escape::decode_html_entities(value.as_str());
-        let transformed = transform_link(&decoded, config);
-        if transformed == decoded {
-            continue;
-        }
+        let is_srcset = caps
+            .get(2)
+            .is_some_and(|name| name.as_str().eq_ignore_ascii_case("srcset"));
+        let transformed = if is_srcset {
+            match url_path::rewrite_srcset(&decoded, |url| {
+                let transformed = transform_link(url, config);
+                (transformed != url).then_some(transformed)
+            }) {
+                Cow::Borrowed(_) => continue,
+                Cow::Owned(rewritten) => rewritten,
+            }
+        } else {
+            let transformed = transform_link(&decoded, config);
+            if transformed == decoded {
+                continue;
+            }
+            transformed
+        };
         let escaped = if double_quoted {
             html_escape::encode_double_quoted_attribute(&transformed)
         } else {
@@ -5505,6 +5526,86 @@ mod tests {
         assert_eq!(
             out,
             "<a href=\"../a/\"><img src=\"https://x/y.png\"> <img src=\"../b.png\"></a>"
+        );
+    }
+
+    /// The README's hero: a `<picture>` whose dark-mode `<source srcset>` must
+    /// resolve like its `<img src>`, or dark mode loads
+    /// `/README/docs/images/screens/hero-dark.png` and shows nothing.
+    #[test]
+    fn raw_html_picture_srcset_resolves_like_its_img() {
+        let md = concat!(
+            "<p align=\"center\">\n",
+            "  <picture>\n",
+            "    <source media=\"(prefers-color-scheme: dark)\" srcset=\"docs/images/screens/hero-dark.png\">\n",
+            "    <img src=\"docs/images/screens/hero-light.png\" width=\"900\" alt=\"...\">\n",
+            "  </picture>\n",
+            "</p>\n",
+        );
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let html = render_str(md, &root.join("README.md"), plain_options(root, true))
+            .unwrap()
+            .html;
+        assert!(
+            html.contains(r#"srcset="../docs/images/screens/hero-dark.png""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"src="../docs/images/screens/hero-light.png""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_srcset_candidates_keep_descriptors_in_build_mode() {
+        let a = image_src("img/a.png", Some(2));
+        let b = image_src("img/b.png", Some(2));
+        let html = render_with_depth(
+            "<img srcset=\"img/a.png 480w,\n     img/b.png 800w\" src=\"img/a.png\">\n",
+            Some(2),
+        );
+        assert!(
+            html.contains(&format!("srcset=\"{a} 480w,\n     {b} 800w\" src=\"{a}\"")),
+            "{html}"
+        );
+        assert!(a.starts_with("../"), "build depth must add a prefix: {a}");
+    }
+
+    #[test]
+    fn raw_html_srcset_mixed_external_and_relative() {
+        let html = render_with_depth(
+            "<img srcset='https://cdn.example.com/a.png 1x, b.png 2x'>",
+            None,
+        );
+        assert!(
+            html.contains("srcset='https://cdn.example.com/a.png 1x, ../b.png 2x'"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_srcset_left_alone_byte_for_byte() {
+        for chunk in [
+            "<img srcset=\"https://example.com/a.png 1x, https://example.com/b.png 2x\">",
+            "<img srcset=\"//cdn.example.com/a.png 2x\">",
+            "<img srcset=\"/root/a.png 1x,  /root/b.png 2x\">",
+            "<img data-srcset=\"lazy.png 2x\">",
+            "<img srcset=\"\">",
+        ] {
+            let html = render_with_depth(chunk, None);
+            assert!(
+                html.contains(chunk),
+                "{chunk} must survive verbatim. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_html_srcset_entities_round_trip() {
+        let html = render_with_depth("<img srcset=\"a.png?x=1&amp;y=2 2x\">", None);
+        assert!(
+            html.contains(r#"srcset="../a.png?x=1&amp;y=2 2x""#),
+            "{html}"
         );
     }
 
