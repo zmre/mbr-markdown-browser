@@ -208,6 +208,43 @@ async fn test_serve_markdown_file() {
 }
 
 #[tokio::test]
+async fn test_raw_html_relative_urls_resolve_like_markdown() {
+    // Regression: a root README's raw `<img src="docs/...">` is served at
+    // `/README/`, so it needs the same `../` a markdown image gets, or the
+    // browser asks for `/README/docs/...`.
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "README.md",
+        concat!(
+            "<p align=\"center\">\n    <img src=\"docs/images/hero.png\" width=\"900\" alt=\"hero\">\n</p>\n\n",
+            "<picture>\n",
+            "  <source media=\"(prefers-color-scheme: dark)\" srcset=\"docs/images/hero-dark.png 1x, docs/images/hero-dark@2x.png 2x\">\n",
+            "  <img src=\"docs/images/hero.png\" alt=\"pic\">\n",
+            "</picture>\n\n",
+            "![md](docs/images/hero.png)\n",
+        ),
+    );
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/README/").await;
+    assert_eq!(response.status(), 200);
+
+    let html = response.text().await.unwrap();
+    assert_html_contains(
+        &html,
+        r#"<img src="../docs/images/hero.png" width="900" alt="hero">"#,
+    );
+    assert_html_contains(&html, r#"src="../docs/images/hero.png" alt="md""#);
+    // A `<picture>`'s dark-mode `<source srcset>`: every candidate URL gets
+    // the same `../`, descriptors kept.
+    assert_html_contains(
+        &html,
+        r#"srcset="../docs/images/hero-dark.png 1x, ../docs/images/hero-dark@2x.png 2x""#,
+    );
+    assert_html_contains(&html, r#"<img src="../docs/images/hero.png" alt="pic">"#);
+}
+
+#[tokio::test]
 async fn test_serve_markdown_file_with_dotted_name() {
     // Regression: a markdown file whose name contains a period is served at a
     // canonical URL that strips only the final extension (e.g.
@@ -1741,8 +1778,10 @@ async fn test_extensionless_link_targets_from_index_page() {
 #[tokio::test]
 async fn test_errors_json_reports_non_canonical_and_escaping_links() {
     let repo = TestRepo::new();
-    // Raw HTML hrefs bypass the link transform entirely, which is how a
-    // hand-authored non-canonical URL reaches the page.
+    // Raw HTML hrefs go through the link transform like markdown links, but a
+    // root-relative one is left as written in server mode, which is how a
+    // hand-authored non-canonical URL reaches the page. The relative escape
+    // gains the page's trailing-slash `../`, and is reported as emitted.
     repo.create_markdown(
         "docs/guide.md",
         "# Guide\n\n<a href=\"/folder/file\">no trailing slash</a>\n\n\
@@ -1772,7 +1811,7 @@ async fn test_errors_json_reports_non_canonical_and_escaping_links() {
         "a page link with no trailing slash must be reported: {errors:?}"
     );
     assert!(
-        targets.contains(&"../../../escape/target/"),
+        targets.contains(&"../../../../escape/target/"),
         "a link escaping the repository root must be reported: {errors:?}"
     );
     assert!(

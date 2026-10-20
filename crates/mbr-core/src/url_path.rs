@@ -12,8 +12,14 @@
 //!    stripping, cache-key matching) then silently stops matching.
 //! 2. [`is_external_url`] — the single answer to "does this URL leave the
 //!    site?", used by link transformation, link tracking and link validation.
+//!
+//! It also holds [`srcset_url_spans`] / [`rewrite_srcset`], the one reading of
+//! an HTML `srcset` value, shared by the renderer's raw-HTML URL rewrite and
+//! QuickLook's attachment collector so the two cannot disagree about which
+//! bytes of a `srcset` are a URL.
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::path::{Component, Path};
 
 /// Converts a **relative** filesystem path into a `/`-separated URL path body.
@@ -184,6 +190,110 @@ pub fn url_scheme(url: &str) -> Option<&str> {
         chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
 
     (starts_with_alpha && rest_is_scheme_chars).then_some(scheme)
+}
+
+/// HTML's "ASCII whitespace": space, tab, LF, FF, CR.
+fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
+}
+
+/// The byte ranges of the candidate URLs in an HTML `srcset` value, in order.
+///
+/// A simplified reading of the HTML "parse a srcset attribute" algorithm:
+/// candidates are separated by commas; each is optional whitespace, a URL (a
+/// run of non-whitespace), then an optional descriptor (`2x`, `640w`) running
+/// to the next comma outside parentheses. Leading commas are skipped, and
+/// commas that end the URL's run (`a.png, b.png 2x` or `a.png,`) are the
+/// separator, not part of the URL. Descriptors are not validated: only the
+/// URLs are of interest, and everything else is kept byte for byte by
+/// [`rewrite_srcset`].
+///
+/// Not supported: URLs containing commas. A comma *inside* the run
+/// (`a,b.png`) stays in the URL, as the spec reads it, and the whole run is
+/// handed on as one URL; one at the run's end cannot be told from a
+/// separator. Neither occurs in a relative file path anyone writes.
+///
+/// Every range is non-empty, starts and ends on an ASCII byte boundary (so
+/// slicing is always valid), holds no whitespace, and neither starts nor ends
+/// with a comma.
+pub fn srcset_url_spans(srcset: &str) -> Vec<Range<usize>> {
+    let bytes = srcset.as_bytes();
+    let mut spans = Vec::new();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        // Separators: whitespace and (stray or leading) commas.
+        while pos < bytes.len() && (is_html_whitespace(bytes[pos]) || bytes[pos] == b',') {
+            pos += 1;
+        }
+        if pos == bytes.len() {
+            break;
+        }
+
+        // The URL: a run of non-whitespace, minus any commas ending it.
+        let start = pos;
+        while pos < bytes.len() && !is_html_whitespace(bytes[pos]) {
+            pos += 1;
+        }
+        let end = start + srcset[start..pos].trim_end_matches(',').len();
+        // `bytes[start]` is neither whitespace nor a comma, so `end > start`.
+        spans.push(start..end);
+        if end < pos {
+            // A trailing comma ended this candidate: it has no descriptor.
+            continue;
+        }
+
+        // The descriptor: up to the next comma outside parentheses.
+        let mut depth = 0usize;
+        while pos < bytes.len() {
+            match bytes[pos] {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+    }
+    spans
+}
+
+/// `srcset` with each candidate URL replaced by what `rewrite_url` returns
+/// for it; `None` keeps that URL as authored.
+///
+/// Only the URLs (see [`srcset_url_spans`]) change: descriptors, separators
+/// and whitespace, newlines included, are kept byte for byte. When
+/// `rewrite_url` returns `None` for every candidate the value is returned
+/// borrowed, so callers can tell "nothing to do" without comparing strings.
+/// Any `Some`, even one equal to the URL, rebuilds the value.
+///
+/// ```
+/// use mbr_core::url_path::rewrite_srcset;
+///
+/// let out = rewrite_srcset("a.png, b.png 2x", |url| (url == "b.png").then(|| "../b.png".into()));
+/// assert_eq!(out, "a.png, ../b.png 2x");
+/// ```
+pub fn rewrite_srcset<F>(srcset: &str, mut rewrite_url: F) -> Cow<'_, str>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut rewritten: Option<String> = None;
+    let mut copied_to = 0;
+    for span in srcset_url_spans(srcset) {
+        let Some(replacement) = rewrite_url(&srcset[span.clone()]) else {
+            continue;
+        };
+        let out = rewritten.get_or_insert_with(|| String::with_capacity(srcset.len() + 16));
+        out.push_str(&srcset[copied_to..span.start]);
+        out.push_str(&replacement);
+        copied_to = span.end;
+    }
+    match rewritten {
+        Some(mut out) => {
+            out.push_str(&srcset[copied_to..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(srcset),
+    }
 }
 
 /// Serde helper: serializes a **relative** path as a `/`-separated string.
@@ -415,6 +525,120 @@ mod tests {
                 *expected,
                 "is_mbr_query_route({url:?}) should be {expected}"
             );
+        }
+    }
+
+    // ============ srcset ============
+
+    fn urls(srcset: &str) -> Vec<&str> {
+        srcset_url_spans(srcset)
+            .into_iter()
+            .map(|span| &srcset[span])
+            .collect()
+    }
+
+    #[test]
+    fn srcset_single_url() {
+        assert_eq!(urls("docs/hero-dark.png"), ["docs/hero-dark.png"]);
+    }
+
+    #[test]
+    fn srcset_url_with_density_descriptor() {
+        assert_eq!(urls("a.png 2x"), ["a.png"]);
+    }
+
+    #[test]
+    fn srcset_multiple_candidates_with_width_descriptors() {
+        assert_eq!(
+            urls("small.jpg 480w, medium.jpg 800w, large.jpg 1200w"),
+            ["small.jpg", "medium.jpg", "large.jpg"]
+        );
+    }
+
+    #[test]
+    fn srcset_extra_whitespace_and_newlines() {
+        let value = "\n    a.png   1x ,\n\t b.png\t2x\n  ";
+        assert_eq!(urls(value), ["a.png", "b.png"]);
+        assert_eq!(
+            rewrite_srcset(value, |url| Some(format!("../{url}"))),
+            "\n    ../a.png   1x ,\n\t ../b.png\t2x\n  "
+        );
+    }
+
+    #[test]
+    fn srcset_trailing_comma_is_a_separator() {
+        assert_eq!(urls("a.png,"), ["a.png"]);
+        assert_eq!(urls("a.png, b.png"), ["a.png", "b.png"]);
+        assert_eq!(urls("a.png,, b.png 2x,"), ["a.png", "b.png"]);
+        assert_eq!(
+            rewrite_srcset("a.png,b.png 2x", |url| Some(format!("/{url}"))),
+            "/a.png,b.png 2x",
+            "a comma inside the run is part of the URL"
+        );
+        assert_eq!(
+            rewrite_srcset("a.png, b.png 2x", |url| Some(format!("/{url}"))),
+            "/a.png, /b.png 2x"
+        );
+    }
+
+    #[test]
+    fn srcset_leading_commas_are_skipped() {
+        assert_eq!(urls(" ,, a.png 1x"), ["a.png"]);
+    }
+
+    #[test]
+    fn srcset_descriptor_parentheses_hide_commas() {
+        assert_eq!(urls("a.png (x, y), b.png"), ["a.png", "b.png"]);
+    }
+
+    #[test]
+    fn srcset_empty_and_blank() {
+        for value in ["", "   ", ",", " , \n"] {
+            assert!(urls(value).is_empty(), "{value:?}");
+            assert!(
+                matches!(rewrite_srcset(value, |_| Some("x".into())), Cow::Borrowed(v) if v == value)
+            );
+        }
+    }
+
+    #[test]
+    fn srcset_unchanged_is_borrowed() {
+        let value = "a.png 1x, b.png 2x";
+        assert!(matches!(rewrite_srcset(value, |_| None), Cow::Borrowed(v) if v == value));
+    }
+
+    #[test]
+    fn srcset_rewrites_only_chosen_urls() {
+        assert_eq!(
+            rewrite_srcset("https://x/a.png 1x, b.png 2x", |url| {
+                (!url.starts_with("https:")).then(|| format!("cid:{url}"))
+            }),
+            "https://x/a.png 1x, cid:b.png 2x"
+        );
+    }
+
+    proptest::proptest! {
+        /// Rebuilding with every URL replaced by itself gives the input back,
+        /// byte for byte: nothing outside the URLs is touched.
+        #[test]
+        fn srcset_identity_rebuild_is_byte_identical(value in "[a-z0-9./ ,\t\n()xw]{0,48}") {
+            let rebuilt = rewrite_srcset(&value, |url| Some(url.to_string()));
+            proptest::prop_assert_eq!(rebuilt.as_ref(), value.as_str());
+        }
+
+        /// Spans are ordered, disjoint, non-empty URLs with no whitespace and
+        /// no comma at either end.
+        #[test]
+        fn srcset_spans_are_well_formed(value in "[a-z0-9./ ,\t\n()xw]{0,48}") {
+            let spans = srcset_url_spans(&value);
+            let mut previous_end = 0;
+            for span in spans {
+                proptest::prop_assert!(span.start >= previous_end && span.start < span.end);
+                let url = &value[span.clone()];
+                proptest::prop_assert!(!url.bytes().any(is_html_whitespace), "{:?}", url);
+                proptest::prop_assert!(!url.starts_with(',') && !url.ends_with(','), "{:?}", url);
+                previous_end = span.end;
+            }
         }
     }
 }

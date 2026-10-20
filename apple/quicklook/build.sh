@@ -18,7 +18,7 @@ cd "$SCRIPT_DIR"
 # target/release/libmbr_ffi.a. Same command as flake.nix's
 # mbr-quicklook-staticlib.
 #
-# The caller's DEVELOPER_DIR (the Xcode one xcodebuild below needs) is kept
+# The caller's DEVELOPER_DIR (nix's SDK, or an Xcode for xcodebuild below) is kept
 # away from cargo. Inside the nix dev shell, the cc wrapper that links build
 # scripts carries its own SDK (DEVELOPER_DIR_<role>) and refuses to link when
 # DEVELOPER_DIR names a different one ("Multiple conflicting values defined
@@ -39,9 +39,33 @@ xcodegen generate
 # often a stale build from another worktree.
 DERIVED_DATA="$PROJECT_ROOT/target/quicklook-derived-data"
 
+# The Xcode developer dir xcodebuild runs under: the caller's DEVELOPER_DIR if
+# it has xcodebuild, else xcode-select's choice, else the standard install.
+# Inside the nix dev shell DEVELOPER_DIR names nix's apple-sdk, which has no
+# xcodebuild ("tool 'xcodebuild' not found"), so it is skipped rather than
+# used. Applied to xcodebuild alone, for the reason cargo is kept from it above.
+xcode_developer_dir() {
+    local candidate
+    for candidate in \
+        "${DEVELOPER_DIR:-}" \
+        "$(env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null || true)" \
+        /Applications/Xcode.app/Contents/Developer; do
+        if [[ -n "$candidate" && -x "$candidate/usr/bin/xcodebuild" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+XCODE_DEVELOPER_DIR="$(xcode_developer_dir)" || {
+    echo "error: no Xcode found (xcodebuild needs the full Xcode, not the Command Line Tools)." >&2
+    echo "Install Xcode, or set DEVELOPER_DIR to its Contents/Developer directory." >&2
+    exit 1
+}
+
 # Build the extension
-echo "Building QuickLook extension..."
-xcodebuild \
+echo "Building QuickLook extension (Xcode: $XCODE_DEVELOPER_DIR)..."
+DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" xcodebuild \
     -project MBRQuickLook.xcodeproj \
     -scheme MBRQuickLook \
     -configuration Release \

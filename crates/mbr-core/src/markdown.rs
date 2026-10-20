@@ -6,6 +6,7 @@ use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
 use crate::tasks::{self, MarkerRule, TaskStatus};
+use crate::url_path;
 use crate::vid::Vid;
 use crate::wikilink::{parse_tag_link, transform_wikilinks};
 use crate::wikilink_index::WikilinkIndex;
@@ -13,12 +14,13 @@ use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, MetadataBlockKind,
     Options, Parser as MDParser, Tag, TagEnd, TextMergeStream, TextMergeWithOffset,
 };
+use regex::Regex;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -1831,6 +1833,103 @@ pub(crate) fn is_reveal_background_url(value: &str) -> bool {
     })
 }
 
+/// A quoted `src`, `srcset`, `href` or `poster` attribute in raw HTML. The
+/// name must stand alone — preceded by whitespace or the start of the chunk —
+/// so `data-src=`, `data-srcset=` and `xlink:href=` do not match. Group 1 is
+/// everything up to the opening quote, group 2 the attribute name, group 3 a
+/// double-quoted value, group 4 a single-quoted one.
+static HTML_URL_ATTR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)((?:^|\s)(srcset|src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#)
+        .expect("HTML_URL_ATTR is a valid regex")
+});
+
+/// Whether `html` names any attribute [`HTML_URL_ATTR`] can match, ASCII
+/// case-insensitively. A byte scan, so the common chunk (`<div>`, `</p>`)
+/// never reaches the regex and nothing is allocated. `srcset` needs no entry
+/// of its own: it contains `src`.
+fn mentions_url_attr(html: &str) -> bool {
+    const NAMES: [&[u8]; 3] = [b"src", b"href", b"poster"];
+    let bytes = html.as_bytes();
+    NAMES.iter().any(|name| {
+        bytes
+            .windows(name.len())
+            .any(|window| window.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Rewrites the relative URLs of quoted `src`, `srcset`, `href` and `poster`
+/// attributes in a chunk of raw HTML through [`transform_link`], exactly as
+/// pass 2 rewrites a markdown image or link — the raw-HTML counterpart of
+/// [`transform_section_background_urls`]. A `srcset` is a list of candidates
+/// (`a.png 1x, b.png 2x`): each candidate's URL is transformed on its own and
+/// its descriptor and separators kept (see [`url_path::rewrite_srcset`]), so a
+/// `<picture>`'s dark-mode `<source>` resolves like its `<img>`.
+///
+/// Pages are served at trailing-slash URLs (`README.md` → `/README/`), so a
+/// README's `<img src="docs/images/x.png">` left verbatim resolves to
+/// `/README/docs/images/x.png`, while `![](docs/images/x.png)` beside it
+/// works. Values are HTML: entities are decoded before the transform and the
+/// result is re-escaped for its quote. External, root-relative (server mode)
+/// and anchor values are left alone by [`transform_link`], and a value it
+/// does not change keeps its authored bytes; with nothing changed the chunk
+/// is returned borrowed.
+///
+/// Known limits, accepted: an attribute whose name and value sit on different
+/// lines is not matched (pulldown-cmark hands an HTML block over a line at a
+/// time); unquoted values are left alone, as are `srcset` URLs containing
+/// commas (see [`url_path::srcset_url_spans`]); a `<script>`/`<style>`
+/// body containing `src="…"` is rewritten too (harmless for the absolute URLs
+/// such bodies normally hold).
+fn transform_raw_html_urls<'h>(html: &'h str, config: &LinkTransformConfig) -> Cow<'h, str> {
+    if !mentions_url_attr(html) {
+        return Cow::Borrowed(html);
+    }
+    let mut rewritten: Option<String> = None;
+    let mut copied_to = 0;
+    for caps in HTML_URL_ATTR.captures_iter(html) {
+        let (value, double_quoted) = match (caps.get(3), caps.get(4)) {
+            (Some(v), _) => (v, true),
+            (None, Some(v)) => (v, false),
+            (None, None) => continue,
+        };
+        let decoded = html_escape::decode_html_entities(value.as_str());
+        let is_srcset = caps
+            .get(2)
+            .is_some_and(|name| name.as_str().eq_ignore_ascii_case("srcset"));
+        let transformed = if is_srcset {
+            match url_path::rewrite_srcset(&decoded, |url| {
+                let transformed = transform_link(url, config);
+                (transformed != url).then_some(transformed)
+            }) {
+                Cow::Borrowed(_) => continue,
+                Cow::Owned(rewritten) => rewritten,
+            }
+        } else {
+            let transformed = transform_link(&decoded, config);
+            if transformed == decoded {
+                continue;
+            }
+            transformed
+        };
+        let escaped = if double_quoted {
+            html_escape::encode_double_quoted_attribute(&transformed)
+        } else {
+            html_escape::encode_single_quoted_attribute(&transformed)
+        };
+        let out = rewritten.get_or_insert_with(|| String::with_capacity(html.len() + 16));
+        out.push_str(&html[copied_to..value.start()]);
+        out.push_str(&escaped);
+        copied_to = value.end();
+    }
+    match rewritten {
+        Some(mut out) => {
+            out.push_str(&html[copied_to..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(html),
+    }
+}
+
 /// Pass 1's output plus the state passes 2 and 3 read back.
 ///
 /// Bundled so the async and sync entry points cannot drift apart between
@@ -3529,6 +3628,22 @@ fn process_event(
                 }
             } else {
                 (event, state)
+            }
+        }
+        // Raw HTML: relative `src`/`href`/`poster` values resolve like the
+        // markdown image and link arms above. A rewrite, never an insert.
+        Event::Html(html) | Event::InlineHtml(html) => {
+            match transform_raw_html_urls(html, &state.link_transform_config) {
+                Cow::Borrowed(_) => (event, state),
+                Cow::Owned(rewritten) => {
+                    let rewritten = CowStr::from(rewritten);
+                    let new_event = if matches!(event, Event::Html(_)) {
+                        Event::Html(rewritten)
+                    } else {
+                        Event::InlineHtml(rewritten)
+                    };
+                    (new_event, state)
+                }
             }
         }
         _ => (event, state),
@@ -5263,6 +5378,279 @@ mod tests {
         );
     }
 
+    // ============ Raw HTML URL tests ============
+
+    /// The `href` a markdown link to `path` gets on a non-index page.
+    fn link_href(path: &str, url_depth: Option<usize>) -> String {
+        let html = render_with_depth(&format!("[x]({path})"), url_depth);
+        let start = html.find("href=\"").expect("link href") + 6;
+        let len = html[start..].find('"').expect("closing quote");
+        html[start..start + len].to_string()
+    }
+
+    #[test]
+    fn raw_html_block_img_src_resolves_like_a_markdown_image() {
+        let md = "<p align=\"center\">\n    <img src=\"docs/images/x.png\" width=\"900\" alt=\"hero\">\n</p>\n";
+        for depth in [None, Some(0), Some(2)] {
+            let expected = image_src("docs/images/x.png", depth);
+            let html = render_with_depth(md, depth);
+            assert!(
+                html.contains(&format!(r#"<img src="{expected}" width="900" alt="hero">"#)),
+                "depth {depth:?}: expected src {expected}. Got: {html}"
+            );
+        }
+        // Spelled out once, so the comparison cannot pass vacuously.
+        assert!(render_with_depth(md, None).contains(r#"src="../docs/images/x.png""#));
+    }
+
+    #[test]
+    fn raw_html_inline_img_in_a_paragraph() {
+        let html = render_with_depth("Look: <img src=\"pic.png\" alt=\"p\"> here.", None);
+        assert!(html.contains(r#"<img src="../pic.png" alt="p">"#), "{html}");
+    }
+
+    #[test]
+    fn raw_html_anchor_href_resolves_like_a_markdown_link() {
+        for depth in [None, Some(2)] {
+            for path in ["other.md", "docs/guide.md", "/abs/page.md", "pic.png"] {
+                let expected = link_href(path, depth);
+                let html = render_with_depth(&format!("<a href=\"{path}\">x</a>"), depth);
+                assert!(
+                    html.contains(&format!(r#"<a href="{expected}">"#)),
+                    "depth {depth:?}, {path} should become {expected}. Got: {html}"
+                );
+            }
+        }
+        assert!(
+            render_with_depth("<a href=\"other.md\">x</a>", None).contains(r#"href="../other/""#)
+        );
+    }
+
+    #[test]
+    fn raw_html_single_quotes_and_poster() {
+        let html = render_with_depth(
+            "<video src='clip.mp4' poster='still.jpg' controls></video>\n",
+            None,
+        );
+        assert!(
+            html.contains("<video src='../clip.mp4' poster='../still.jpg' controls>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_entities_round_trip() {
+        let html = render_with_depth("<a href=\"page.html?a=1&amp;b=2\">x</a>", None);
+        assert!(
+            html.contains(r#"href="../page.html?a=1&amp;b=2""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_left_alone_byte_for_byte() {
+        for chunk in [
+            "<img src=\"https://example.com/a.png\">",
+            "<img src=\"//cdn.example.com/a.png\">",
+            "<a href=\"#frag\">x</a>",
+            "<a href=\"mailto:me@example.com\">x</a>",
+            "<img src=\"data:image/png;base64,iVBORw0KGgo=\">",
+            "<img data-src=\"x.png\">",
+            "<use xlink:href=\"x.svg#a\"/>",
+            "<img SRC = \"/root.png\">",
+            "<a HREF=\"#x&amp;y\">x</a>",
+        ] {
+            let html = render_with_depth(chunk, None);
+            assert!(
+                html.contains(chunk),
+                "{chunk} must survive verbatim. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_html_index_page_gets_no_parent_prefix() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let base = plain_options(root, true);
+        let opts = RenderOptions {
+            link_transform_config: LinkTransformConfig {
+                is_index_file: true,
+                ..base.link_transform_config.clone()
+            },
+            ..base
+        };
+        let html = render_str(
+            "<img src=\"images/x.png\">\n\n<a href=\"other.md\">o</a>",
+            &root.join("index.md"),
+            opts,
+        )
+        .unwrap()
+        .html;
+        assert!(html.contains(r#"<img src="images/x.png">"#), "{html}");
+        assert!(html.contains(r#"<a href="other/">"#), "{html}");
+    }
+
+    #[test]
+    fn raw_html_in_code_is_untouched() {
+        let html = render_with_depth(
+            "```html\n<img src=\"x.png\">\n```\n\nInline `<img src=\"y.png\">` too.",
+            None,
+        );
+        assert!(html.contains(r#"&lt;img src="x.png"&gt;"#), "{html}");
+        assert!(html.contains(r#"&lt;img src="y.png"&gt;"#), "{html}");
+        assert!(
+            !html.contains("../x.png") && !html.contains("../y.png"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn transform_raw_html_urls_borrows_when_nothing_changes() {
+        let config = plain_options(Path::new("/r"), true).link_transform_config;
+        for chunk in [
+            "<div>",
+            "</p>\n",
+            "<a href=\"https://x.y/\">",
+            "<img data-src=\"a.png\">",
+        ] {
+            assert!(
+                matches!(transform_raw_html_urls(chunk, &config), Cow::Borrowed(c) if c == chunk),
+                "{chunk}"
+            );
+        }
+        // Several attributes in one chunk, only the relative ones rewritten.
+        let out = transform_raw_html_urls(
+            "<a href=\"a.md\"><img src=\"https://x/y.png\"> <img src=\"b.png\"></a>",
+            &config,
+        );
+        assert_eq!(
+            out,
+            "<a href=\"../a/\"><img src=\"https://x/y.png\"> <img src=\"../b.png\"></a>"
+        );
+    }
+
+    /// The README's hero: a `<picture>` whose dark-mode `<source srcset>` must
+    /// resolve like its `<img src>`, or dark mode loads
+    /// `/README/docs/images/screens/hero-dark.png` and shows nothing.
+    #[test]
+    fn raw_html_picture_srcset_resolves_like_its_img() {
+        let md = concat!(
+            "<p align=\"center\">\n",
+            "  <picture>\n",
+            "    <source media=\"(prefers-color-scheme: dark)\" srcset=\"docs/images/screens/hero-dark.png\">\n",
+            "    <img src=\"docs/images/screens/hero-light.png\" width=\"900\" alt=\"...\">\n",
+            "  </picture>\n",
+            "</p>\n",
+        );
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let html = render_str(md, &root.join("README.md"), plain_options(root, true))
+            .unwrap()
+            .html;
+        assert!(
+            html.contains(r#"srcset="../docs/images/screens/hero-dark.png""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"src="../docs/images/screens/hero-light.png""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_srcset_candidates_keep_descriptors_in_build_mode() {
+        let a = image_src("img/a.png", Some(2));
+        let b = image_src("img/b.png", Some(2));
+        let html = render_with_depth(
+            "<img srcset=\"img/a.png 480w,\n     img/b.png 800w\" src=\"img/a.png\">\n",
+            Some(2),
+        );
+        assert!(
+            html.contains(&format!("srcset=\"{a} 480w,\n     {b} 800w\" src=\"{a}\"")),
+            "{html}"
+        );
+        assert!(a.starts_with("../"), "build depth must add a prefix: {a}");
+    }
+
+    #[test]
+    fn raw_html_srcset_mixed_external_and_relative() {
+        let html = render_with_depth(
+            "<img srcset='https://cdn.example.com/a.png 1x, b.png 2x'>",
+            None,
+        );
+        assert!(
+            html.contains("srcset='https://cdn.example.com/a.png 1x, ../b.png 2x'"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_srcset_left_alone_byte_for_byte() {
+        for chunk in [
+            "<img srcset=\"https://example.com/a.png 1x, https://example.com/b.png 2x\">",
+            "<img srcset=\"//cdn.example.com/a.png 2x\">",
+            "<img srcset=\"/root/a.png 1x,  /root/b.png 2x\">",
+            "<img data-srcset=\"lazy.png 2x\">",
+            "<img srcset=\"\">",
+        ] {
+            let html = render_with_depth(chunk, None);
+            assert!(
+                html.contains(chunk),
+                "{chunk} must survive verbatim. Got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_html_srcset_entities_round_trip() {
+        let html = render_with_depth("<img srcset=\"a.png?x=1&amp;y=2 2x\">", None);
+        assert!(
+            html.contains(r#"srcset="../a.png?x=1&amp;y=2 2x""#),
+            "{html}"
+        );
+    }
+
+    /// Pass 1 injects `Event::Html` of its own (task checkbox and text spans,
+    /// annotation chips, chat bubble wrappers, a bubble's `<hr />`) before
+    /// pass 2 sees anything. None of it may carry a URL attribute the raw-HTML
+    /// rewrite would touch.
+    #[test]
+    fn pass_one_injected_html_has_no_url_attributes() {
+        let md = concat!(
+            "- [ ] open task @due(2026-01-01) #tag !!\n",
+            "- [x] done @done(2026-01-02 10:30)\n",
+            "- [-] cancelled\n",
+            "- [>] deferred\n\n",
+            "```chat\n<\n[Alice|blue]\n{{Alice|hi there\n\n---\n\nmore|10:00}}\n>\n{{Bob|reply|10:01}}\n```\n",
+        );
+        let (events, _, _) = collect_events_and_headings(
+            md,
+            TaskMarkup::Render,
+            &mut TextLines::recording(),
+            &mut BlockLines::disabled(),
+        );
+        let injected: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Html(h) | Event::InlineHtml(h) => Some(h.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            injected.iter().any(|h| h.contains("mbr-chat")),
+            "the fixture must inject chat wrappers: {injected:?}"
+        );
+        assert!(
+            injected.iter().any(|h| h.contains("mbr-task")),
+            "the fixture must inject task markup: {injected:?}"
+        );
+        for html in injected {
+            assert!(
+                !HTML_URL_ATTR.is_match(html),
+                "pass-1 HTML would be rewritten by pass 2: {html}"
+            );
+        }
+    }
+
     // ============ Section background URL tests (Reveal.js slides) ============
 
     /// Renders `content` as a non-index page with the given build-mode depth
@@ -6185,7 +6573,9 @@ mod tests {
             "| a | b |\n|---|---|\n| c | d |\n\n",
             "> quote\n\n",
             "--- {#id .cls}\n\n",
-            "!> hint\n",
+            "!> hint\n\n",
+            "<p align=\"center\">\n<img src=\"docs/x.png\">\n</p>\n\n",
+            "Inline <a href=\"other.md\">raw</a> link.\n",
         );
         let mut text_lines = TextLines::recording();
         let (events, _, _) = collect_events_and_headings(
