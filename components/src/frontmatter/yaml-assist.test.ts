@@ -29,10 +29,15 @@ const knowledge = (over: Partial<YamlKnowledge> = {}): YamlKnowledge => ({
   ...over,
 });
 
+/** `src` with its cursor marker (the last `|`) removed, and the marker's offset. */
+function atCursor(src: string): { doc: string; pos: number } {
+  const pos = src.lastIndexOf('|');
+  return { doc: src.slice(0, pos) + src.slice(pos + 1), pos };
+}
+
 /** The completions at the last `|` in `src`, explicitly requested unless `typed`. */
 function complete(src: string, opts: Partial<YamlAssistOptions> = {}, typed = false) {
-  const pos = src.lastIndexOf('|');
-  const doc = src.slice(0, pos) + src.slice(pos + 1);
+  const { doc, pos } = atCursor(src);
   const state = EditorState.create({ doc, extensions: [yaml()] });
   const k = knowledge();
   return yamlCompletions(state, pos, !typed, { knowledge: () => k, ...opts });
@@ -40,8 +45,7 @@ function complete(src: string, opts: Partial<YamlAssistOptions> = {}, typed = fa
 
 /** The text after applying the completion labelled `label` (or shown as it) at the last `|`. */
 function applied(src: string, label: string, opts: Partial<YamlAssistOptions> = {}, k: YamlKnowledge = knowledge()): string {
-  const pos = src.lastIndexOf('|');
-  const doc = src.slice(0, pos) + src.slice(pos + 1);
+  const { doc, pos } = atCursor(src);
   const state = EditorState.create({ doc, extensions: [yaml()] });
   const res = yamlCompletions(state, pos, true, { knowledge: () => k, ...opts })!;
   const opt = res.options.find((o) => o.label === label || o.displayLabel === label);
@@ -103,7 +107,7 @@ describe('key completions', () => {
     const insertOf = (src: string, label: string) => {
       const c = complete(src)!;
       const opt = c.options.find((o) => o.label === label)!;
-      const doc = src.replace('|', '');
+      const { doc } = atCursor(src);
       const view = new EditorView({ state: EditorState.create({ doc, extensions: [yaml()] }) });
       (opt.apply as (v: EditorView, c: Completion, f: number, t: number) => void)(view, opt, c.from, c.to ?? c.from);
       const out = view.state.doc.toString();
