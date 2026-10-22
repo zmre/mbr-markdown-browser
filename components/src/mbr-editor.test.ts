@@ -109,6 +109,17 @@ describe('MbrEditorElement keyboard shortcut', () => {
     expect(chunk.opened[0].filePath).toBe('notes/test.md')
   })
 
+  it("hands the chunk the page's tag sources for the properties editor", async () => {
+    window.__MBR_CONFIG__!.tagSources = [
+      { field: 'taxonomy.performers', urlSource: 'performers', label: 'Performer', labelPlural: 'Performers' },
+    ]
+    dispatchE(document.body)
+    await flush()
+    expect(chunk.opened[0].tagSources).toEqual([
+      { field: 'taxonomy.performers', label: 'Performer', label_plural: 'Performers' },
+    ])
+  })
+
   it('leaves "e" alone on a page with no source file (a folder listing)', async () => {
     setPage({ editEnabled: true })
     const event = dispatchE(document.body)

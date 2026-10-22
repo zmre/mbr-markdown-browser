@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 // The chunk itself is not importable under happy-dom (Milkdown), so its chrome
 // is pinned as source: if one of these goes, the behaviour it names goes too.
 import editorSource from './editor-crepe.ts?raw'
@@ -81,5 +81,64 @@ describe('editor chrome', () => {
     expect(editorSource).toContain('window.location.href = result.urlPath + EDIT_ON_ARRIVAL_HASH')
     // The one create request: both flows use postCreate.
     expect(editorSource.match(/fetch\(`\/\.mbr\/create\//g)).toHaveLength(1)
+  })
+
+  it('edits frontmatter with the properties editor, inside the collapsible details', () => {
+    expect(editorSource).toContain("document.createElement('mbr-fm-editor')")
+    expect(editorSource).toContain("fmEditor.model = openFrontmatter(frontmatter ?? '')")
+    expect(editorSource).toContain('fmDetails.append(fmSummary, fmEditor)')
+    // Open when the note has frontmatter, an "Add properties" affordance when not.
+    expect(editorSource).toContain('if (frontmatter) fmDetails.open = true;')
+    expect(editorSource).toContain("fmSummary.textContent = frontmatter ? 'Properties' : 'Add properties'")
+    // The save (and the dirty check, which compares the same string) reads the
+    // editor's text, so untouched frontmatter is written as loaded (doc.head).
+    expect(editorSource).toContain('return documentToSave(opened, fmEditor.text, next.body);')
+    expect(editorSource).not.toContain('fmTextarea')
+    // Tag fields come in through the options: the chunk never imports shared.ts.
+    expect(editorSource).toContain('builtinCatalog({ tagSources: opts.tagSources })')
+    expect(editorSource).not.toMatch(/from '\.\/shared(\.js|\.ts)?'/)
+  })
+
+  it('shares site.json for the properties, and fetches it fresh per `[[` session and picker', () => {
+    expect(editorSource).toContain('const siteIndex = memoizeSiteIndex();')
+    // The link autocomplete and the New / Move pickers: a page created or moved since must show.
+    expect(editorSource).toContain('const freshSiteFiles = async (): Promise<SiteMarkdownFile[]> => (await siteIndex.fresh()).markdown_files;')
+    expect(editorSource.match(/fetchSiteFiles: freshSiteFiles/g)).toHaveLength(3)
+    expect(editorSource).toContain('fmKnowledge ??= siteIndex()')
+    // Vault knowledge is loaded when the properties are first used, not on open.
+    expect(editorSource).toContain("fmDetails.addEventListener('focusin', () => {")
+  })
+})
+
+describe('memoizeSiteIndex', () => {
+  it('shares one request and retries after a failure', async () => {
+    const { memoizeSiteIndex } = await import('./editor-crepe.js')
+    const index = { markdown_files: [], relationship_types: [] }
+    const fetcher = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(index)
+    const load = memoizeSiteIndex(fetcher)
+    await expect(load()).rejects.toThrow('offline')
+    const [a, b] = await Promise.all([load(), load()])
+    expect(a).toBe(index)
+    expect(b).toBe(index)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('fetches again for each fresh() (each `[[` session), sharing one in flight', async () => {
+    const { memoizeSiteIndex } = await import('./editor-crepe.js')
+    let n = 0
+    const fetcher = vi.fn(async () => ({ markdown_files: [{ url_path: `/p${++n}/` }], relationship_types: [] }) as never)
+    const load = memoizeSiteIndex(fetcher)
+    const first = await load.fresh()
+    const second = await load.fresh()
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(second).not.toBe(first)
+    // Plain calls (the properties editor) get the latest without a request of their own.
+    expect(await load()).toBe(second)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    // Two sessions at once, or a plain call during one, share its request.
+    const [a, b, c] = await Promise.all([load.fresh(), load.fresh(), load()])
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(b).toBe(a)
+    expect(c).toBe(a)
   })
 })

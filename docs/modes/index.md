@@ -104,4 +104,5 @@ Two capabilities need live files behind the page, so they exist in server and
 GUI mode and are absent from a static build:
 
 - [In-Browser Editing](editing/) - Edit markdown from the browser (on by default in the GUI; `--edit` for the server)
+- [Editing Properties](editing-frontmatter/) - Edit frontmatter as a form or as YAML, with suggestions from your notes
 - [Review Notes](review/) - Annotate a page and copy the review out as markdown (`r` / `R`)

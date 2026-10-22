@@ -84,7 +84,7 @@ export type LineEnding = '\n' | '\r\n';
  * The line ending `raw` is written with: CRLF when most of its line breaks
  * are CRLF, else LF (also for a file with no line break at all).
  *
- * The editor works in LF — the frontmatter textarea normalizes to LF and
+ * The editor works in LF — the properties editor is opened on LF YAML and
  * Crepe serializes with LF — so a CRLF file is opened as LF ({@link toLf})
  * and saved back with {@link withLineEnding}. A file mixing both is saved
  * with its majority ending: it cannot round-trip byte for byte, but it no
@@ -122,7 +122,7 @@ export function textareaValue(text: string | null): string {
 export interface OpenedDocument {
   /** The ending a save writes ({@link lineEndingOf} of the file as loaded). */
   lineEnding: LineEnding;
-  /** The YAML the frontmatter textarea starts with, `null` without frontmatter. */
+  /** The YAML the properties editor starts with, `null` without frontmatter. */
   frontmatter: string | null;
   /** The markdown body Crepe is opened on (LF, no byte-order mark, no leading blank lines). */
   body: string;
@@ -174,7 +174,7 @@ export function openDocument(raw: string): OpenedDocument {
   };
 }
 
-/** Whether `yaml` (the frontmatter textarea's value) is the frontmatter `doc` was opened with. */
+/** Whether `yaml` (the properties editor's text) is the frontmatter `doc` was opened with. */
 export function frontmatterUnchanged(doc: OpenedDocument, yaml: string): boolean {
   return textareaValue(yaml) === textareaValue(doc.frontmatter);
 }
@@ -188,7 +188,7 @@ function editedHead(doc: OpenedDocument, yaml: string): string {
 }
 
 /**
- * The file a save writes for `doc`: the frontmatter textarea's `yaml` and the
+ * The file a save writes for `doc`: the properties editor's `yaml` and the
  * body, written with the file's own line ending.
  *
  * Frontmatter left alone is written back byte for byte as loaded

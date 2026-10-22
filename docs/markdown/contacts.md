@@ -39,6 +39,12 @@ The field names were chosen to map cleanly onto vCard, Apple Contacts and Google
 Contacts (see [Compatibility](#compatibility-with-address-books)), so a future
 sync tool can round-trip them without guessing.
 
+> [!TIP]
+> With [editing](../modes/editing/) on, the editor's Properties form offers
+> these fields on `person` and `organization` notes, with label suggestions
+> and a partial-date picker. See
+> [Editing Properties](../modes/editing-frontmatter/#contact-fields).
+
 ## Names and the headline
 
 | Field | Purpose |

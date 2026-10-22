@@ -9,7 +9,8 @@ import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { CREPE_FEATURE_CONFIGS, CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
-import { documentToSave, openDocument, textareaValue } from './editor-frontmatter.js';
+import { documentToSave, openDocument } from './editor-frontmatter.js';
+import { openFrontmatter } from './frontmatter/model.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
 
 /** Set by `vitest.config.ts` from `tests/fixtures/editor-roundtrip/`. */
@@ -47,8 +48,9 @@ export function destroyEditors(): void {
 
 /**
  * What the editor writes when a whole file is opened and saved, with an
- * optional edit in between: the frontmatter goes through the YAML textarea,
- * the body through Crepe, and `documentToSave` joins them — `openEditor`'s
+ * optional edit in between: the frontmatter goes through the properties
+ * editor's model (whose text, untouched, is the YAML as opened), the body
+ * through Crepe, and `documentToSave` joins them — `openEditor`'s
  * `currentContent()`.
  */
 export async function savedFile(source: string, edit?: (crepe: Crepe) => void): Promise<string> {
@@ -56,12 +58,12 @@ export async function savedFile(source: string, edit?: (crepe: Crepe) => void): 
   const doc = openDocument(source);
   const crepe = await openCrepe(doc.body);
   edit?.(crepe);
-  return documentToSave(doc, textareaValue(doc.frontmatter), serializeBody(crepe));
+  return documentToSave(doc, openFrontmatter(doc.frontmatter ?? '').text, serializeBody(crepe));
 }
 
 /**
- * The frontmatter as `openEditor` reads it back from `fmTextarea.value`: a
- * textarea's value normalizes line breaks to LF (HTML's "API value").
+ * The frontmatter as a textarea hands it back (line breaks normalized to LF,
+ * HTML's "API value"), for callers that edit it as text.
  */
 export { textareaValue } from './editor-frontmatter.js';
 

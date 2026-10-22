@@ -23,7 +23,8 @@ import { Plugin, PluginKey, TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { MilkdownPlugin } from '@milkdown/kit/ctx';
 import { fuzzyFilter } from './fuzzy.js';
-import { relativeUrlPath, encodeLinkDestination, normalizeUrl } from './editor-picker-shared.js';
+import { relativeUrlPath, encodeLinkDestination } from './editor-picker-shared.js';
+import { buildLinkTargets, type LinkTarget } from './link-targets.js';
 import { wikilinkNode } from './editor-plugins/wikilinks.js';
 
 /** Minimal markdown-file shape read from site.json. */
@@ -42,17 +43,8 @@ export interface LinkAutocompleteServices {
 /** Insertion form for a selection. */
 type LinkMode = 'wiki' | 'link';
 
-/** Precomputed target derived from a site.json entry. */
-interface Target {
-  /** Normalized directory-style URL. */
-  url: string;
-  /** Name inserted for a wiki link. */
-  wiki: string;
-  /** Text shown for a relative markdown link. */
-  title: string;
-  /** Display path for the list. */
-  path: string;
-}
+/** Precomputed target derived from a site.json entry (`link-targets.ts`). */
+type Target = LinkTarget;
 
 const linkAutocompleteKey = new PluginKey('mbr-link-autocomplete');
 
@@ -85,22 +77,6 @@ export const AUTOCOMPLETE_CSS = `
 .mbr-autocomplete-item .path { opacity: 0.55; font-size: 0.75rem; font-family: var(--pico-font-family-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
 .mbr-autocomplete-empty { padding: 0.6rem; opacity: 0.6; }
 `;
-
-/** Extracts the display name (stem) from a normalized directory-style URL. */
-function stemOf(url: string): string {
-  const segs = url.split('/').filter((s) => s.length > 0);
-  return segs[segs.length - 1] ?? '';
-}
-
-/** Builds the searchable target list from raw site.json entries. */
-function buildTargets(files: LinkAutocompleteSite[]): Target[] {
-  return files.map((f) => {
-    const url = normalizeUrl(f.url_path);
-    const stem = stemOf(url);
-    const name = f.frontmatter?.title || stem || url;
-    return { url, wiki: name, title: name, path: url };
-  });
-}
 
 /**
  * Creates the `[[` link-autocomplete plugin. Register it with
@@ -209,7 +185,7 @@ export function createLinkAutocompletePlugin(services: LinkAutocompleteServices)
             .fetchSiteFiles()
             .then((files) => {
               if (!active || mySession !== session) return;
-              targets = buildTargets(files);
+              targets = buildLinkTargets(files);
               refilter();
               render();
             })

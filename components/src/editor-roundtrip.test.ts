@@ -19,6 +19,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Crepe } from '@milkdown/crepe'
 import { editorViewCtx } from '@milkdown/kit/core'
+import { EditorView } from '@codemirror/view'
 import { openEditor } from './editor-crepe.js'
 import { destroyEditors, fixture, savedFile } from './editor-test-support.js'
 
@@ -108,6 +109,19 @@ async function openOn(raw: string): Promise<{ posts: RequestInit[]; onSaved: Ret
   return { posts, onSaved, modal }
 }
 
+/** Types `value` into the properties form's field for the top-level `key`, as a user would. */
+async function editProperty(modal: Element, key: string, value: string): Promise<void> {
+  const form = modal.querySelector('mbr-fm-editor') as (HTMLElement & { updateComplete: Promise<boolean> }) | null
+  if (!form) throw new Error('no properties editor')
+  await form.updateComplete
+  const row = [...form.querySelectorAll<HTMLElement>('.fm-row')].find((r) => r.dataset.path === JSON.stringify([key]))
+  const input = row?.querySelector<HTMLInputElement>('.fm-value input')
+  if (!input) throw new Error(`no field for ${key}`)
+  input.value = value
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await form.updateComplete
+}
+
 const clickSave = async (modal: Element): Promise<void> => {
   ;(modal.querySelector('.mbr-editor-save') as HTMLButtonElement).click()
   await new Promise((r) => setTimeout(r, 0))
@@ -134,11 +148,11 @@ describe('openEditor: a save with nothing changed writes nothing', () => {
 
   it('Save after a frontmatter edit still posts', async () => {
     const { posts, onSaved, modal } = await open()
-    const fm = modal.querySelector('textarea') as HTMLTextAreaElement
-    fm.value = fm.value.replace('T1-A', 'T1-A2')
+    await editProperty(modal, 'title', 'Technician pool T1-A2')
     await clickSave(modal)
     expect(posts).toHaveLength(1)
     expect(onSaved).toHaveBeenCalledOnce()
+    expect(postedContent(posts[0])).toBe(RAW.replace('T1-A\n', 'T1-A2\n'))
   })
 })
 
@@ -163,13 +177,83 @@ describe('openEditor: the safety net', () => {
     expect(modal.querySelector('.mbr-editor-notice')).toBeNull()
   })
 
+  it('a property edit changes only its own bytes: comments, quoting and fences stay', async () => {
+    const raw = "---\r\n# about\r\ntitle: 'Old'   # keep\r\ntags: [a,  b]\r\n\r\n---\r\n\r\n# Note\r\n"
+    const { posts, modal } = await openOn(raw)
+    await editProperty(modal, 'title', 'New')
+    await clickSave(modal)
+    expect(posts).toHaveLength(1)
+    // Edited frontmatter is recombined (`---` fences, trailing blank lines
+    // dropped), as it was with the textarea; inside it only the value moved.
+    expect(postedContent(posts[0])).toBe("---\r\n# about\r\ntitle: 'New'   # keep\r\ntags: [a,  b]\r\n---\r\n\r\n# Note\r\n")
+  })
+
   it('a frontmatter edit leaves the body byte for byte, inexact lines included', async () => {
     const { posts, modal } = await openOn(INEXACT)
-    const fm = modal.querySelector('textarea') as HTMLTextAreaElement
-    fm.value = 'title: t2\n'
+    await editProperty(modal, 'title', 't2')
     await clickSave(modal)
     expect(posts).toHaveLength(1)
     expect(postedContent(posts[0])).toBe(INEXACT.replace('title: t', 'title: t2'))
+  })
+})
+
+describe('openEditor: property edits not yet applied', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.querySelector('.mbr-picker-backdrop')?.remove()
+  })
+
+  const RAW = '---\ntitle: t\ntags: [a]\nother: &o 1\n---\n# Note\n'
+  type Form = HTMLElement & { updateComplete: Promise<boolean> }
+  const formOf = async (modal: Element): Promise<Form> => {
+    const form = modal.querySelector('mbr-fm-editor') as Form
+    await form.updateComplete
+    return form
+  }
+  const rowOf = (form: Element, key: string) => [...form.querySelectorAll<HTMLElement>('.fm-row')].find((r) => r.dataset.path === JSON.stringify([key]))!
+
+  /** Types a tag into the tags field without pressing Enter. */
+  const typeTag = async (form: Form, tag: string) => {
+    const input = rowOf(form, 'tags').querySelector<HTMLInputElement>('mbr-fm-combobox input')!
+    input.value = tag
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await form.updateComplete
+  }
+
+  /** Opens "Edit as YAML" on `key` and types `yaml` into it, without applying. */
+  const editAsYaml = async (form: Form, key: string, yaml: string) => {
+    rowOf(form, key).querySelector<HTMLButtonElement>('.fm-value .fm-link')!.click()
+    await form.updateComplete
+    const dom = rowOf(form, key).querySelector<HTMLElement>('.fm-yaml-slice .cm-editor')!
+    const view = EditorView.findFromDOM(dom)!
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: yaml }, userEvent: 'input.type' })
+  }
+
+  it('Save writes a tag typed without Enter and an open "Edit as YAML"', async () => {
+    const { posts, modal } = await openOn(RAW)
+    const form = await formOf(modal)
+    await typeTag(form, 'b')
+    await editAsYaml(form, 'other', '&o 2')
+    await clickSave(modal)
+    expect(posts).toHaveLength(1)
+    expect(postedContent(posts[0])).toBe(RAW.replace('[a]', '[a, b]').replace('&o 1', '&o 2'))
+  })
+
+  it('Save refuses YAML in an open "Edit as YAML" that does not parse, and says why', async () => {
+    const { posts, modal } = await openOn(RAW)
+    await editAsYaml(await formOf(modal), 'other', '[1')
+    await clickSave(modal)
+    expect(posts).toHaveLength(0)
+    expect(modal.querySelector('.status')?.textContent).toMatch(/YAML for “other” is not valid/)
+  })
+
+  it('Cancel asks first when the only change is a property still being typed', async () => {
+    const { modal } = await openOn(RAW)
+    await typeTag(await formOf(modal), 'b')
+    ;(modal.querySelector('.mbr-editor-cancel') as HTMLButtonElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(document.querySelector('.mbr-picker-backdrop[aria-label="Unsaved changes"]')).not.toBeNull()
+    expect(document.querySelector('.mbr-editor-modal')).not.toBeNull()
   })
 })
 

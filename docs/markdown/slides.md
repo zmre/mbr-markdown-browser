@@ -27,7 +27,9 @@ type: slides
 > `style: slides` still works and always will. Both fields feed the page's body
 > class, so existing decks keep rendering unchanged. `type` is now the preferred
 > spelling, because a deck is a kind of note rather than a coat of paint. See
-> [Page Styles and Types](styles/).
+> [Page Styles and Types](styles/). In the in-browser editor, `type` is
+> suggested with `slides` among its values
+> ([Editing Properties](../modes/editing-frontmatter/#choosing-a-type)).
 
 Use horizontal rules (`---`) to separate slides:
 
