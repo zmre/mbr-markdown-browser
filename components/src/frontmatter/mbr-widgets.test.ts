@@ -136,11 +136,51 @@ describe('relationships', () => {
     expect(edge(el, 1).querySelector('.fm-edge-sentence')!.textContent).toBe('Sam is Jane’s parent · Jane is Sam’s child');
   });
 
-  it('swaps to and from with the direction toggle', async () => {
+  it('reads [type] [note] with no to/from wording, and has no invert toggle for a symmetric type', async () => {
     const { el } = await mountMbr(text);
-    type(edge(el, 0).querySelector<HTMLSelectElement>('select.fm-edge-dir')!, 'from', 'change');
+    expect(edge(el, 0).querySelector('select')).toBeNull();
+    expect(edge(el, 0).querySelector('.fm-edge-dir-text')).toBeNull();
+    expect(edge(el, 0).querySelector('.fm-edge-invert')).toBeNull();
+    expect(edge(el, 0).querySelectorAll('.fm-wikilink')).toHaveLength(1);
+  });
+
+  it('flips direction with one fixed checkbox: checked writes from, unchecked to', async () => {
+    const parent = 'title: Jane\nrelationships:\n  - type: parent\n    to: "[[Sam]]"\n';
+    const { el } = await mountMbr(parent);
+    const box = () => edge(el, 0).querySelector<HTMLInputElement>('.fm-edge-invert input[type="checkbox"]')!;
+    expect(edge(el, 0).querySelector('.fm-edge-invert')!.textContent!.trim()).toBe('Flip relationship direction');
+    expect(box().checked).toBe(false);
+    expect(box().getAttribute('aria-label')).toBe('Relationship 1: flip relationship direction');
+    box().checked = true;
+    box().dispatchEvent(new Event('change', { bubbles: true }));
     await settle(el);
-    expect(el.text).toBe(text.replace('to: "[[Mary]]"', 'from: "[[Mary]]"'));
+    expect(el.text).toBe(parent.replace('to: "[[Sam]]"', 'from: "[[Sam]]"'));
+    expect(box().checked).toBe(true);
+    expect(edge(el, 0).querySelector('.fm-edge-sentence')!.textContent).toBe('Jane is Sam’s parent · Sam is Jane’s child');
+    box().checked = false;
+    box().dispatchEvent(new Event('change', { bubbles: true }));
+    await settle(el);
+    expect(el.text).toBe(parent);
+  });
+
+  it('uses the same wording for every type, checked for a from edge', async () => {
+    const { el } = await mountMbr('relationships:\n  - type: reports_to\n    from: "[[Al]]"\n');
+    expect(edge(el, 0).querySelector('.fm-edge-invert')!.textContent!.trim()).toBe('Flip relationship direction');
+    expect(edge(el, 0).querySelector<HTMLInputElement>('.fm-edge-invert input')!.checked).toBe(true);
+  });
+
+  it('shows both endpoints, labelled, and no toggle for an edge between two other notes', async () => {
+    const { el } = await mountMbr('relationships:\n  - type: parent\n    from: "[[A]]"\n    to: "[[B]]"\n');
+    expect([...edge(el, 0).querySelectorAll('.fm-edge-dir-text')].map((t) => t.textContent)).toEqual(['from', 'to']);
+    expect([...edge(el, 0).querySelectorAll<MbrFmCombobox>('.fm-wikilink')].map((c) => c.value)).toEqual(['[[A]]', '[[B]]']);
+    expect(edge(el, 0).querySelector('.fm-edge-invert')).toBeNull();
+  });
+
+  it('keeps a symmetric edge written with from as it is', async () => {
+    const { el } = await mountMbr('title: Jane\nrelationships:\n  - type: sibling\n    from: "[[Al]]"\n');
+    expect(edge(el, 0).querySelector('.fm-edge-invert')).toBeNull();
+    expect(combo(edge(el, 0), '.fm-wikilink').value).toBe('[[Al]]');
+    expect(edge(el, 0).querySelector('.fm-edge-sentence')!.textContent).toBe('Al and Jane are siblings');
   });
 
   it('adds a label and an attribute in place', async () => {

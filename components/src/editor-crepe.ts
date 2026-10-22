@@ -338,6 +338,11 @@ const THEME_CSS = `
 }
 `;
 
+/*
+ * The modal takes most of a desktop window (the properties form uses the
+ * width); the prose keeps a readable measure, its text column capped at 48em
+ * and centred, never less than Crepe's 120px gutters for the block handle.
+ */
 const MODAL_CSS = `
 .mbr-editor-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2000;
@@ -346,12 +351,18 @@ const MODAL_CSS = `
 .mbr-editor-modal {
   background: var(--pico-background-color, #fff);
   color: var(--pico-color, #1a1a1a);
-  width: min(920px, 96vw); height: min(90vh, 900px);
+  width: min(1400px, 92vw); height: min(1200px, 94vh); height: min(1200px, 94svh);
   display: flex; flex-direction: column;
   border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.35);
   overflow: hidden;
 }
 .mbr-editor-body { flex: 1; display: flex; flex-direction: column; overflow: auto; }
+@media (min-width: 601px) {
+  .mbr-editor-modal .milkdown .ProseMirror {
+    padding-left: max(120px, calc((100% - 48em) / 2));
+    padding-right: max(120px, calc((100% - 48em) / 2));
+  }
+}
 .mbr-editor-notice {
   display: flex; align-items: flex-start; gap: 0.5rem;
   padding: 0.5rem 1rem; font-size: 0.85rem;
@@ -366,7 +377,10 @@ const MODAL_CSS = `
 .mbr-editor-notice-dismiss:hover { opacity: 1; background: var(--mbr-control-hover-bg, rgba(127,127,127,0.12)); }
 .mbr-editor-fm { border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
-.mbr-editor-crepe { flex: 1; min-height: 12rem; overflow: auto; }
+/* The body (frontmatter + document) is the one vertical scroller: the
+   document grows to its content (flex-shrink 0, so it never scrolls inside
+   the body), at least 36rem but never more than most of a small screen. */
+.mbr-editor-crepe { flex: 1 0 auto; min-height: min(36rem, 70vh); min-height: min(36rem, 70svh); overflow-x: auto; }
 .mbr-editor-footer {
   display: flex; align-items: center; flex-wrap: wrap; gap: 0 0.5rem;
   padding: 0 0.5rem; min-height: 44px;

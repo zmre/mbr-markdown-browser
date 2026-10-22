@@ -21,6 +21,24 @@ describe('editor chrome', () => {
     expect(header).toContain('grid-template-columns: auto minmax(0, 1fr) auto')
   })
 
+  it('gives the document a tall minimum, capped by the screen, with the body as the one scroller', () => {
+    const modal = cssBlock('MODAL_CSS')
+    expect(modal).toMatch(/\.mbr-editor-body \{[^}]*overflow: auto/)
+    const crepe = modal.match(/\.mbr-editor-crepe \{([^}]*)\}/)![1]
+    expect(crepe).toContain('min-height: min(36rem, 70svh)')
+    // Grows to its content instead of shrinking into a second vertical scroller.
+    expect(crepe).toContain('flex: 1 0 auto')
+    expect(crepe).not.toMatch(/(^|[^-])overflow: auto/)
+  })
+
+  it('fills most of a desktop window, keeps the prose at a readable measure, and leaves narrow screens alone', () => {
+    const modal = cssBlock('MODAL_CSS')
+    const box = modal.match(/\.mbr-editor-modal \{([^}]*)\}/)![1]
+    expect(box).toContain('width: min(1400px, 92vw)')
+    expect(box).toContain('height: min(1200px, 94svh)')
+    expect(modal).toMatch(/@media \(min-width: 601px\) \{\s*\.mbr-editor-modal \.milkdown \.ProseMirror \{[^}]*calc\(\(100% - 48em\) \/ 2\)/)
+  })
+
   it('drops the old × close button and the bordered file-action row', () => {
     expect(editorSource).not.toContain('mbr-editor-close')
     expect(editorSource).not.toContain('mbr-editor-fileactions')

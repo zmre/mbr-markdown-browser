@@ -122,15 +122,24 @@ becomes a class on the page's `<body>` (see
 
 ### Relationships
 
-Each relationship in `relationships` is a row with four parts:
+Each relationship in `relationships` is a row that reads from the note's own
+side: **type**, then **note**. `parent` · `[[Sam]]` means "Sam is this note's
+parent" (`type: parent, to: "[[Sam]]"`). The row has:
 
 - a **type**, chosen from the repository's
   [`relationship_types`](../markdown/relationships/), each with its label and
   category;
-- a **direction**: `to` means the other note is *my* `<type>`, and `from`
-  means I am *its* `<type>`;
 - the **note**, from a note picker;
-- an optional **label**, shown instead of the type's own label.
+- an optional **label**, shown instead of the type's own label;
+- a **Flip relationship direction** checkbox. Checking it writes `from:` in
+  place of `to:`, so `parent` · `[[Sam]]` then means this note is Sam's parent;
+  unchecking writes `to:` back. Only the key changes, and the sentence under
+  the row says which way the relationship now reads. A symmetric type
+  (`spouse`, `sibling`, `colleague`) has no checkbox, since its direction
+  means nothing.
+
+A relationship that names two other notes (both `from:` and `to:`) shows both
+notes, labelled "from" and "to", and has no checkbox.
 
 Under the row, the relationship reads back as a sentence, including the
 reverse relationship mbr derives. On Jane's note, `type: parent, to: "[[Sam]]"`

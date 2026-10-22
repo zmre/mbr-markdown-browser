@@ -12,6 +12,7 @@ import {
   edgeDirection,
   edgeOf,
   freshLabel,
+  canFlipDirection,
   humanActorId,
   labeledEntries,
   labeledShape,
@@ -50,6 +51,18 @@ describe('relationships', () => {
     expect(relationshipSentence(edge({ type: 'mentor', to: '[[Yoda]]', label: 'Teacher' }), reg, 'Luke')).toBe('Yoda is Luke’s teacher');
     expect(relationshipSentence(edge({ type: 'parent', to: null }), reg, 'Jane')).toBeNull();
     expect(relationshipSentence(edge({ type: null, to: '[[X]]' }), reg, 'Jane')).toBeNull();
+  });
+
+  it('offers the direction toggle only where direction means something', () => {
+    expect(canFlipDirection(edge({ type: 'parent', to: '[[Sam]]' }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: 'employer', from: '[[Acme]]' }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: 'reports_to', to: '[[Boss]]' }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: 'mentor', to: '[[Yoda]]', label: 'Teacher' }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: null, to: null }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: 'not-registered', to: '[[X]]' }), reg)).toBe(true);
+    expect(canFlipDirection(edge({ type: 'spouse', to: '[[Mary]]' }), reg)).toBe(false);
+    expect(canFlipDirection(edge({ type: 'Sibling', from: '[[Al]]' }), reg)).toBe(false);
+    expect(canFlipDirection(edge({ type: 'parent', from: '[[A]]', to: '[[B]]' }), reg)).toBe(false);
   });
 
   it('toggles direction by renaming only the key token', () => {

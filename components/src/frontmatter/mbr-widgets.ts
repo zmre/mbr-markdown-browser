@@ -1,9 +1,11 @@
 /**
  * The properties form's widgets for mbr's and OKF's own vocabulary:
  *
- * - `relationships`: one row per edge — type (from the registry), direction
- *   (`to`: "X is my <type>", `from`: "I am X's <type>"), the note, an
- *   optional label — with the edge read back as a sentence. Other keys on an
+ * - `relationships`: one row per edge — type (from the registry), the note
+ *   (`to`: "X is my <type>"), an optional label — plus a "Flip relationship
+ *   direction" checkbox (checked = `from`; none for a symmetric type) and the
+ *   edge read back as a sentence, which says what the direction means. An edge naming two
+ *   other notes shows both endpoints, labelled from/to. Other keys on an
  *   edge (`married:`, `place:`) stay generic rows under it.
  * - `labeled`: contact values with a label (`emails`, `phones`, `dates`,
  *   `addresses`, `aliases`, …) in whichever of contact.rs's three shapes the
@@ -25,8 +27,10 @@ import { widgetKindFor } from './form-logic.js';
 import {
   ADDRESS_PARTS,
   DEFAULT_RELATIONSHIP_TYPES,
+  FLIP_DIRECTION_LABEL,
   RESERVED_EDGE_KEYS,
   addLabeledEntry,
+  canFlipDirection,
   edgeDirection,
   edgeOf,
   freshLabel,
@@ -159,10 +163,11 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
   const dir = edgeDirection(edge);
   const known = relationType(registry.types, edge.type);
   const sentence = relationshipSentence(edge, registry.types, me);
+  const flippable = canFlipDirection(edge, registry.types);
   const n = index + 1;
-  const endpoint = (key: 'to' | 'from', label: string) =>
+  const endpoint = (key: 'to' | 'from', label: string, extra = '') =>
     html`<mbr-fm-combobox
-      class="fm-wikilink"
+      class=${`fm-wikilink${extra}`}
       openOnFocus
       placeholder="[[Note]]"
       .value=${key === 'to' ? edge.to : edge.from}
@@ -172,7 +177,7 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
       @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => host.apply((m) => setEdgeField(m, edgePath, key, e.detail.value))}
     ></mbr-fm-combobox>`;
   return html`<li class="fm-edge" data-index=${index}>
-    <div class="fm-edge-main">
+    <div class=${dir === 'both' ? 'fm-edge-main fm-edge-both' : 'fm-edge-main'}>
       <mbr-fm-combobox
         class="fm-edge-type"
         openOnFocus
@@ -184,20 +189,11 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
         @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => host.apply((m) => setEdgeField(m, edgePath, 'type', e.detail.value))}
       ></mbr-fm-combobox>
       ${dir === 'both'
-        ? html`<span class="fm-edge-dir-text">from</span>${endpoint('from', 'from')}<span class="fm-edge-dir-text">to</span>${endpoint('to', 'to')}`
-        : html`<select
-              class="fm-in fm-edge-dir"
-              aria-label=${`Relationship ${n}, direction`}
-              title="to: the note is my <type>. from: I am the note’s <type>."
-              .value=${live(dir)}
-              @change=${(e: Event) => {
-                if ((e.target as HTMLSelectElement).value !== dir) host.apply((m) => toggleEdgeDirection(m, edgePath, edge));
-              }}
-            >
-              <option value="to" ?selected=${dir === 'to'}>to</option>
-              <option value="from" ?selected=${dir === 'from'}>from</option>
-            </select>
-            ${endpoint(dir, dir === 'to' ? 'to' : 'from')}`}
+        ? html`<span class="fm-edge-dir-text fm-edge-from-text">from</span>${endpoint('from', 'from', ' fm-edge-from')}<span
+              class="fm-edge-dir-text fm-edge-to-text"
+              >to</span
+            >${endpoint('to', 'to', ' fm-edge-to')}`
+        : endpoint(dir, 'note')}
       <input
         type="text"
         class="fm-in fm-edge-label"
@@ -208,6 +204,18 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
       />
       ${removeButton(`Remove relationship ${n}`, () => host.removeListItem(ctx.path, index))}
     </div>
+    ${flippable
+      ? html`<label class="fm-edge-invert">
+          <input
+            type="checkbox"
+            aria-label=${`Relationship ${n}: flip relationship direction`}
+            .checked=${live(dir === 'from')}
+            @change=${(e: Event) => {
+              if ((e.target as HTMLInputElement).checked !== (dir === 'from')) host.apply((m) => toggleEdgeDirection(m, edgePath, edge));
+            }}
+          />${FLIP_DIRECTION_LABEL}
+        </label>`
+      : nothing}
     ${sentence ? html`<p class="fm-edge-sentence">${sentence}</p>` : nothing}
     ${edge.type && registry.authored && !known
       ? html`<p class="fm-hint">${icon(iconTriangleAlert, { size: 14 })}“${edge.type}” is not in relationship_types: no reverse edge is derived.</p>`

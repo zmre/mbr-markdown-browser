@@ -138,6 +138,18 @@ export function relationshipSentence(edge: EdgeView, registry: readonly Relation
   return `${forward} · ${phrase(object, subject, inverse, inverse.label.toLowerCase())}`;
 }
 
+/** The words on an edge's direction toggle (checked = the edge uses `from`). */
+export const FLIP_DIRECTION_LABEL = 'Flip relationship direction';
+
+/**
+ * Whether an edge offers the direction toggle: not where direction means
+ * nothing (a symmetric type) nor on an edge naming two other notes.
+ */
+export function canFlipDirection(edge: EdgeView, registry: readonly RelationTypeConfig[]): boolean {
+  if (edgeDirection(edge) === 'both') return false;
+  return !relationType(registry, edge.type)?.symmetric;
+}
+
 /** Swaps an edge's `to` for `from` or back (only the key token changes). */
 export function toggleEdgeDirection(model: FrontmatterModel, edgePath: FmPath, edge: EdgeView): FrontmatterModel {
   const dir = edgeDirection(edge);
