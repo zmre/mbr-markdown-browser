@@ -24,6 +24,7 @@ With mbr's QuickLook extension, markdown files render as formatted HTML instead 
 - **Table of contents**: In the QuickLook info panel
 - **Frontmatter display**: Shows metadata in a clean format
 - **Plain text and source files**: Shown verbatim, with syntax highlighting where available
+- **Contact cards**: `type: person` and `type: organization` notes get the same [contact card](../markdown/contacts.md) as in mbr (see [Contacts](#contacts) below)
 
 ## Thumbnails
 
@@ -212,6 +213,23 @@ The QuickLook preview is simplified compared to the full mbr experience:
 | Search | No | Yes |
 | Live reload | No | Yes |
 | Link following | Limited | Yes |
+
+### Contacts
+
+A `type: person` or `type: organization` note previews with its contact card at
+the top, the same card mbr draws (a customized `.mbr/_contact_card.html` is not
+used here; the preview has its own fixed template). Its portrait (`image:`)
+follows the asset rules below: relative to the note's folder, inside the
+repository and within the size limits, or it is not shown.
+
+The preview knows only the one file, so the card differs in two ways:
+
+- **Relationships** are the ones the note declares itself (including the
+  `employer` its `company: "[[…]]"` implies), shown from its point of view, as
+  plain text. Edges declared on *other* notes (George's `parent: [[Jane]]`
+  showing up as Jane's child) and links to related notes appear only in mbr.
+  With `relationship_tracking = false` the section is left off, as in mbr.
+- **No "Linked from N notes" chip**: counting backlinks needs the repository.
 
 ### Images and Other Local Assets
 

@@ -233,6 +233,23 @@ In server mode the count comes straight from the backlink index; in a static
 build (or while the server is still indexing) it is filled in after the page
 loads. It is hidden when nothing links here.
 
+### Relationships on the card
+
+A **Relationships** section lists the note's relationships as rows by type —
+*Children: George, Mary*, *Spouse: Jane Doe* — with each type's label from
+`relationship_types` (singular for one, plural for several). It shows exactly
+what the info panel's Relationships section does: edges this note declares,
+edges derived from other notes' declarations (George's `parent: [[Jane Doe]]`
+makes him Jane's child), and the `employer` a wikilinked `company` implies. A
+name that resolves to a note links to it (page-relative in a static build); an
+unresolved one is plain text. An edge's `label` and its attributes follow the
+name, muted (*Jane Doe second marriage · married 1925*).
+
+With `relationship_tracking = false` (`--no-relationship-tracking`) there is no
+relationship index, so the section is left off. In a [QuickLook
+preview](../modes/quicklook.md#contacts) the card lists only the note's own
+declarations, as plain text.
+
 The page reads top to bottom: card, your notes, then the relationship charts.
 
 On contact pages the info panel's Metadata table leaves out what the card
@@ -248,7 +265,9 @@ organization pages): `contact.display_name`, `contact.name.first`,
 `contact.phones` (each with `label`, `label_display`, `value` and a safe `href`),
 `contact.emails`, `contact.urls`, `contact.social`, `contact.im`,
 `contact.addresses` (each with `lines`), `contact.dates` (each with `label`,
-`display`, `datetime`, `place`) and more. Use the provided `href`s rather than
+`display`, `datetime`, `place`), `contact.relationships` (each with
+`predicate`, `label` and `items`, each item a `name`, an optional `url` and an
+optional `note`) and more. Use the provided `href`s rather than
 building links from raw values — they are what keeps a malicious value from
 becoming a link.
 

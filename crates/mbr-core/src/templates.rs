@@ -233,13 +233,9 @@ impl Templates {
             );
         }
 
-        // Custom filters. `humandate` humanizes ISO-ish date strings (see
-        // `humanize_date`); registered here so it survives `reload()` and the
-        // `Tera::default()` fallback above.
-        tera.register_filter("humandate", humandate_filter);
-        // `icon(name=…, size=…)`: the shared icon set (`icons.rs`), so a
-        // template draws the same artwork as the components.
-        tera.register_function("icon", crate::icons::icon_function);
+        // Registered here so they survive `reload()` and the `Tera::default()`
+        // fallback above.
+        register_template_helpers(&mut tera);
 
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
@@ -546,6 +542,22 @@ fn collapse_dashes(slug: &str) -> String {
     slug.split('-').filter(|part| !part.is_empty()).join("-")
 }
 
+/// Registers mbr's own Tera filters and functions on `tera`: every engine that
+/// renders a built-in template (the page engine here, QuickLook's) calls this,
+/// so a partial such as [`CONTACT_CARD_TEMPLATE`] finds what it uses.
+///
+/// - `humandate` humanizes ISO-ish date strings (see `humanize_date`).
+/// - `icon(name=…, size=…)` draws the shared icon set (`icons.rs`), so a
+///   template draws the same artwork as the components.
+pub fn register_template_helpers(tera: &mut Tera) {
+    tera.register_filter("humandate", humandate_filter);
+    tera.register_function("icon", crate::icons::icon_function);
+}
+
+/// The compiled-in contact card partial (`_contact_card.html`). Public so
+/// QuickLook renders the very same card markup as the server and static builds.
+pub const CONTACT_CARD_TEMPLATE: &str = include_str!("../templates/_contact_card.html");
+
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     // Partials (underscore prefix indicates internal-only templates)
     ("_head.html", include_str!("../templates/_head.html")),
@@ -572,10 +584,7 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         "_display_enhancements.html",
         include_str!("../templates/_display_enhancements.html"),
     ),
-    (
-        "_contact_card.html",
-        include_str!("../templates/_contact_card.html"),
-    ),
+    ("_contact_card.html", CONTACT_CARD_TEMPLATE),
     // Compat shim for customized `index.html` files written before the card.
     (
         "_person_infobox.html",
@@ -1339,6 +1348,22 @@ mod tests {
         yaml: &str,
         extra: &[(&str, serde_json::Value)],
     ) -> String {
+        render_contact_full(
+            user_index,
+            yaml,
+            extra,
+            &[],
+            &crate::page_context::UrlMode::Absolute,
+        )
+    }
+
+    fn render_contact_full(
+        user_index: Option<&str>,
+        yaml: &str,
+        extra: &[(&str, serde_json::Value)],
+        relationships: &[crate::relationships::ResolvedRelationship],
+        url_mode: &crate::page_context::UrlMode,
+    ) -> String {
         let doc = yaml_rust2::YamlLoader::load_from_str(yaml)
             .unwrap()
             .remove(0);
@@ -1360,9 +1385,12 @@ mod tests {
         crate::page_context::insert_contact(
             &mut context,
             crate::contact::Contact::from_yaml(&doc),
-            &[],
+            relationships,
+            &crate::relationships::RelationTypeRegistry::from_types(
+                &crate::config::default_relationship_types(),
+            ),
             backlinks,
-            &crate::page_context::UrlMode::Absolute,
+            url_mode,
         );
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1456,6 +1484,67 @@ mod tests {
         assert!(!none.contains("mbr-contact-backlinks"));
         let unknown = render_contact(JANE, &[]);
         assert!(unknown.contains("<mbr-contact-backlinks></mbr-contact-backlinks>"));
+    }
+
+    #[test]
+    fn test_contact_card_relationships_section() {
+        use crate::relationships::{Direction, ResolvedRelationship};
+        let edge =
+            |predicate: &str, name: &str, url: &str, label: Option<&str>| ResolvedRelationship {
+                rel_type: predicate.into(),
+                predicate: predicate.into(),
+                neighbor: url.into(),
+                neighbor_title: name.into(),
+                neighbor_raw: name.into(),
+                resolved: !url.is_empty(),
+                direction: Direction::Outgoing,
+                label: label.map(str::to_string),
+                attributes: Default::default(),
+                derived: true,
+                implied: false,
+            };
+        let rels = [
+            edge("child", "George", "/people/george/", None),
+            edge("child", "<b>Mary</b>", "", Some("adopted")),
+            edge("spouse", "Jane", "/people/jane/", None),
+        ];
+        let html = render_contact_full(
+            None,
+            JANE,
+            &[],
+            &rels,
+            &crate::page_context::UrlMode::Absolute,
+        );
+        assert!(
+            html.contains(r#"<section class="mbr-contact-card-section mbr-contact-card-relationships" aria-label="Relationships"><p class="mbr-contact-card-section-title">Relationships</p>"#),
+            "{html}"
+        );
+        assert!(html.contains(concat!(
+            r#"<li data-predicate="child"><span class="mbr-contact-card-label">Children</span>"#,
+            r#"<span class="mbr-contact-card-relation"><a href="&#x2F;people&#x2F;george&#x2F;">George</a></span>"#,
+            r#"<span class="mbr-contact-card-relation"><span>&lt;b&gt;Mary&lt;&#x2F;b&gt;</span> <span class="mbr-contact-card-relation-note">adopted</span></span></li>"#,
+        )), "{html}");
+        assert!(html.contains(r#"<span class="mbr-contact-card-label">Spouse</span>"#));
+        assert!(
+            !html.contains("<dl"),
+            "theme.css turns `main dl` into a FAQ"
+        );
+
+        // Static builds get page-relative neighbour URLs.
+        let html = render_contact_full(
+            None,
+            JANE,
+            &[],
+            &rels,
+            &crate::page_context::UrlMode::RelativeToDepth(2),
+        );
+        assert!(
+            html.contains(r#"<a href="..&#x2F;..&#x2F;people&#x2F;george&#x2F;">George</a>"#),
+            "{html}"
+        );
+
+        // No relationships, no section.
+        assert!(!render_contact(JANE, &[]).contains("mbr-contact-card-relationships"));
     }
 
     #[test]

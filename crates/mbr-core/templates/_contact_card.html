@@ -15,6 +15,12 @@
    that still includes `_person_infobox.html` keeps rendering its own <h1>;
    that partial sets `mbr_contact_card_no_headline` before including this one.
 
+   Relationships: `contact.relationships` is grouped and labelled in Rust
+   (`Contact::set_relationships`) from the relationship index — declared,
+   derived and the implied `employer` alike. `item.url` is the index's own note
+   URL (page-relative in static builds), set only when the neighbour resolved;
+   QuickLook has no index, so there every neighbour is plain text.
+
    Avoid <dl> here: theme.css turns `main dl` into a click-to-reveal FAQ. #}
 {% if contact %}
 {# `default` only fills *undefined* values and `display_name` is null when
@@ -30,13 +36,14 @@
       {% if contact_backlinks is defined %}{% if contact_backlinks > 0 %}<mbr-contact-backlinks count="{{ contact_backlinks }}"><button type="button" class="mbr-contact-card-chip">Linked from {{ contact_backlinks }} note{% if contact_backlinks != 1 %}s{% endif %}</button></mbr-contact-backlinks>{% endif %}{% else %}<mbr-contact-backlinks></mbr-contact-backlinks>{% endif %}
     </div>
   </div>
-  {% if contact.phones or contact.emails or contact.urls or contact.social or contact.im or contact.addresses or contact.dates or contact.places %}
+  {% if contact.phones or contact.emails or contact.urls or contact.social or contact.im or contact.addresses or contact.dates or contact.places or contact.relationships %}
   <div class="mbr-contact-card-sections">
     {% if contact.phones %}<section class="mbr-contact-card-section" aria-label="Phone"><p class="mbr-contact-card-section-title">Phone</p><ul>{% for item in contact.phones %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
     {% if contact.emails %}<section class="mbr-contact-card-section" aria-label="Email"><p class="mbr-contact-card-section-title">Email</p><ul>{% for item in contact.emails %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
     {% if contact.urls or contact.social or contact.im %}<section class="mbr-contact-card-section" aria-label="Web"><p class="mbr-contact-card-section-title">Web</p><ul>{% for item in contact.urls %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}{% for item in contact.social %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}{% for item in contact.im %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}{% if item.href %}<a href="{{ item.href }}" rel="noopener noreferrer">{{ item.value }}</a>{% else %}<span>{{ item.value }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
     {% if contact.addresses %}<section class="mbr-contact-card-section" aria-label="Address"><p class="mbr-contact-card-section-title">Address</p><ul>{% for item in contact.addresses %}<li>{% if item.label_display %}<span class="mbr-contact-card-label">{{ item.label_display }}</span>{% endif %}<address>{% for line in item.lines %}{{ line }}{% if not loop.last %}<br />{% endif %}{% endfor %}</address></li>{% endfor %}</ul></section>{% endif %}
     {% if contact.dates or contact.places %}<section class="mbr-contact-card-section" aria-label="Dates"><p class="mbr-contact-card-section-title">Dates</p><ul>{% for item in contact.dates %}<li><span class="mbr-contact-card-label">{{ item.label_display }}</span>{% if item.datetime %}<time datetime="{{ item.datetime }}">{{ item.display }}</time>{% else %}<span>{{ item.display }}</span>{% endif %}{% if item.place %}<span class="mbr-contact-card-place">{{ item.place }}</span>{% endif %}</li>{% endfor %}{% for item in contact.places %}<li><span class="mbr-contact-card-label">{{ item.label_display }}</span><span class="mbr-contact-card-place">{{ item.value }}</span></li>{% endfor %}</ul></section>{% endif %}
+    {% if contact.relationships %}<section class="mbr-contact-card-section mbr-contact-card-relationships" aria-label="Relationships"><p class="mbr-contact-card-section-title">Relationships</p><ul>{% for group in contact.relationships %}<li data-predicate="{{ group.predicate }}"><span class="mbr-contact-card-label">{{ group.label }}</span>{% for item in group.items %}<span class="mbr-contact-card-relation">{% if item.url %}<a href="{{ item.url }}">{{ item.name }}</a>{% else %}<span>{{ item.name }}</span>{% endif %}{% if item.note %} <span class="mbr-contact-card-relation-note">{{ item.note }}</span>{% endif %}</span>{% endfor %}</li>{% endfor %}</ul></section>{% endif %}
   </div>
   {% endif %}
 </header>

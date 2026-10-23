@@ -329,6 +329,8 @@ Even though **Sam's** note declares no relationships, opening it shows his
 parents (John, Mary) and his sibling (Alice) — all derived from edges declared
 elsewhere. Open the info panel (`Ctrl+g`) to see relationships grouped by
 predicate, with edge attributes like *married 1948-06-01 · place Denver, CO*.
+On a `type: person` or `type: organization` note the same rows also appear on
+the [contact card](contacts.md#relationships-on-the-card).
 
 ## How it's exposed
 

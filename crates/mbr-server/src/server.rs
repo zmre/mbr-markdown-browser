@@ -7668,6 +7668,7 @@ impl Server {
                 &mut extra_context,
                 contact,
                 &relationships,
+                config.repo.relationship_index.registry(),
                 backlinks,
                 &page_context::UrlMode::Absolute,
             );

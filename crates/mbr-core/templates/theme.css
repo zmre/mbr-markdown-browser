@@ -2465,6 +2465,17 @@ main .mbr-fc-pie-unreviewed {
   content: none;
 }
 
+/* Relationships: one row per type ("Children"), its people inline after the
+   label, comma-separated; an edge's label/attributes trail each name, muted. */
+.mbr-contact-card-relation + .mbr-contact-card-relation::before {
+  content: ", ";
+}
+
+.mbr-contact-card-relation-note {
+  font-size: 0.85rem;
+  color: var(--pico-muted-color, #666);
+}
+
 @media (max-width: 576px) {
   .mbr-contact-card {
     --mbr-contact-avatar-size: 4rem;

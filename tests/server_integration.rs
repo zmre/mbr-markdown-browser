@@ -1095,6 +1095,104 @@ async fn test_contact_card_on_person_page() {
     assert!(org.contains("<mbr-genealogy></mbr-genealogy>"));
 }
 
+/// The card lists the page's relationships from the index — declared, derived
+/// from another note's declaration, and the implied `employer` — labelled from
+/// the registry, linking each resolved neighbour to a page that serves.
+#[tokio::test]
+async fn test_contact_card_relationships_section() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        concat!(
+            "---\n",
+            "type: person\n",
+            "title: Jane Doe\n",
+            "company: \"[[Acme Corp]]\"\n",
+            "relationships:\n",
+            "  - {type: parent, to: \"[[John Doe]]\"}\n",
+            "  - {type: spouse, to: \"[[Nobody Known]]\", label: first marriage}\n",
+            "---\n",
+            "Notes.\n",
+        ),
+    );
+    repo.create_markdown(
+        "people/john.md",
+        "---\ntype: person\ntitle: John Doe\n---\n",
+    );
+    repo.create_markdown(
+        "people/george.md",
+        "---\ntype: person\ntitle: George\nrelationships:\n  - {type: parent, to: \"[[Jane Doe]]\"}\n---\n",
+    );
+    repo.create_markdown(
+        "people/ann.md",
+        "---\ntype: person\ntitle: Ann\nrelationships:\n  - {type: parent, to: \"[[Jane Doe]]\"}\n---\n",
+    );
+    repo.create_markdown(
+        "orgs/acme.md",
+        "---\ntype: organization\ntitle: Acme Corp\n---\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/people/jane/").await;
+
+    assert!(
+        html.contains(r#"aria-label="Relationships"><p class="mbr-contact-card-section-title">Relationships</p>"#),
+        "{html}"
+    );
+    // Derived from George's and Ann's declarations, grouped under one label.
+    assert!(
+        html.contains(concat!(
+            r#"<li data-predicate="child"><span class="mbr-contact-card-label">Children</span>"#,
+            r#"<span class="mbr-contact-card-relation"><a href="&#x2F;people&#x2F;ann&#x2F;">Ann</a></span>"#,
+            r#"<span class="mbr-contact-card-relation"><a href="&#x2F;people&#x2F;george&#x2F;">George</a></span></li>"#,
+        )),
+        "{html}"
+    );
+    assert!(html.contains(concat!(
+        r#"<span class="mbr-contact-card-label">Parent</span>"#,
+        r#"<span class="mbr-contact-card-relation"><a href="&#x2F;people&#x2F;john&#x2F;">John Doe</a></span>"#,
+    )));
+    assert!(html.contains(concat!(
+        r#"<span class="mbr-contact-card-label">Employer</span>"#,
+        r#"<span class="mbr-contact-card-relation"><a href="&#x2F;orgs&#x2F;acme&#x2F;">Acme Corp</a></span>"#,
+    )));
+    // An unresolved neighbour is plain text, with the edge's label beside it.
+    assert!(
+        html.contains(concat!(
+            r#"<span class="mbr-contact-card-relation"><span>Nobody Known</span> "#,
+            r#"<span class="mbr-contact-card-relation-note">first marriage</span></span>"#,
+        )),
+        "{html}"
+    );
+
+    // The link works.
+    let george = server.get("/people/george/").await;
+    assert_eq!(george.status(), 200);
+    // George's own card names Jane through the declared edge.
+    let george = server.get_text("/people/george/").await;
+    assert!(george.contains(r#"<a href="&#x2F;people&#x2F;jane&#x2F;">Jane Doe</a>"#));
+}
+
+/// `--no-relationship-tracking` leaves the card without a Relationships section.
+#[tokio::test]
+async fn test_contact_card_relationships_respect_tracking_switch() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane\nrelationships:\n  - {type: parent, to: \"[[John]]\"}\n---\n",
+    );
+    repo.create_markdown("people/john.md", "---\ntype: person\ntitle: John\n---\n");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.relationship_tracking = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/people/jane/").await;
+    assert!(html.contains("mbr-contact-card"));
+    assert!(!html.contains("mbr-contact-card-relationships"), "{html}");
+}
+
 /// The `site.json` contract the relationship charts read (contacts spec 0.2 /
 /// 0.3), checked against the server's real output rather than the frontend's
 /// fixtures. The charts never re-resolve wikilinks or guess orientation by
