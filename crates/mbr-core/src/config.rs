@@ -394,7 +394,7 @@ impl RelationType {
 
 /// Title-cases a single word (capitalizes the first letter), preserving the
 /// rest. Unlike [`title_case`], it does not strip a trailing plural "s".
-fn title_case_word(s: &str) -> String {
+pub(crate) fn title_case_word(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),

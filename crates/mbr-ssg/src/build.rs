@@ -1239,6 +1239,7 @@ impl Builder {
                 &mut extra_context,
                 contact,
                 &relationships,
+                self.repo.relationship_index.registry(),
                 None,
                 &page_context::UrlMode::RelativeToDepth(depth),
             );

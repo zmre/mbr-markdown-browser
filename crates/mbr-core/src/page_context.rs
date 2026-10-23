@@ -288,18 +288,24 @@ pub fn insert_error_keys(
 /// backlink count is known without any extra work, `contact_backlinks`.
 ///
 /// Inserts nothing for other notes, so every other page renders byte-for-byte
-/// as before. `relationships` are the page's own resolved relationships, used
-/// only to link a wikilinked `company` (see
-/// [`crate::contact::Contact::resolve_company`]); the company URL is made
-/// relative in static builds like every other link on the page.
+/// as before. `relationships` are the page's own resolved relationships (one
+/// index lookup at the call site; empty with relationship tracking off): they
+/// fill the card's Relationships section
+/// ([`crate::contact::Contact::set_relationships`], labelled from `registry`)
+/// and link a wikilinked `company` (see
+/// [`crate::contact::Contact::resolve_company`]). Every note URL among them is
+/// made relative in static builds like every other link on the page.
 ///
 /// `backlinks` is `None` whenever counting would cost anything — before the
 /// server's inbound index is ready, in static builds — and the card then emits
-/// a placeholder that the browser fills from `links.json` on idle.
+/// a placeholder that the browser fills from `links.json` on idle. `Some(0)`
+/// emits nothing, which is also how a viewer with no server (QuickLook) keeps
+/// the interactive chip out.
 pub fn insert_contact(
     ctx: &mut HashMap<String, Value>,
     contact: Option<crate::contact::Contact>,
     relationships: &[crate::relationships::ResolvedRelationship],
+    registry: &crate::relationships::RelationTypeRegistry,
     backlinks: Option<usize>,
     url_mode: &UrlMode,
 ) {
@@ -307,11 +313,19 @@ pub fn insert_contact(
         return;
     };
     contact.resolve_company(relationships);
-    if let (UrlMode::RelativeToDepth(depth), Some(company)) = (url_mode, contact.company.as_mut()) {
-        company.url = company
-            .url
-            .take()
-            .map(|url| make_relative_url(&url, *depth));
+    contact.set_relationships(relationships, registry);
+    if let UrlMode::RelativeToDepth(depth) = url_mode {
+        let relativize = |url: &mut Option<String>| {
+            *url = url.take().map(|url| make_relative_url(&url, *depth));
+        };
+        if let Some(company) = contact.company.as_mut() {
+            relativize(&mut company.url);
+        }
+        contact
+            .relationships
+            .iter_mut()
+            .flat_map(|group| group.items.iter_mut())
+            .for_each(|item| relativize(&mut item.url));
     }
     ctx.insert("contact".to_string(), json!(contact));
     if let Some(count) = backlinks {

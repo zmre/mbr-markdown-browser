@@ -490,6 +490,7 @@ async fn run() -> Result<(), MbrError> {
             &mut extra_context,
             render_result.contact,
             &[],
+            &mbr::relationships::RelationTypeRegistry::from_types(&config.relationship_types),
             None,
             &mbr::page_context::UrlMode::Absolute,
         );

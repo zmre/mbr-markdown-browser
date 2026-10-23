@@ -552,7 +552,8 @@ warning.
 
 > **Note:** `relationship_tracking` rides on the same `links.json` fetch as
 > backlinks (no extra request). Disabling it omits relationship data from
-> `links.json` and `site.json` and hides the info-panel section.
+> `links.json` and `site.json` and hides the info-panel section and the contact
+> card's Relationships section (server, GUI, static builds and QuickLook alike).
 
 > **Note:** Typed relationships are visualized by the d3-based genealogy charts
 > on `type: person` pages and as edges in the info panel's mini link graph —

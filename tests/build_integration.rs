@@ -2006,6 +2006,46 @@ async fn test_build_contact_card_relative_image_and_company_link() {
     assert_eq!(employer["derived"], true);
 }
 
+/// The card's Relationships section in a static build: the same index rows as
+/// the server, with page-relative links that land on a built page.
+#[tokio::test]
+async fn test_build_contact_card_relationships_section() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "people/jane.md",
+        "---\ntype: person\ntitle: Jane Doe\nrelationships:\n  - {type: spouse, to: \"[[John Doe]]\"}\n---\nHi.\n",
+    );
+    repo.create_markdown(
+        "people/john.md",
+        "---\ntype: person\ntitle: John Doe\n---\n",
+    );
+    repo.create_markdown(
+        "family/george.md",
+        "---\ntype: person\ntitle: George\nrelationships:\n  - {type: parent, to: \"[[Jane Doe]]\"}\n---\n",
+    );
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("people").join("jane").join("index.html")).unwrap();
+    assert!(
+        html.contains(concat!(
+            r#"<span class="mbr-contact-card-label">Child</span>"#,
+            r#"<span class="mbr-contact-card-relation"><a href="..&#x2F;..&#x2F;family&#x2F;george&#x2F;">George</a></span>"#,
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<a href="..&#x2F;..&#x2F;people&#x2F;john&#x2F;">John Doe</a>"#),
+        "{html}"
+    );
+    // `../../family/george/` from `/people/jane/` is the built page.
+    assert!(
+        output
+            .join("family")
+            .join("george")
+            .join("index.html")
+            .is_file()
+    );
+}
+
 /// Regression: the organization declares `employee` and its URL
 /// (`/people/acme/`) sorts before the person's, so the aggregated edge keeps
 /// the org's direction and endpoint text — the card must still link the

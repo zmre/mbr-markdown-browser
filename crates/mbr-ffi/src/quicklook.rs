@@ -28,6 +28,9 @@ use mbr_core::embedded_hljs;
 use mbr_core::embedded_pico;
 use mbr_core::link_transform::LinkTransformConfig;
 use mbr_core::markdown;
+use mbr_core::page_context::{self, UrlMode};
+use mbr_core::relationships::{self, RelationTypeRegistry};
+use mbr_core::templates;
 use mbr_core::url_path::{self, url_scheme};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
@@ -340,12 +343,14 @@ pub fn render_preview_with_config(
         std::fs::read_to_string(&target.path).map_err(|e| QuickLookError::FileReadError {
             message: format!("{}: {}", target.path.display(), e),
         })?;
-    let rendered = target.render_markdown(&source)?;
+    let mut rendered = target.render_markdown(&source)?;
+    let card = target.contact_card_context(&source, &mut rendered);
 
     render_quicklook_template(
         &rendered.html,
         rendered.frontmatter,
         rendered.headings,
+        card,
         &target.root_path,
         &target.base_dir_url(),
         &ql_config,
@@ -388,7 +393,7 @@ pub fn render_thumbnail(
 
     // The frontmatter comes out of the same render the page uses, so there is
     // one YAML parse and one definition of what the frontmatter says.
-    let rendered = target.render_markdown(&source)?;
+    let mut rendered = target.render_markdown(&source)?;
 
     if let Some(path) = target.canonical_root().and_then(|canonical_root| {
         thumbnail_cover_image(
@@ -401,10 +406,12 @@ pub fn render_thumbnail(
         return Ok(ThumbnailDocument::Image { path });
     }
 
+    let card = target.contact_card_context(&source, &mut rendered);
     render_quicklook_template(
         &rendered.html,
         rendered.frontmatter,
         rendered.headings,
+        card,
         &target.root_path,
         &target.base_dir_url(),
         &THUMBNAIL_CONFIG,
@@ -484,6 +491,57 @@ impl QuickLookTarget {
         } else {
             format!("/{dir}/")
         }
+    }
+
+    /// The contact card's template context for a `type: person` /
+    /// `type: organization` note (`contact`, `contact_backlinks`, `has_h1`),
+    /// empty for every other note. Takes the parsed contact out of `rendered`.
+    ///
+    /// The same [`page_context::insert_contact`] the server and the static
+    /// build call, with what a single-file preview can know:
+    ///
+    /// - Relationships are the note's **own** declarations (re-read from its
+    ///   frontmatter only for a contact), framed by
+    ///   [`relationships::standalone_relationships`]: no other note is known,
+    ///   so every neighbour — and a wikilinked `company` — is plain text.
+    ///   None with `relationship_tracking` off, as on the server.
+    /// - `contact_backlinks` is `0`, which renders no chip: the interactive
+    ///   `<mbr-contact-backlinks>` needs a server's `links.json`.
+    /// - `has_h1` keeps the card's headline exactly as `index.html` does: the
+    ///   card names the note unless the body opens with its own H1, so the
+    ///   preview has one title, never two or none.
+    fn contact_card_context(
+        &self,
+        source: &str,
+        rendered: &mut markdown::MarkdownRenderResult,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut context = HashMap::new();
+        let Some(contact) = rendered.contact.take() else {
+            return context;
+        };
+        let registry = RelationTypeRegistry::from_types(&self.config.relationship_types);
+        let relationships = if self.config.relationship_tracking {
+            let title = rendered
+                .frontmatter
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let declared =
+                markdown::extract_metadata_from_bytes(&self.path, source.as_bytes()).relationships;
+            relationships::standalone_relationships(title, declared, &registry)
+        } else {
+            Vec::new()
+        };
+        page_context::insert_contact(
+            &mut context,
+            Some(contact),
+            &relationships,
+            &registry,
+            Some(0),
+            &UrlMode::Absolute,
+        );
+        context.insert("has_h1".to_string(), rendered.has_h1.into());
+        context
     }
 
     /// Render `source` (this file's markdown, or the top of it) to HTML.
@@ -714,7 +772,8 @@ fn render_text_preview(
     render_quicklook_template(
         &html,
         frontmatter,
-        Vec::new(), // no headings: a text preview has no table of contents
+        Vec::new(),     // no headings: a text preview has no table of contents
+        HashMap::new(), // no contact card: a text file has no frontmatter
         root_path,
         base_dir_url,
         ql_config,
@@ -982,24 +1041,62 @@ fn collect_preview_attachments(
 }
 
 /// Render the QuickLook HTML template with inlined assets.
+///
+/// `card` is [`QuickLookTarget::contact_card_context`]'s context: when it holds
+/// a `contact`, the shared `_contact_card.html` partial is rendered and placed
+/// at the top of `<main>`, as `index.html` places it, *before* attachments are
+/// collected — so the portrait (`contact.image`, already link-transformed and
+/// so relative to the note's folder like a body image) goes through
+/// [`collect_preview_attachments`] like every other local URL, and nowhere else.
+#[allow(clippy::too_many_arguments)]
 fn render_quicklook_template(
     markdown_html: &str,
     frontmatter: markdown::SimpleMetadata,
     headings: Vec<markdown::HeadingInfo>,
+    card: HashMap<String, serde_json::Value>,
     root_path: &Path,
     base_dir_url: &str,
     ql_config: &QuickLookConfig,
     config: &Config,
 ) -> Result<PreviewDocument, QuickLookError> {
+    let template_error = |e: tera::Error| QuickLookError::TemplateRenderError {
+        message: e.to_string(),
+    };
+
+    // Create Tera template engine with QuickLook template and the shared
+    // card partial (plus the helpers it calls, e.g. `icon()`).
+    let mut tera = Tera::default();
+    templates::register_template_helpers(&mut tera);
+    tera.add_raw_template("quicklook.html", QUICKLOOK_TEMPLATE)
+        .map_err(template_error)?;
+
+    // Build template context
+    let mut context = Context::new();
+
+    // Add frontmatter fields
+    for (k, v) in &frontmatter {
+        context.insert(k, v);
+    }
+
+    let card_html = if card.contains_key("contact") {
+        tera.add_raw_template("_contact_card.html", templates::CONTACT_CARD_TEMPLATE)
+            .map_err(template_error)?;
+        let mut card_context = context.clone();
+        for (k, v) in &card {
+            card_context.insert(k, v);
+        }
+        tera.render("_contact_card.html", &card_context)
+            .map_err(template_error)?
+    } else {
+        String::new()
+    };
+    let page_html = card_html + markdown_html;
+
     // Turn local asset URLs (root-relative, or relative to `base_dir_url`) into
     // cid: references and collect the files they name. Uses static_folder
     // fallback logic to find files in the correct location.
-    let (markdown_html, attachments) = collect_preview_attachments(
-        markdown_html,
-        root_path,
-        &config.static_folder,
-        base_dir_url,
-    );
+    let (markdown_html, attachments) =
+        collect_preview_attachments(&page_html, root_path, &config.static_folder, base_dir_url);
 
     // Load custom theme CSS if available
     let custom_theme = load_custom_theme(root_path);
@@ -1010,21 +1107,6 @@ fn render_quicklook_template(
 
     // Build inline JavaScript
     let inline_js = build_inline_js(ql_config);
-
-    // Create Tera template engine with QuickLook template
-    let mut tera = Tera::default();
-    tera.add_raw_template("quicklook.html", QUICKLOOK_TEMPLATE)
-        .map_err(|e| QuickLookError::TemplateRenderError {
-            message: e.to_string(),
-        })?;
-
-    // Build template context
-    let mut context = Context::new();
-
-    // Add frontmatter fields
-    for (k, v) in &frontmatter {
-        context.insert(k, v);
-    }
 
     // Add frontmatter as JSON
     let frontmatter_json = serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string());
@@ -1039,11 +1121,9 @@ fn render_quicklook_template(
     context.insert("inline_js", &inline_js);
 
     // Render template
-    let html = tera.render("quicklook.html", &context).map_err(|e| {
-        QuickLookError::TemplateRenderError {
-            message: e.to_string(),
-        }
-    })?;
+    let html = tera
+        .render("quicklook.html", &context)
+        .map_err(template_error)?;
 
     Ok(PreviewDocument { html, attachments })
 }
@@ -2765,6 +2845,135 @@ mod tests {
     fn write_file(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A person note the way the contacts docs write one, with a portrait
+    /// beside it and relationships declared in both directions.
+    const CONTACT_NOTE: &str = concat!(
+        "---\n",
+        "type: person\n",
+        "title: Jane Doe\n",
+        "image: jane.png\n",
+        "company: \"[[Acme Corp]]\"\n",
+        "emails:\n  work: jane@abc.example\n",
+        "relationships:\n",
+        "  - {type: spouse, to: \"[[John Doe]]\", label: second marriage}\n",
+        "  - {type: parent, from: \"[[George]]\"}\n",
+        "---\n",
+        "Notes about Jane.\n",
+    );
+
+    /// The `<main>` element of a preview: assertions about titles must not see
+    /// the inlined CSS and JavaScript.
+    fn main_of(html: &str) -> &str {
+        let start = html.find(r#"<main id="wrapper""#).expect("a <main>");
+        let end = start + html[start..].find("</main>").expect("</main>");
+        &html[start..end]
+    }
+
+    fn contact_repo(contents: &str) -> (tempfile::TempDir, PathBuf, String) {
+        let (tmp, root, note) = thumbnail_repo("people/jane.md", contents);
+        write_file(&root.join("people/jane.png"), b"portrait");
+        write_file(&tmp.path().join("outside.png"), b"outside");
+        (tmp, root, note)
+    }
+
+    #[test]
+    fn test_contact_note_preview_renders_the_card_with_attached_portrait() {
+        let (_tmp, root, note) = contact_repo(CONTACT_NOTE);
+        let document = render_preview(note, None).unwrap();
+        let html = main_of(&document.html);
+
+        assert!(
+            html.contains(r#"<header class="mbr-contact-card" data-kind="person">"#),
+            "{html}"
+        );
+        // One title in the page body: the card's, since the note has no H1.
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains(r#"<h1 class="mbr-contact-card-name">Jane Doe</h1>"#));
+        assert!(html.find("mbr-contact-card").unwrap() < html.find("Notes about Jane.").unwrap());
+        assert!(html.contains(r#"<a href="mailto:jane@abc.example">jane@abc.example</a>"#));
+
+        // The portrait, relative to the note's folder, is a cid: attachment.
+        let portrait = root.join("people/jane.png");
+        assert_eq!(
+            src_of(html, "Jane Doe"),
+            cid_of(&document.attachments, &portrait)
+        );
+        assert_eq!(document.attachments.len(), 1);
+
+        // Own declarations, framed from this note, all plain text: there is no
+        // index to resolve a neighbour (or the company) against.
+        assert!(html.contains(r#"<li data-predicate="child"><span class="mbr-contact-card-label">Child</span><span class="mbr-contact-card-relation"><span>George</span></span></li>"#), "{html}");
+        assert!(html.contains(r#"<span>John Doe</span> <span class="mbr-contact-card-relation-note">second marriage</span>"#));
+        assert!(html.contains(r#"<span class="mbr-contact-card-label">Employer</span><span class="mbr-contact-card-relation"><span>Acme Corp</span>"#));
+        assert!(
+            html.contains("<span>Acme Corp</span></p>"),
+            "company is text: {html}"
+        );
+        let card = &html[html.find("<header class=\"mbr-contact-card\"").unwrap()..];
+        let card = &card[..card.find("</header>").unwrap()];
+        assert!(
+            !card.contains(r#"<a href="/"#) && !card.contains("&#x2F;people"),
+            "{card}"
+        );
+
+        // Nothing that needs a server: the backlink chip is absent.
+        assert!(!html.contains("<mbr-contact-backlinks"), "{html}");
+        // The card's styles are in the inlined theme.
+        assert!(document.html.contains(".mbr-contact-card-section"));
+    }
+
+    #[test]
+    fn test_contact_card_portrait_outside_root_is_not_attached() {
+        let (_tmp, _root, note) =
+            contact_repo(&CONTACT_NOTE.replace("image: jane.png", "image: ../../outside.png"));
+        let document = render_preview(note, None).unwrap();
+        assert!(
+            document.attachments.is_empty(),
+            "{:?}",
+            document.attachments
+        );
+        assert!(!src_of(&document.html, "Jane Doe").starts_with("cid:"));
+    }
+
+    #[test]
+    fn test_contact_card_yields_headline_to_body_h1_and_tracking_switch() {
+        let (_tmp, root, note) = contact_repo(
+            &CONTACT_NOTE.replace("Notes about Jane.", "# Jane, in her own words\n\nNotes."),
+        );
+        let html = render_preview(note.clone(), None).unwrap().html;
+        let html = main_of(&html);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(!html.contains("mbr-contact-card-name"));
+        assert!(html.contains("mbr-contact-card-relationships"));
+
+        // `relationship_tracking = false` drops the section, as on the server.
+        write_file(
+            &root.join(".mbr/config.toml"),
+            b"relationship_tracking = false\n",
+        );
+        let html = render_preview(note, None).unwrap().html;
+        assert!(html.contains("mbr-contact-card"));
+        assert!(!html.contains("mbr-contact-card-relationships"), "{html}");
+    }
+
+    #[test]
+    fn test_non_contact_preview_has_no_card() {
+        let (_tmp, _root, note) = contact_repo(&CONTACT_NOTE.replace("type: person", "type: note"));
+        let html = render_preview(note, None).unwrap().html;
+        let html = main_of(&html);
+        assert!(!html.contains("mbr-contact-card"), "{html}");
+        assert!(!html.contains("<h1"), "no generated title for a plain note");
+    }
+
+    #[test]
+    fn test_contact_thumbnail_page_carries_the_card() {
+        // No cover image (the portrait is not a cover when `image` is missing
+        // or not an image), so the thumbnail is the rendered page, card included.
+        let (_tmp, _root, note) = contact_repo(&CONTACT_NOTE.replace("image: jane.png\n", ""));
+        let document = thumbnail_page(render_thumbnail(note, None).unwrap());
+        assert!(document.html.contains("mbr-contact-card-name"));
     }
 
     fn thumbnail_image(document: ThumbnailDocument) -> String {

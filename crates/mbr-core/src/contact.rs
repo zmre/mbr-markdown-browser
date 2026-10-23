@@ -358,7 +358,37 @@ pub struct Contact {
     /// their own lines in the Dates section.
     pub places: Vec<Labeled>,
     pub died_place: Option<String>,
+    /// The card's Relationships section, one group per viewpoint predicate.
+    /// Empty until [`Contact::set_relationships`] fills it; `from_yaml` cannot,
+    /// because inverse and derived edges come from other notes.
+    pub relationships: Vec<RelationshipGroup>,
     pub problems: Vec<ContactProblem>,
+}
+
+/// One row of the card's Relationships section: every neighbour sharing a
+/// predicate as seen from this note ("Children: George, Mary").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelationshipGroup {
+    /// The viewpoint predicate (`child`), as the relationship index names it.
+    pub predicate: String,
+    /// Display label: the registry's singular label for one neighbour, plural
+    /// otherwise ([`crate::relationships::RelationTypeRegistry::display_label`]).
+    pub label: String,
+    pub items: Vec<RelationshipItem>,
+}
+
+/// One neighbour in a [`RelationshipGroup`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelationshipItem {
+    /// The neighbour's title (or its authored name when unresolved).
+    pub name: String,
+    /// The neighbour note's URL, only when the index resolved it to a note.
+    /// Never built from frontmatter text: it is the index's own `url_path`
+    /// (made page-relative in static builds by `page_context::insert_contact`).
+    pub url: Option<String>,
+    /// The edge's optional `label` and its attributes ("married 1925"), in
+    /// that order, joined with ` · `.
+    pub note: Option<String>,
 }
 
 /// How a field's values become links.
@@ -465,8 +495,47 @@ impl Contact {
             born_place,
             died_place,
             places,
+            relationships: Vec::new(),
             problems,
         }
+    }
+
+    /// Fills [`Self::relationships`] from the note's resolved relationships —
+    /// the same entries the info panel lists from `links.json`/`site.json`
+    /// (declared, inverse/symmetric-derived and the implied `employer`).
+    ///
+    /// Grouped by predicate; groups whose type the registry knows come first,
+    /// in the registry's (name) order, the info panel's; unknown predicates
+    /// follow. Within a group the index's order (by neighbour title) is kept.
+    /// One pass and one lookup per group, no I/O.
+    pub fn set_relationships(
+        &mut self,
+        relationships: &[crate::relationships::ResolvedRelationship],
+        registry: &crate::relationships::RelationTypeRegistry,
+    ) {
+        let mut groups: Vec<(String, Vec<RelationshipItem>)> = Vec::new();
+        for rel in relationships {
+            let item = RelationshipItem {
+                name: rel.neighbor_title.clone(),
+                url: (rel.resolved && !rel.neighbor.is_empty()).then(|| rel.neighbor.clone()),
+                note: relationship_note(rel.label.as_deref(), &rel.attributes),
+            };
+            match groups.iter_mut().find(|(p, _)| *p == rel.predicate) {
+                Some((_, items)) => items.push(item),
+                None => groups.push((rel.predicate.clone(), vec![item])),
+            }
+        }
+        groups.sort_by_cached_key(|(predicate, _)| {
+            (registry.get(predicate).is_none(), predicate.to_lowercase())
+        });
+        self.relationships = groups
+            .into_iter()
+            .map(|(predicate, items)| RelationshipGroup {
+                label: registry.display_label(&predicate, items.len()),
+                predicate,
+                items,
+            })
+            .collect();
     }
 
     /// Fills [`Company::url`] from the note's resolved relationships: the
@@ -499,6 +568,32 @@ impl Contact {
             })
             .map(|r| r.neighbor.clone());
     }
+}
+
+/// An edge's label plus its attributes formatted the info panel's way
+/// (`key value`, underscores as spaces), joined with ` · `; `None` when there
+/// is neither. Structured attribute values are skipped, not stringified.
+fn relationship_note(
+    label: Option<&str>,
+    attributes: &std::collections::BTreeMap<String, Value>,
+) -> Option<String> {
+    let parts: Vec<String> = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .into_iter()
+        .chain(attributes.iter().filter_map(|(key, value)| {
+            let value = match value {
+                Value::Array(items) => {
+                    let texts: Vec<String> = items.iter().filter_map(scalar_text).collect();
+                    (!texts.is_empty()).then(|| texts.join(", "))
+                }
+                other => scalar_text(other),
+            }?;
+            Some(format!("{} {value}", key.replace('_', " ")))
+        }))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// The text of a scalar YAML/JSON value, trimmed; `None` for empty strings,
@@ -1275,6 +1370,86 @@ mod tests {
             c.company.as_ref().unwrap().url.as_deref(),
             Some("/orgs/acme/")
         );
+    }
+
+    // ----- relationships -----
+
+    fn rel(
+        predicate: &str,
+        name: &str,
+        url: &str,
+        label: Option<&str>,
+        attrs: &[(&str, Value)],
+    ) -> crate::relationships::ResolvedRelationship {
+        crate::relationships::ResolvedRelationship {
+            rel_type: predicate.into(),
+            predicate: predicate.into(),
+            neighbor: url.into(),
+            neighbor_title: name.into(),
+            neighbor_raw: format!("[[{name}]]"),
+            resolved: !url.is_empty(),
+            direction: crate::relationships::Direction::Outgoing,
+            label: label.map(str::to_string),
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            derived: false,
+            implied: false,
+        }
+    }
+
+    #[test]
+    fn set_relationships_groups_labels_and_links() {
+        let registry = crate::relationships::RelationTypeRegistry::from_types(
+            &crate::config::default_relationship_types(),
+        );
+        let mut c = contact("type: person\ntitle: John\n");
+        c.set_relationships(
+            &[
+                rel("child", "George", "/people/george/", None, &[]),
+                rel("child", "Mary", "", None, &[]),
+                rel("mentor", "Yoda", "", None, &[]),
+                rel(
+                    "spouse",
+                    "Jane",
+                    "/people/jane/",
+                    Some("second marriage"),
+                    &[
+                        ("married", json!(1925)),
+                        ("place_of_marriage", json!("Paris")),
+                        ("witnesses", json!(["Al", "Bo"])),
+                        ("extra", json!({"nested": 1})),
+                    ],
+                ),
+            ],
+            &registry,
+        );
+        let rows: Vec<(&str, &str, usize)> = c
+            .relationships
+            .iter()
+            .map(|g| (g.predicate.as_str(), g.label.as_str(), g.items.len()))
+            .collect();
+        // Registry types first, in name order; an unknown type after them.
+        assert_eq!(
+            rows,
+            [
+                ("child", "Children", 2),
+                ("spouse", "Spouse", 1),
+                ("mentor", "Mentor", 1)
+            ]
+        );
+        let children = &c.relationships[0].items;
+        assert_eq!(children[0].url.as_deref(), Some("/people/george/"));
+        assert_eq!(children[1].url, None, "an unresolved name is plain text");
+        assert_eq!(
+            c.relationships[1].items[0].note.as_deref(),
+            Some("second marriage · married 1925 · place of marriage Paris · witnesses Al, Bo")
+        );
+        assert_eq!(children[0].note, None);
+
+        c.set_relationships(&[], &registry);
+        assert!(c.relationships.is_empty());
     }
 
     // ----- aliases -----

@@ -299,6 +299,19 @@ impl RelationTypeRegistry {
             .map(str::to_string)
     }
 
+    /// The display label for a predicate: the registry's singular label for one
+    /// neighbour, its plural label otherwise. An unknown type falls back to the
+    /// title-cased name (plus `s` when plural) — the same fallback the info
+    /// panel applies, so the card and the panel name a group alike.
+    pub fn display_label(&self, name: &str, count: usize) -> String {
+        match (self.get(name), count == 1) {
+            (Some(t), true) => t.singular_label(),
+            (Some(t), false) => t.plural_label(),
+            (None, true) => crate::config::title_case_word(name.trim()),
+            (None, false) => format!("{}s", crate::config::title_case_word(name.trim())),
+        }
+    }
+
     /// Returns the canonical (configured) casing for a relation-type name,
     /// falling back to the input trimmed when the type is unknown.
     fn canonical_name(&self, name: &str) -> String {
@@ -1370,6 +1383,41 @@ pub fn build_relationships(
     }
 }
 
+/// The relationships one note declares, framed from its own viewpoint, for a
+/// viewer that has **no repository index** (QuickLook previews a single file).
+///
+/// Runs the one note through [`build_relationships`], so registry semantics are
+/// exactly the index's: inverse/symmetric predicates, the implicit `employer`
+/// edge of a wikilinked `company` (dropped when the registry lacks the type),
+/// skipped self-references and third-party edges (`from` *and* `to` naming
+/// other notes — this note is neither endpoint). With no other note known,
+/// every neighbour comes back unresolved (`resolved: false`, empty
+/// `neighbor`), so nothing built from the result can be a link.
+pub fn standalone_relationships(
+    title: &str,
+    declared: Vec<RawRelationship>,
+    registry: &RelationTypeRegistry,
+) -> Vec<ResolvedRelationship> {
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    // A URL no real note can have, so no authored endpoint resolves to it by
+    // path; the note itself is only ever the anchor.
+    const ANCHOR: &str = "/.mbr/standalone-note/";
+    let note = NoteRelInput {
+        url: ANCHOR.to_string(),
+        title: title.to_string(),
+        stem: String::new(),
+        aliases: Vec::new(),
+        is_index: true,
+        relationships: declared,
+    };
+    build_relationships(std::slice::from_ref(&note), registry, &[])
+        .by_note
+        .remove(ANCHOR)
+        .unwrap_or_default()
+}
+
 /// Records an ambiguous endpoint against the note that declared it *and* against
 /// the per-name table used for the capped warning summary.
 ///
@@ -1813,6 +1861,58 @@ mod tests {
             label: None,
             attributes: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn display_label_uses_registry_then_falls_back() {
+        let registry =
+            RelationTypeRegistry::from_types(&crate::config::default_relationship_types());
+        assert_eq!(registry.display_label("child", 1), "Child");
+        assert_eq!(registry.display_label("child", 2), "Children");
+        assert_eq!(registry.display_label("Spouse", 1), "Spouse");
+        assert_eq!(registry.display_label("mentor", 1), "Mentor");
+        assert_eq!(registry.display_label("mentor", 3), "Mentors");
+    }
+
+    /// QuickLook's view of a note: its own declarations framed from its
+    /// viewpoint, never a link, third-party and implicit-without-type edges gone.
+    #[test]
+    fn standalone_relationships_frame_the_note_and_resolve_nothing() {
+        let registry =
+            RelationTypeRegistry::from_types(&crate::config::default_relationship_types());
+        let yaml = parse_yaml(concat!(
+            "type: person\n",
+            "company: \"[[Acme]]\"\n",
+            "relationships:\n",
+            "  - {type: spouse, to: \"[[Jane Doe]]\", label: second marriage}\n",
+            "  - {type: parent, from: \"[[George]]\"}\n",
+            "  - {type: parent, from: \"[[A]]\", to: \"[[B]]\"}\n",
+            "  - {type: sibling, to: \"[[John Doe]]\"}\n",
+        ));
+        let rels = standalone_relationships("John Doe", parse_relationships(&yaml), &registry);
+        let seen: Vec<(&str, &str)> = rels
+            .iter()
+            .map(|r| (r.predicate.as_str(), r.neighbor_title.as_str()))
+            .collect();
+        // `from: George` with `parent` reads "I am George's parent": George is
+        // my child. The A→B edge is about two other notes; the sibling edge
+        // names the note itself.
+        assert_eq!(
+            seen,
+            [
+                ("child", "George"),
+                ("employer", "Acme"),
+                ("spouse", "Jane Doe")
+            ]
+        );
+        assert!(rels.iter().all(|r| !r.resolved && r.neighbor.is_empty()));
+        assert_eq!(rels[2].label.as_deref(), Some("second marriage"));
+
+        // Without `employer` in the registry the implied edge does not exist.
+        let bare = RelationTypeRegistry::from_types(&[symmetric_type("spouse")]);
+        let rels = standalone_relationships("John Doe", parse_relationships(&yaml), &bare);
+        assert!(rels.iter().all(|r| r.predicate != "employer"), "{rels:?}");
+        assert!(standalone_relationships("x", Vec::new(), &bare).is_empty());
     }
 
     fn parse_yaml(s: &str) -> Yaml {
