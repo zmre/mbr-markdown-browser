@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { isEditEnabled } from './shared.js';
+import { getTagSources, isEditEnabled } from './shared.js';
 import { isInputTarget, isModalOpen } from './mbr-keys.js';
 import {
   getEditToken,
@@ -240,6 +240,8 @@ export class MbrEditorElement extends LitElement {
         token: getEditToken(),
         tokenRequired: isEditTokenRequired(),
         onToken: (token: string) => setEditToken(token),
+        // The properties editor's tag fields; the chunk cannot read the page config itself.
+        tagSources: getTagSources().map((s) => ({ field: s.field, label: s.label, label_plural: s.labelPlural })),
         // Fired once the editor modal is on screen: hand off from our spinner.
         onReady: () => {
           this._isOpen = true;

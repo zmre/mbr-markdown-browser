@@ -163,6 +163,10 @@ With [editing](../modes/editing/) enabled, `e` opens the editor for the current 
 | `Cmd+S` / `Ctrl+S` | Save |
 | `Esc` | Close the ⋯ menu if it is open, otherwise close the editor (asking first if there are unsaved changes) |
 | `↑` / `↓` | Move through the ⋯ menu |
+| `Cmd+;` / `Ctrl+;` | Add a property (in the Properties form) |
+
+The Properties panel has more keys of its own; see
+[Editing Properties](../modes/editing-frontmatter/#keyboard-shortcuts).
 
 ## Fuzzy Nav Modal (when open)
 

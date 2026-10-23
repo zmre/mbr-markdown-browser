@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { enhanceBreadcrumbs, EXPANDED_CLASS, MORE_CLASS } from './breadcrumbs.ts'
 import tasksPanelSource from './tasks/mbr-tasks-panel.ts?raw'
 import editorSource from './editor-crepe.ts?raw'
+import { fmEditorCss } from './frontmatter/fm-styles.ts'
 import searchSource from './mbr-search.ts?raw'
 import infoSource from './mbr-info.ts?raw'
 import pageErrorsSource from './mbr-page-errors.ts?raw'
@@ -10,6 +11,7 @@ declare const __MBR_THEME_CSS__: string
 declare const __MBR_HEAD_TEMPLATE__: string
 const themeCss = __MBR_THEME_CSS__
 const headTemplate = __MBR_HEAD_TEMPLATE__
+const fmCss = fmEditorCss().slice(fmEditorCss().indexOf('@media (max-width: 600px)'))
 
 function trail(names: string[]): HTMLElement {
   document.body.innerHTML = `<nav class="container breadcrumbs"><ul>${names
@@ -91,7 +93,8 @@ describe('narrow-screen rules', () => {
   it('keeps every editor field at 16px (no iOS focus zoom) and its targets at 44px', () => {
     const narrow = editorSource.slice(editorSource.indexOf('export const NARROW_CSS'))
     expect(narrow).toMatch(/\.mbr-editor-token \{[^}]*font-size: 16px/)
-    expect(narrow).toMatch(/\.mbr-editor-fm textarea \{ font-size: 16px; \}/)
+    // The properties form: its own sheet (fm-styles.ts) carries the narrow rules.
+    expect(fmCss).toMatch(/\.mbr-fm input\.fm-in, \.mbr-fm textarea\.fm-in, \.mbr-fm select\.fm-in \{ font-size: 16px; min-height: 44px; \}/)
     expect(narrow).toMatch(/\.mbr-picker-field input\[type="text"\], \.mbr-picker-field textarea \{ font-size: 16px; \}/)
     expect(narrow).toContain('min-height: 44px')
     // The pickers are cards anchored a fixed distance below the top inset, so

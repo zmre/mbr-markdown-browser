@@ -23,6 +23,7 @@ description: The fast, complete markdown browser and static site generator
 | [Getting Started](getting-started/) | Installation and first steps |
 | [Modes of Operation](modes/) | GUI, Server, Build, and QuickLook |
 | [In-Browser Editing](modes/editing/) | Edit markdown from the browser (server/GUI) |
+| [Editing Properties](modes/editing-frontmatter/) | Edit frontmatter as a form or as YAML, with suggestions from your notes |
 | [Review Notes](modes/review/) | Annotate a page and copy the review out as markdown (server/GUI) |
 | [Customization](customization/) | Themes, templates, and components |
 | [Markdown Extensions](markdown/) | Extended syntax reference |

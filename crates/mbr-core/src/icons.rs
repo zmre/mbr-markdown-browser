@@ -38,11 +38,16 @@ pub const ICONS: &[(&str, &str)] = &[
         "arrow-up-right",
         include_str!("../templates/icons/arrow-up-right.svg"),
     ),
+    ("braces", include_str!("../templates/icons/braces.svg")),
     (
         "building-2",
         include_str!("../templates/icons/building-2.svg"),
     ),
     ("calendar", include_str!("../templates/icons/calendar.svg")),
+    (
+        "calendar-clock",
+        include_str!("../templates/icons/calendar-clock.svg"),
+    ),
     (
         "calendar-days",
         include_str!("../templates/icons/calendar-days.svg"),
@@ -72,6 +77,7 @@ pub const ICONS: &[(&str, &str)] = &[
         "circle-help",
         include_str!("../templates/icons/circle-help.svg"),
     ),
+    ("code", include_str!("../templates/icons/code.svg")),
     ("ellipsis", include_str!("../templates/icons/ellipsis.svg")),
     ("expand", include_str!("../templates/icons/expand.svg")),
     (
@@ -98,6 +104,7 @@ pub const ICONS: &[(&str, &str)] = &[
         "gallery-vertical-end",
         include_str!("../templates/icons/gallery-vertical-end.svg"),
     ),
+    ("hash", include_str!("../templates/icons/hash.svg")),
     ("house", include_str!("../templates/icons/house.svg")),
     ("image", include_str!("../templates/icons/image.svg")),
     ("info", include_str!("../templates/icons/info.svg")),
@@ -105,6 +112,8 @@ pub const ICONS: &[(&str, &str)] = &[
         "lightbulb",
         include_str!("../templates/icons/lightbulb.svg"),
     ),
+    ("link", include_str!("../templates/icons/link.svg")),
+    ("list", include_str!("../templates/icons/list.svg")),
     (
         "list-checks",
         include_str!("../templates/icons/list-checks.svg"),
@@ -150,10 +159,17 @@ pub const ICONS: &[(&str, &str)] = &[
         include_str!("../templates/icons/square-pen.svg"),
     ),
     ("star", include_str!("../templates/icons/star.svg")),
+    ("tag", include_str!("../templates/icons/tag.svg")),
+    ("text", include_str!("../templates/icons/text.svg")),
     (
         "text-cursor-input",
         include_str!("../templates/icons/text-cursor-input.svg"),
     ),
+    (
+        "toggle-left",
+        include_str!("../templates/icons/toggle-left.svg"),
+    ),
+    ("trash-2", include_str!("../templates/icons/trash-2.svg")),
     (
         "triangle-alert",
         include_str!("../templates/icons/triangle-alert.svg"),

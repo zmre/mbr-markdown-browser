@@ -109,7 +109,9 @@ as before.
 ## The `relationships` field
 
 Relationships are a single generic array of edge objects, so the same mechanism
-works for any domain (genealogy is just one):
+works for any domain (genealogy is just one). The in-browser editor has a
+relationship builder that picks the type and the note for you and reads each
+edge back as a sentence; see [Editing Properties](../modes/editing-frontmatter/#relationships).
 
 ```yaml
 ---

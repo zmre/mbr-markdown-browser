@@ -96,6 +96,8 @@ A few details worth knowing:
 card on `person` / `organization` notes (see [Contacts](contacts/)) and the
 genealogy charts. See
 [The `type` field](relationships/#the-type-field) for the rest of what it does.
+The in-browser editor suggests the types mbr gives meaning to, then the ones
+your notes use ([Editing Properties](../modes/editing-frontmatter/#choosing-a-type)).
 
 ## Which One Should I Use?
 

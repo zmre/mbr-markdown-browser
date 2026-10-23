@@ -62,9 +62,10 @@ included. For remote access, see [Remote editing](#remote-editing).
 
 1. Open a markdown page and click the pencil button (top right) or press `e`.
 2. The editor loads the file. The **body** is edited in the WYSIWYG Crepe
-   editor; any **YAML frontmatter** is shown in a separate raw-text field (open
-   the "YAML frontmatter" section to edit it). Frontmatter is preserved
-   verbatim — comments and key order are not reformatted.
+   editor; any **YAML frontmatter** is shown above it as **Properties**: a form
+   with a widget per field, plus a YAML tab for the source (see
+   [Editing Properties](editing-frontmatter/)). An edit changes only the value
+   you edited — comments, key order and unknown keys are kept.
 3. Click **Save** (top right) or press `Cmd+S` / `Ctrl+S`. On success the file
    is written and the page reloads to show it.
 4. Click **Cancel** (top left), press `Esc`, or click outside the editor to
@@ -530,3 +531,4 @@ flags.
 | `e` | Open the editor for the current file (when editing is enabled) |
 | `Cmd+S` / `Ctrl+S` | Save |
 | `Esc` | Close the ⋯ menu, else close the editor (asking first about unsaved changes) |
+| `Cmd+;` / `Ctrl+;` | Add a property (in the Properties form; see [Editing Properties](editing-frontmatter/#keyboard-shortcuts)) |

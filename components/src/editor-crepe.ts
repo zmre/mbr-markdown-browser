@@ -19,6 +19,13 @@ import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
 import { documentToSave, frontmatterRewrites, openDocument, withAuthoredBlankLines } from './editor-frontmatter.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
+import { FM_CHANGE_EVENT } from './frontmatter/properties-form.js';
+import { openFrontmatter } from './frontmatter/model.js';
+import { builtinCatalog, type TagSourceLike } from './frontmatter/fields.js';
+import { inferCatalog } from './frontmatter/infer.js';
+import { MBR_WIDGETS } from './frontmatter/mbr-widgets.js';
+import { createActorMemory } from './frontmatter/mbr-logic.js';
+import type { RelationTypeConfig } from './graph/relationship-graph.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
 import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
 import { createLinkAutocompletePlugin, AUTOCOMPLETE_CSS } from './editor-link-autocomplete.js';
@@ -112,6 +119,12 @@ export interface OpenEditorOptions {
    * (the iOS app's `mbr:` scheme), so the page under the editor shows the edit.
    */
   onSaved?: () => void;
+  /**
+   * The repository's tag fields (`window.__MBR_CONFIG__.tagSources`), for the
+   * properties editor. Passed in because this chunk must not import
+   * `shared.ts`; absent means the default `tags`.
+   */
+  tagSources?: readonly TagSourceLike[];
 }
 
 /**
@@ -325,6 +338,11 @@ const THEME_CSS = `
 }
 `;
 
+/*
+ * The modal takes most of a desktop window (the properties form uses the
+ * width); the prose keeps a readable measure, its text column capped at 48em
+ * and centred, never less than Crepe's 120px gutters for the block handle.
+ */
 const MODAL_CSS = `
 .mbr-editor-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2000;
@@ -333,12 +351,18 @@ const MODAL_CSS = `
 .mbr-editor-modal {
   background: var(--pico-background-color, #fff);
   color: var(--pico-color, #1a1a1a);
-  width: min(920px, 96vw); height: min(90vh, 900px);
+  width: min(1400px, 92vw); height: min(1200px, 94vh); height: min(1200px, 94svh);
   display: flex; flex-direction: column;
   border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.35);
   overflow: hidden;
 }
 .mbr-editor-body { flex: 1; display: flex; flex-direction: column; overflow: auto; }
+@media (min-width: 601px) {
+  .mbr-editor-modal .milkdown .ProseMirror {
+    padding-left: max(120px, calc((100% - 48em) / 2));
+    padding-right: max(120px, calc((100% - 48em) / 2));
+  }
+}
 .mbr-editor-notice {
   display: flex; align-items: flex-start; gap: 0.5rem;
   padding: 0.5rem 1rem; font-size: 0.85rem;
@@ -353,12 +377,10 @@ const MODAL_CSS = `
 .mbr-editor-notice-dismiss:hover { opacity: 1; background: var(--mbr-control-hover-bg, rgba(127,127,127,0.12)); }
 .mbr-editor-fm { border-bottom: 1px solid var(--pico-muted-border-color, #e0e0e0); }
 .mbr-editor-fm summary { cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem; opacity: 0.85; }
-.mbr-editor-fm textarea {
-  width: 100%; box-sizing: border-box; border: none; resize: vertical;
-  min-height: 8rem; font-family: var(--pico-font-family-monospace, monospace);
-  font-size: 0.85rem; padding: 0.5rem 1rem; background: var(--pico-code-background-color, #f6f8fa); color: inherit;
-}
-.mbr-editor-crepe { flex: 1; min-height: 12rem; overflow: auto; }
+/* The body (frontmatter + document) is the one vertical scroller: the
+   document grows to its content (flex-shrink 0, so it never scrolls inside
+   the body), at least 36rem but never more than most of a small screen. */
+.mbr-editor-crepe { flex: 1 0 auto; min-height: min(36rem, 70vh); min-height: min(36rem, 70svh); overflow-x: auto; }
 .mbr-editor-footer {
   display: flex; align-items: center; flex-wrap: wrap; gap: 0 0.5rem;
   padding: 0 0.5rem; min-height: 44px;
@@ -403,7 +425,7 @@ export const NARROW_CSS = `
   .mbr-editor-footer .status { flex: 1 1 100%; order: -1; }
   .mbr-editor-footer .status:empty { display: none; }
   .mbr-editor-modal .mbr-editor-token { min-width: 0; flex: 1 1 100%; font-size: 16px; }
-  .mbr-editor-fm textarea { font-size: 16px; }
+  .mbr-editor-fm summary { min-height: 44px; display: flex; align-items: center; }
   .mbr-picker-field input[type="text"], .mbr-picker-field textarea { font-size: 16px; }
   /* A card at a fixed distance below the top inset (the native bar in the
    * app, the notch in a browser), never a bottom sheet: the list shrinks as
@@ -598,6 +620,13 @@ function insertFootnote(ctx: Ctx): void {
 /** Builds the editing modal, loads the file, and wires up save/auth/errors. */
 export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   injectStyles();
+
+  // site.json, shared by the pickers, the link autocomplete and the
+  // properties editor. The properties editor reads it once per session; a
+  // `[[` session and a path picker each ask for a fresh one (a page created
+  // or moved since must show), which the others then share.
+  const siteIndex = memoizeSiteIndex();
+  const freshSiteFiles = async (): Promise<SiteMarkdownFile[]> => (await siteIndex.fresh()).markdown_files;
 
   // Bearer token for this editor session. Seeded from the page and published
   // straight back to it on every keystroke; never persisted here or anywhere.
@@ -829,19 +858,40 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const bodyWrap = document.createElement('div');
   bodyWrap.className = 'mbr-editor-body';
 
-  // Frontmatter editor (raw YAML), collapsed when empty.
+  // Frontmatter: the properties editor (a form and the YAML), collapsed when
+  // the note has none. Its `text` is the YAML exactly as loaded until a
+  // property is edited, and then changed only where it was edited.
   const fmDetails = document.createElement('details');
   fmDetails.className = 'mbr-editor-fm';
   if (frontmatter) fmDetails.open = true;
   const fmSummary = document.createElement('summary');
-  fmSummary.textContent = 'YAML frontmatter';
-  const fmTextarea = document.createElement('textarea');
-  fmTextarea.value = frontmatter ?? '';
-  fmTextarea.spellcheck = false;
-  fmTextarea.setAttribute('aria-label', 'YAML frontmatter');
-  fmDetails.appendChild(fmSummary);
-  fmDetails.appendChild(fmTextarea);
+  fmSummary.textContent = frontmatter ? 'Properties' : 'Add properties';
+  const fmEditor = document.createElement('mbr-fm-editor');
+  fmEditor.model = openFrontmatter(frontmatter ?? '');
+  fmEditor.catalog = builtinCatalog({ tagSources: opts.tagSources });
+  fmEditor.widgets = MBR_WIDGETS;
+  fmEditor.actorMemory = PAGE_ACTOR_MEMORY;
+  fmEditor.addEventListener(FM_CHANGE_EVENT, () => {
+    fmSummary.textContent = fmEditor.text.trim() ? 'Properties' : 'Add properties';
+  });
+  fmDetails.append(fmSummary, fmEditor);
   bodyWrap.appendChild(fmDetails);
+  // What the vault knows (the relationship registry, the keys and values its
+  // notes use) comes from site.json, which can be large: fetched the first
+  // time the properties are used, not on every open.
+  let fmKnowledge: Promise<void> | null = null;
+  fmDetails.addEventListener('focusin', () => {
+    fmKnowledge ??= siteIndex()
+      .then((index) => {
+        fmEditor.catalog = builtinCatalog({ tagSources: opts.tagSources, relationshipTypes: index.relationship_types });
+        const tagFields = opts.tagSources?.length ? opts.tagSources.map((s) => s.field) : undefined;
+        fmEditor.inferred = inferCatalog(index.markdown_files, { tagFields });
+        fmEditor.siteFiles = index.markdown_files;
+      })
+      .catch(() => {
+        fmKnowledge = null;
+      });
+  });
 
   // Crepe body editor.
   const crepeHost = document.createElement('div');
@@ -986,7 +1036,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     // editor before create() — the Crepe 7.21.3 plugin-injection point.
     crepe.editor.use(
       createLinkAutocompletePlugin({
-        fetchSiteFiles: fetchSiteMarkdownFiles,
+        fetchSiteFiles: freshSiteFiles,
         currentUrl: () => safeDecodePath(window.location.pathname),
       }),
     );
@@ -1015,16 +1065,26 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     if (!crepe) return savedContent;
     const next = saver.body();
     wholeBody = next.whole;
-    return documentToSave(opened, fmTextarea.value, next.body);
+    return documentToSave(opened, fmEditor.text, next.body);
   };
   // Baseline for dirty-tracking: what a save would write right now (the
-  // loaded file itself when the round trip is exact).
-  const isDirty = (): boolean => ready && currentContent() !== savedContent;
+  // loaded file itself when the round trip is exact). A property edit still
+  // being typed (an open "Edit as YAML", a tag without Enter, a rename) is
+  // not in `fmEditor.text` yet, but it is unsaved.
+  const isDirty = (): boolean => ready && (fmEditor.hasPendingEdits || currentContent() !== savedContent);
+  /** Puts those pending property edits into the text a save writes; false (and why, on the status line) when one is invalid. */
+  const flushProperties = (): boolean => {
+    const problem = fmEditor.flushPending();
+    if (problem === null) return true;
+    fmDetails.open = true;
+    setStatus(problem, 'error');
+    return false;
+  };
   savedContent = currentContent();
   ready = true;
 
   const doSave = async (): Promise<boolean> => {
-    if (!crepe || !ready) return false;
+    if (!crepe || !ready || !flushProperties()) return false;
     // Belt and braces alongside the `input` listener: a value set some way that
     // fires no input event still reaches the request and the main bundle.
     sessionToken = tokenInput.value.trim();
@@ -1071,6 +1131,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   /** A save the reader asked for: on success, let the trigger refresh the page. */
   const saveAndNotify = async (): Promise<void> => {
     if (saveBtn.hasAttribute('aria-busy')) return;
+    if (!flushProperties()) return;
     // Nothing changed: write nothing. (The baseline is what a save would
     // write now, which is the file itself unless a block could not be paired
     // — `editor-minimal-diff.ts` — so skipping the request is what leaves the
@@ -1122,7 +1183,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     const dest = await openPathPicker({
       mode: 'new',
       currentFsPath: opts.filePath,
-      fetchSiteFiles: fetchSiteMarkdownFiles,
+      fetchSiteFiles: freshSiteFiles,
     });
     if (dest) await doCreate(dest.path, dest.createDirs);
   };
@@ -1133,7 +1194,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       mode: 'move',
       currentFsPath: opts.filePath,
       select,
-      fetchSiteFiles: fetchSiteMarkdownFiles,
+      fetchSiteFiles: freshSiteFiles,
     });
     if (dest) await doMove(dest.path, dest.createDirs);
   };
@@ -1460,12 +1521,70 @@ function safeDecodePath(p: string): string {
   }
 }
 
-/** Fetches the fresh `markdown_files` array from site.json (server mode). */
-async function fetchSiteMarkdownFiles(): Promise<SiteMarkdownFile[]> {
+/**
+ * The reader's OKF actor id for the properties form's "Me" shortcut, for the
+ * life of the page (this chunk loads once per page). Memory only: see
+ * `ActorMemory` in `frontmatter/mbr-logic.ts`.
+ */
+const PAGE_ACTOR_MEMORY = createActorMemory();
+
+/** The parts of site.json the editor reads. */
+export interface SiteIndex {
+  readonly markdown_files: SiteMarkdownFile[];
+  /** The relationship registry (`relationship_types`), empty when there is none. */
+  readonly relationship_types: RelationTypeConfig[];
+}
+
+/** Fetches a fresh site.json (server mode). */
+async function fetchSiteIndex(): Promise<SiteIndex> {
   const resp = await fetch('/.mbr/site.json', { credentials: 'same-origin' });
   if (!resp.ok) throw new Error(`site.json ${resp.status}`);
-  const data = (await resp.json()) as { markdown_files?: SiteMarkdownFile[] };
-  return data.markdown_files ?? [];
+  const data = (await resp.json()) as { markdown_files?: SiteMarkdownFile[]; relationship_types?: RelationTypeConfig[] };
+  return { markdown_files: data.markdown_files ?? [], relationship_types: data.relationship_types ?? [] };
+}
+
+/** site.json for one editor session: see {@link memoizeSiteIndex}. */
+export interface SiteIndexMemo {
+  /** The last index fetched (fetching the first time). */
+  (): Promise<SiteIndex>;
+  /** A fresh fetch, unless one is already in flight, which is shared; later plain calls get its answer. */
+  fresh(): Promise<SiteIndex>;
+}
+
+/**
+ * `fetcher` (site.json by default) memoized: plain calls share the last
+ * request, `fresh()` starts a new one (concurrent callers share a request in
+ * flight). A failed request is forgotten, so the next call retries.
+ */
+export function memoizeSiteIndex(fetcher: () => Promise<SiteIndex> = fetchSiteIndex): SiteIndexMemo {
+  let pending: Promise<SiteIndex> | null = null;
+  let inFlight = false;
+  const start = (): Promise<SiteIndex> => {
+    inFlight = true;
+    const request: Promise<SiteIndex> = fetcher().then(
+      (index) => {
+        if (pending === request) inFlight = false;
+        return index;
+      },
+      (err: unknown) => {
+        if (pending === request) {
+          pending = null;
+          inFlight = false;
+        }
+        throw err;
+      },
+    );
+    pending = request;
+    return request;
+  };
+  const memo = (): Promise<SiteIndex> => pending ?? start();
+  memo.fresh = (): Promise<SiteIndex> => (pending && inFlight ? pending : start());
+  return memo;
+}
+
+/** Fetches the fresh `markdown_files` array from site.json (server mode). */
+async function fetchSiteMarkdownFiles(): Promise<SiteMarkdownFile[]> {
+  return (await fetchSiteIndex()).markdown_files;
 }
 
 /** Fetches the fresh `other_files` array from media.json (server mode). */
