@@ -2437,6 +2437,79 @@ public func FfiConverterTypeQuickLookError_lower(_ value: QuickLookError) -> Rus
     return FfiConverterTypeQuickLookError.lower(value)
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum ThumbnailDocument: Equatable, Hashable {
+    
+    case image(path: String
+    )
+    case page(document: PreviewDocument
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ThumbnailDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeThumbnailDocument: FfiConverterRustBuffer {
+    typealias SwiftType = ThumbnailDocument
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ThumbnailDocument {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .image(path: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .page(document: try FfiConverterTypePreviewDocument.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ThumbnailDocument, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .image(path):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(path, into: &buf)
+            
+        
+        case let .page(document):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypePreviewDocument.write(document, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeThumbnailDocument_lift(_ buf: RustBuffer) throws -> ThumbnailDocument {
+    return try FfiConverterTypeThumbnailDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeThumbnailDocument_lower(_ value: ThumbnailDocument) -> RustBuffer {
+    return FfiConverterTypeThumbnailDocument.lower(value)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2655,6 +2728,14 @@ public func renderPreviewWithConfig(filePath: String, configRoot: String?, confi
     )
 })
 }
+public func renderThumbnail(filePath: String, configRoot: String?)throws  -> ThumbnailDocument  {
+    return try  FfiConverterTypeThumbnailDocument_lift(try rustCallWithError(FfiConverterTypeQuickLookError_lift) {
+    uniffi_mbr_ffi_fn_func_render_thumbnail(
+        FfiConverterString.lower(filePath),
+        FfiConverterOptionString.lower(configRoot),$0
+    )
+})
+}
 /**
  * The current setting of [`set_materialize_dataless_files`].
  */
@@ -2698,6 +2779,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_func_render_preview_with_config() != 51139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mbr_ffi_checksum_func_render_thumbnail() != 52021) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mbr_ffi_checksum_func_materializes_dataless_files() != 15104) {
