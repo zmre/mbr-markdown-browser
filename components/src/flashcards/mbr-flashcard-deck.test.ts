@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import './mbr-flashcard-deck.js'
-import { DECK_CLOSE_EVENT, SHORTCUT_GROUPS, type MbrFlashcardDeckElement } from './mbr-flashcard-deck.js'
+import {
+  DECK_CLOSE_EVENT,
+  SHORTCUT_GROUPS,
+  TOAST_MS,
+  concentricToast,
+  type MbrFlashcardDeckElement,
+} from './mbr-flashcard-deck.js'
 import { DECK_STYLE_ID } from './styles.js'
 import { SECTIONED_DECK_HTML, installDeckPage } from './test-fixtures.js'
 import type { ReviewOutcome, ReviewRecorder, ReviewTarget } from './types.js'
@@ -500,14 +506,22 @@ describe('concentric mode', () => {
     expect(deck.querySelector('.mbr-fc-banner')).toBeNull()
   })
 
+  const toast = () => deck.querySelector<HTMLElement>('.mbr-fc-toast')!
+  const pill = () => deck.querySelector('.mbr-fc-toast-pill')?.textContent
+
   it('updates the Cards box when the stack grows, and reports mastery', async () => {
     await mount({ html: SECTIONED_DECK_HTML })
     await select('concentric')
     await setSize(3)
+    // Easy sends each card to the back: three ratings, three distinct cards,
+    // 3 of 3 known — folded in one at a time to 3 of 5 (60% < 70%).
     for (let i = 0; i < 3; i++) await rate('4')
     expect(sizeBox()!.value).toBe('5')
     expect(counter()).toBe('5 in play · 0 left')
-    for (let i = 0; i < 5; i++) await rate('4')
+    // The first card's second Easy in a row retires it; nothing to swap in.
+    await rate('4')
+    expect(counter()).toBe('4 in play · 0 left · 1 discarded')
+    for (let i = 0; i < 20 && !deck.querySelector('.mbr-fc-screen'); i++) await rate('4')
     expect(deck.querySelector('.mbr-fc-screen h3')!.textContent).toBe('Stack mastered')
     const keep = Array.from(deck.querySelectorAll<HTMLButtonElement>('.mbr-fc-screen button')).find(
       (b) => b.textContent!.trim() === 'Keep practising'
@@ -515,7 +529,76 @@ describe('concentric mode', () => {
     keep.click()
     await deck.updateComplete
     expect(card()).not.toBeNull()
-    expect(counter()).toBe('5 in play · 0 left')
+    // Keep practising: the next rating does not land on the screen again.
+    await rate('3')
+    expect(deck.querySelector('.mbr-fc-screen')).toBeNull()
+    expect(card()).not.toBeNull()
+  })
+
+  it('refills a stack that retirement emptied when practising on', async () => {
+    await mount({ html: '<main id="wrapper"><dl><dt data-mbr-line="1">Q</dt><dd>A</dd></dl></main>' })
+    await rate('4') // 1 of 1 known: mastered
+    expect(deck.querySelector('.mbr-fc-screen h3')!.textContent).toBe('Stack mastered')
+    const keep = () =>
+      Array.from(deck.querySelectorAll<HTMLButtonElement>('.mbr-fc-screen button')).find(
+        (b) => b.textContent!.trim() === 'Keep practising'
+      )!
+    keep().click()
+    await deck.updateComplete
+    await rate('4') // second Easy: retired, the stack is empty
+    expect(counter()).toBe('0 in play · 0 left · 1 discarded')
+    expect(deck.querySelector('.mbr-fc-screen p')!.textContent).toContain('1 discarded')
+    keep().click()
+    await deck.updateComplete
+    expect(card()).not.toBeNull()
+    expect(counter()).toBe('1 in play · 0 left')
+  })
+
+  it('toasts cards folded in and retired, and speaks them politely', async () => {
+    await mount({ html: SECTIONED_DECK_HTML })
+    await select('concentric')
+    expect(toast().getAttribute('role')).toBe('status')
+    expect(toast().getAttribute('aria-live')).toBe('polite')
+    expect(pill()).toBeUndefined()
+    // Two cards: Easy, Easy → 2 of 2 known, one folded in (2/3 = 67% stops).
+    await setSize(2)
+    await rate('4')
+    expect(pill()).toBeUndefined()
+    await rate('4')
+    expect(pill()).toBe('+1')
+    expect(toast().textContent).toContain('1 card added')
+    expect(deck.querySelector('.mbr-fc-toast-pill')!.getAttribute('aria-hidden')).toBe('true')
+    // The first card again, Easy: retired, and a pool card swapped in. The new
+    // toast replaces the old one.
+    await rate('4')
+    expect(deck.querySelectorAll('.mbr-fc-toast-pill')).toHaveLength(1)
+    expect(pill()).toBe('\u22121 +1')
+    expect(toast().textContent).toContain('1 card discarded, 1 added')
+  })
+
+  it('takes the toast down after a moment, and on close', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await mount({ html: SECTIONED_DECK_HTML })
+      await select('concentric')
+      await setSize(2)
+      await rate('4')
+      await rate('4')
+      expect(pill()).toBe('+1')
+      vi.advanceTimersByTime(TOAST_MS - 100)
+      await deck.updateComplete
+      expect(pill()).toBe('+1')
+      vi.advanceTimersByTime(100)
+      await deck.updateComplete
+      expect(pill()).toBeUndefined()
+      // A toast still up when the deck closes leaves no timer behind.
+      await rate('4')
+      expect(pill()).toBe('\u22121 +1')
+      deck.remove()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves keys typed in the Cards box to the box', async () => {
@@ -526,6 +609,20 @@ describe('concentric mode', () => {
     await key(' ', box)
     await key('4', box)
     expect(isFlipped()).toBe(false)
+  })
+})
+
+describe('concentricToast', () => {
+  it('says nothing for no change', () => {
+    expect(concentricToast({ added: 0, retired: 0 })).toBeNull()
+  })
+
+  it('shows growth, a swap and both at once with a real minus sign', () => {
+    expect(concentricToast({ added: 2, retired: 0 })).toEqual({ text: '+2', spoken: '2 cards added' })
+    expect(concentricToast({ added: 1, retired: 0 })).toEqual({ text: '+1', spoken: '1 card added' })
+    expect(concentricToast({ added: 0, retired: 1 })).toEqual({ text: '\u22121', spoken: '1 card discarded' })
+    expect(concentricToast({ added: 1, retired: 1 })).toEqual({ text: '\u22121 +1', spoken: '1 card discarded, 1 added' })
+    expect(concentricToast({ added: 2, retired: 1 })).toEqual({ text: '\u22121 +2', spoken: '1 card discarded, 2 added' })
   })
 })
 

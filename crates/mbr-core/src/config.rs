@@ -118,7 +118,8 @@ fn default_graph_depth() -> usize {
 }
 
 /// Default for [`Config::flashcards_concentric_threshold`]: with the default
-/// six-card stack, 70% means five of six first answers rated Good or Easy.
+/// six-card stack, 70% means five of six cards known (rated Good or Easy last,
+/// this session).
 const DEFAULT_FLASHCARDS_CONCENTRIC_THRESHOLD: f64 = 0.7;
 
 fn default_flashcards_concentric_threshold() -> f64 {
@@ -678,8 +679,9 @@ pub struct Config {
     /// Default: 2.
     #[serde(default = "default_graph_depth")]
     pub graph_depth: usize,
-    /// Share of a pass's first answers that must be Good or Easy before the
-    /// flashcard deck's Concentric mode folds two more cards into the stack.
+    /// Share of the stack that must be known (rated Good or Easy last, this
+    /// session) before the flashcard deck's Concentric mode folds another card
+    /// into it; checked after every rating, one card at a time.
     /// Range: greater than 0, at most 1. Default: 0.7.
     #[serde(default = "default_flashcards_concentric_threshold")]
     pub flashcards_concentric_threshold: f64,
