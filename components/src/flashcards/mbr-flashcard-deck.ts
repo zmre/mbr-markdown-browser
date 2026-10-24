@@ -39,8 +39,9 @@
  *
  * # Concentric
  *
- * A small stack that grows as it is learned (`concentric.ts`). It needs no
- * writer: with one (editing on) each rating is saved exactly as spaced
+ * A small stack that grows as it is learned (`concentric.ts`). A rating that
+ * folds cards in or retires one shows a short toast beside the counter
+ * (`−1 +2`), spoken through its own polite live region. It needs no writer: with one (editing on) each rating is saved exactly as spaced
  * repetition saves it; without one — or once a conflict or a 403 has stopped
  * writes (a 403 silently: its notice is kept for spaced repetition) —
  * ratings live in this session only (`card.history` in memory, no write, no
@@ -85,11 +86,13 @@ import {
 } from './session.js'
 import {
   CONCENTRIC_DEFAULT_SIZE,
+  cardsLeft,
   displaySize,
   rateConcentric,
   resizeConcentric,
   setConcentricEligible,
   startConcentric,
+  type ConcentricChange,
   type ConcentricState,
 } from './concentric.js'
 import { offerReload } from '../stale-note.js'
@@ -132,6 +135,30 @@ const CONCENTRIC_HINTS: Readonly<Record<Rating, string>> = {
   hard: 'midway',
   good: 'later',
   easy: 'last',
+}
+
+/** How long a Concentric toast stays up (its CSS animation fades it over the same time). */
+export const TOAST_MS = 1800
+
+/** A Concentric toast: what is shown, and what is spoken. */
+export interface ConcentricToast {
+  /** Compact, e.g. `−1 +2` (a real minus sign, U+2212). */
+  readonly text: string
+  /** For the live region, e.g. `1 card discarded, 2 added`. */
+  readonly spoken: string
+}
+
+/** The toast for a rating's change, or `null` when it added and retired nothing. */
+export function concentricToast(change: ConcentricChange): ConcentricToast | null {
+  const { added, retired } = change
+  if (added <= 0 && retired <= 0) return null
+  const cards = (n: number) => `${n} card${n === 1 ? '' : 's'}`
+  const text = [retired > 0 ? `\u2212${retired}` : '', added > 0 ? `+${added}` : ''].filter(Boolean).join(' ')
+  const spoken =
+    retired > 0
+      ? `${cards(retired)} discarded${added > 0 ? `, ${added} added` : ''}`
+      : `${cards(added)} added`
+  return { text, spoken }
 }
 
 /** One row of the help: the keys as shown, and what they do. */
@@ -240,6 +267,8 @@ export class MbrFlashcardDeckElement extends LitElement {
   @state() private _pending: Rating | null = null
   @state() private _announcement = ''
   @state() private _concentric: ConcentricState | null = null
+  /** The Concentric toast on screen; `id` re-keys it so a new one restarts its fade. */
+  @state() private _toast: (ConcentricToast & { readonly id: number }) | null = null
   /** Ids of the headings the filter keeps; empty means every card. */
   @state() private _filter: ReadonlySet<string> = new Set()
   @state() private _filterOpen = false
@@ -255,6 +284,8 @@ export class MbrFlashcardDeckElement extends LitElement {
   private _filterReturnFocus: HTMLElement | null = null
   private _previousOverflow = ''
   private _resize: ResizeObserver | null = null
+  private _toastTimer: ReturnType<typeof setTimeout> | undefined = undefined
+  private _toastCount = 0
   private _fitFrame = 0
   private _focusCardNext = true
   /** Clones per `index:swap`, so re-renders reuse the same nodes. */
@@ -305,6 +336,7 @@ export class MbrFlashcardDeckElement extends LitElement {
     this._resize?.disconnect()
     this._resize = null
     cancelAnimationFrame(this._fitFrame)
+    this._clearToast()
     document.documentElement.style.overflow = this._previousOverflow
     if (this._previousFocus?.isConnected) this._previousFocus.focus()
   }
@@ -370,6 +402,7 @@ export class MbrFlashcardDeckElement extends LitElement {
     this._nothingDue = undefined
     this._ratingCounts = { again: 0, hard: 0, good: 0, easy: 0 }
     this._fresh = new Set()
+    this._clearToast()
     if (mode === 'srs' && this._pendingRefusal) {
       // Writes were refused earlier this session, silently: say so now that
       // the mode which depends on them was chosen.
@@ -558,7 +591,11 @@ export class MbrFlashcardDeckElement extends LitElement {
     this._goTo(this._position + 1)
   }
 
-  /** Concentric's half of a rating: reinsert, maybe grow, show the next front. */
+  /**
+   * Concentric's half of a rating: reinsert or retire, maybe grow, show the
+   * next front. Cards folded in or retired are the toast's to say, so the
+   * announcement only names the rating.
+   */
   private _rateConcentric(rating: Rating, verb: string): void {
     const before = this._concentric
     if (!before) return
@@ -570,18 +607,41 @@ export class MbrFlashcardDeckElement extends LitElement {
     this._flipped = false
     this._historyOpen = false
     this._focusCardNext = true
+    this._showToast(concentricToast(next.lastChange))
     if (next.mastered) {
       this._finished = true
       this._announcement = 'Stack mastered'
-    } else if (next.stack.length > before.stack.length) {
-      this._announcement = `${verb}: ${RATING_LABELS[rating]}. ${next.stack.length - before.stack.length} more cards folded in`
     } else {
       this._announcement = `${verb}: ${RATING_LABELS[rating]}`
     }
   }
 
-  /** Keep practising a mastered stack: same cards, same order. */
+  /** Show `toast`, replacing any on screen and restarting the timer. */
+  private _showToast(toast: ConcentricToast | null): void {
+    if (!toast) return
+    clearTimeout(this._toastTimer)
+    this._toast = { ...toast, id: ++this._toastCount }
+    this._toastTimer = setTimeout(() => {
+      this._toast = null
+      this._toastTimer = undefined
+    }, TOAST_MS)
+  }
+
+  private _clearToast(): void {
+    clearTimeout(this._toastTimer)
+    this._toastTimer = undefined
+    this._toast = null
+  }
+
+  /**
+   * Keep practising a mastered stack: same cards, same order. A stack that
+   * retirement emptied is refilled to X first (retired cards included, since
+   * nothing else is left), or there would be nothing to practise.
+   */
   private _keepPractising = (): void => {
+    if (this._concentric && this._concentric.stack.length === 0) {
+      this._concentric = resizeConcentric(this._concentric, displaySize(this._concentric), Math.random)
+    }
     this._finished = false
     this._focusCardNext = true
   }
@@ -928,7 +988,10 @@ export class MbrFlashcardDeckElement extends LitElement {
   private _counter(): string {
     if (this._cards.length === 0) return ''
     if (this._mode === 'concentric' && this._concentric) {
-      return `${this._concentric.stack.length} in play · ${this._concentric.pool.length} left`
+      // "Left" is what can still be folded in; retired cards are counted apart.
+      const { stack, retired } = this._concentric
+      const base = `${stack.length} in play · ${cardsLeft(this._concentric)} left`
+      return retired.size > 0 ? `${base} · ${retired.size} discarded` : base
     }
     if (this._mode === 'srs') {
       const remaining = this._finished ? [] : this._queue.slice(this._position)
@@ -943,7 +1006,18 @@ export class MbrFlashcardDeckElement extends LitElement {
     return html`
       <header class="mbr-fc-bar">
         <h2 class="mbr-fc-title" id="mbr-fc-title">Flashcards</h2>
-        <span class="mbr-fc-counter" aria-label="Progress">${this._counter()}</span>
+        <span class="mbr-fc-status">
+          <span class="mbr-fc-counter" aria-label="Progress">${this._counter()}</span>
+          <span class="mbr-fc-toast" role="status" aria-live="polite" aria-atomic="true"
+            >${this._toast
+              ? keyed(
+                  this._toast.id,
+                  html`<span class="mbr-fc-toast-pill" aria-hidden="true">${this._toast.text}</span
+                    ><span class="mbr-fc-sr-only">${this._toast.spoken}</span>`
+                )
+              : nothing}</span
+          >
+        </span>
         <span class="mbr-fc-spacer"></span>
         <button
           type="button"
@@ -1089,11 +1163,15 @@ export class MbrFlashcardDeckElement extends LitElement {
 
   private _renderMastered(): TemplateResult {
     const inPlay = this._concentric?.stack.length ?? 0
+    const retired = this._concentric?.retired.size ?? 0
+    const put = retired > 0 ? ` ${retired} discarded after two Easy ratings in a row.` : ''
     return html`
       <div class="mbr-fc-screen" role="status">
         <h3>Stack mastered</h3>
         <p>
-          All ${inPlay} card${inPlay === 1 ? ' is' : 's are'} in play, and the last pass met the bar.
+          Every card has been folded in${inPlay > 0
+            ? `, and you know all ${inPlay} in play.`
+            : '.'}${put}
         </p>
         <div class="mbr-fc-actions">
           <button type="button" @click=${this._keepPractising}>Keep practising</button>

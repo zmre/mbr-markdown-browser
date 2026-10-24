@@ -51,6 +51,41 @@ export const DECK_CSS = `
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* The toast hangs off the counter, absolutely, so its coming and going never
+ * moves the bar's other controls (the spacer after it gives it room). */
+.mbr-fc-status {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.mbr-fc-toast {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-inline-start: 0.5rem;
+  z-index: 1;
+  pointer-events: none;
+}
+.mbr-fc-toast-pill {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  background: var(--pico-primary-background, #0172ad);
+  color: var(--pico-primary-inverse, #fff);
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* Same length as TOAST_MS in mbr-flashcard-deck.ts, which then removes it. */
+  animation: mbr-fc-toast 1.8s ease-out forwards;
+}
+@keyframes mbr-fc-toast {
+  0% { opacity: 0; transform: translateY(3px) scale(0.92); }
+  12% { opacity: 1; transform: none; }
+  75% { opacity: 1; }
+  100% { opacity: 0; }
+}
 .mbr-fc-spacer { flex: 1; }
 .mbr-fc-overlay button,
 .mbr-fc-overlay select {
@@ -460,7 +495,7 @@ export const DECK_CSS = `
 
 /* No 3D turn: cross-fade the faces instead. */
 @media (prefers-reduced-motion: reduce) {
-  .mbr-fc-overlay, .mbr-fc-slot, .mbr-fc-ratings.is-nudged { animation: none; }
+  .mbr-fc-overlay, .mbr-fc-slot, .mbr-fc-ratings.is-nudged, .mbr-fc-toast-pill { animation: none; }
   .mbr-fc-card, .mbr-fc-card.is-flipped { transform: none; transition: none; }
   .mbr-fc-face { transition: opacity 0.15s linear; }
   .mbr-fc-back { transform: none; opacity: 0; }

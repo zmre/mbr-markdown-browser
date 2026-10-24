@@ -152,7 +152,7 @@ assert a fact about the command line that was never typed.
 | `review_enabled` | bool | `true` | Emit `data-mbr-line` source lines on block elements (server/GUI only). See [Review Settings](#review-settings). |
 | `mark_incomplete` | bool / unset | mode default (server/GUI on, build off) | Highlight TK/TODO/FIXME/XXX anywhere in a line |
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag work as incomplete |
-| `flashcards_concentric_threshold` | number | `0.7` | Share of first answers that must be Good/Easy before the flashcard deck's Concentric stack grows; must be greater than 0 and at most 1. See [Flashcard Settings](#flashcard-settings). |
+| `flashcards_concentric_threshold` | number | `0.7` | Share of the flashcard deck's Concentric stack that must be known (rated Good/Easy last, this session) before a card is folded in; must be greater than 0 and at most 1. See [Flashcard Settings](#flashcard-settings). |
 | `flashcards_progress_indicators` | bool | `true` | Show review-progress borders and heading pies on flashcard notes. See [Flashcard Settings](#flashcard-settings). |
 
 ### Navigation Settings
@@ -668,12 +668,13 @@ review history already in the page.
 | `flashcards_concentric_threshold` | number | `0.7` | Growth bar for [Concentric (FSRS) mode](../markdown/flashcards.md#concentric--fsrs) |
 | `flashcards_progress_indicators` | bool | `true` | Reading-view [progress indicators](../markdown/flashcards.md#progress-in-the-page) |
 
-**Concentric threshold (`flashcards_concentric_threshold`):** at the end of each
-pass through the stack, Concentric folds in two more cards if at least this
-share of the cards rated in the pass were rated Good or Easy the first time they
-came up. The bar is applied to whole cards, so it moves in steps: with six
-cards, `0.7` needs five of six. `1.0` demands a perfect pass; a low value grows
-the stack almost every pass. Values outside `0 < t ≤ 1` (including `0`) stop
+**Concentric threshold (`flashcards_concentric_threshold`):** after every
+rating, Concentric folds one card into the stack, and checks again, while at
+least this share of the stack is known — rated Good or Easy last in this
+session (a card not yet rated this session is not known). The bar is applied to
+whole cards, so it moves in steps: with six cards, `0.7` needs five of six.
+`1.0` grows the stack only when every card in it is known, and then by one; a
+low value grows it after almost every rating. Values outside `0 < t ≤ 1` (including `0`) stop
 mbr at startup with a configuration error. Exposed to the frontend as
 `window.__MBR_CONFIG__.flashcardsConcentricThreshold`; environment variable
 `MBR_FLASHCARDS_CONCENTRIC_THRESHOLD`.

@@ -177,9 +177,9 @@ the next. Keys typed into the **Cards** box or the filter stay there.
 
 ## Concentric (FSRS)
 
-Concentric (FSRS), the deck's default mode, drills a **small stack** of cards
-until you know it, then folds in a couple more — so the stack grows outward in
-rings, like concentric circles. It is closely related to *Incremental Rehearsal*, also called
+Concentric (FSRS), the deck's default mode, drills a **small stack** of cards,
+folds in new ones as you come to know it, and puts away the ones you find easy
+— so the stack grows outward in rings, like concentric circles. It is closely related to *Incremental Rehearsal*, also called
 *folding-in* ([Tucker 1988](https://doi.org/10.13140/RG.2.2.13505.56164),
 unpublished teaching materials, often cited as Tucker 1989), a drill technique
 from special education where unknown items are worked one at a time into a set
@@ -198,33 +198,58 @@ How it runs:
    then ones never reviewed. The rest are random. A note with no history at
    all starts with a plain random six.
 2. **Rate each card.** The card goes back into the stack at a position that
-   depends on the rating, with a little jitter:
+   depends on the rating, with a little jitter, but never sooner than a
+   minimum number of other cards:
 
-   | Rating | Goes back… |
-   |--------|-----------|
-   | Again | about a quarter of the way in (20–35%), but never as the very next card |
-   | Hard | about halfway (40–60%) |
-   | Good | near the back (75–100%) |
-   | Easy | to the very back |
+   | Rating | Goes back… | Earliest return |
+   |--------|-----------|-----------------|
+   | Again | about a quarter of the way in (20–35%) | after 3 other cards |
+   | Hard | about halfway (40–60%) | after 4 other cards |
+   | Good | near the back (75–100%) | after 4 other cards |
+   | Easy | to the very back | — |
 
-3. **Grow.** A *pass* is as many ratings as there are cards in the stack. At the
-   end of a pass, if at least 70% of the cards rated in it got Good or Easy *the
-   first time they came up in that pass*, two new cards are folded in at random
-   places. Only first answers count, so hammering one card until it is Good
-   cannot make the stack look learned. Because each pass judges whole cards,
-   the bar moves in steps: with six cards, 70% means five of six (four of six is
-   67%); with eight, six of eight.
-4. **Mastered.** Once every card is in the stack and a pass clears the bar, the
-   deck says so and offers **Keep practising** (the same stack carries on) or a
-   new stack. Otherwise Concentric never ends on its own — close it whenever you
-   like.
+   In a stack too small for the minimum, the card goes to the very back.
+3. **Grow.** After every rating the deck counts the cards it treats as
+   *known*: those whose latest rating **in this session** is Good or Easy. A
+   card not yet rated this session does not count, whatever its history says,
+   so a stack never looks learned before you have seen it. While at least 70%
+   of the stack is known, one new card is folded in at a random place (never
+   the card on screen) and the share is checked again. A new card is unrated,
+   so each one lowers the share: with six cards, the stack grows as soon as
+   five are known (5 of 6 is 83%; 5 of 7 is 71%, so a second card comes in;
+   5 of 8 is 62%, so it stops at eight). Six of six known at once would grow
+   it to nine.
+4. **Discard.** A card you rate Easy twice in a row in this session is
+   discarded: it leaves the stack, goes back to the pool, and one card from the
+   pool takes its place. "In a row" counts that card's own ratings — any other
+   rating of it starts the count over, and earlier sessions' history does not
+   count. With nothing in the pool to swap in, the stack gets one card
+   smaller. Good never discards a card.
+5. **Which cards come in.** Growth, swaps and raising the **Cards** box take
+   cards from the pool in this order: latest rating (history or this session)
+   Again or Hard, then never rated, then Good, then Easy — at random within
+   each group. Discarded cards come last: a swap or a bigger **Cards** box
+   brings one back only when nothing else is left, growth never does, and a
+   card that comes back starts its Easy count over.
+6. **Toast.** When a rating folds cards in or discards one, a small note next
+   to the counter says so for a moment: `+2` for two cards folded in, `−1 +1`
+   for a swap, `−1 +2` for a swap that also grew the stack. Screen readers hear
+   it as "1 card discarded, 2 added". With reduced motion it appears and
+   disappears without animating.
+7. **Mastered.** When there is nothing left to fold in (every card is in the
+   stack or discarded) and every card in the stack is known, the deck says so
+   and offers **Keep practising** (the same stack carries on) or a new stack.
+   It says so on the rating that gets there, not on every rating after it; a
+   miss that undoes it and a later rating that restores it will say so again.
+   Otherwise Concentric never ends on its own — close it whenever you like.
 
 The **Cards** box in the top bar shows the stack's size and follows it as it
-grows. Change it at any time: raising it adds cards (topping the challenging
-quarter up first, when the note has history), lowering it sends the cards you
-know best back to the pool (Easy before Good before not yet rated, never the
-card on screen). The counter reads `8 in play · 4 left`: cards in the stack,
-and eligible cards not yet folded in.
+grows. Change it at any time: raising it adds cards in the order above,
+lowering it sends the cards you know best back to the pool (Easy before Good
+before not yet rated, never the card on screen). A stack thinned by discards
+keeps the size you chose in the box. The counter reads `8 in play · 4 left`:
+cards in the stack, and cards still to be folded in. Once any card is discarded
+it adds `· 1 discarded`; discarded cards are not counted as left.
 
 **Saving.** With [editing enabled](../modes/editing/), every Concentric (FSRS) rating is
 written to the card's [review history](#the-review-history) exactly as a spaced
@@ -260,32 +285,63 @@ The growth threshold is configurable with
   known, with only a few unknown items in it at a time, and a meta-analysis of
   drill ratios found strong effects whenever at least half the items were known
   ([Burns 2004](https://doi.org/10.1177/07419325040250030401)); growing only
-  after most of a pass was answered well keeps the stack in that range. For
+  while most of the stack is known keeps it in that range. For
   comparison, a theoretical model of learning puts the optimal success rate near
   85% ([Wilson et al. 2019](https://doi.org/10.1038/s41467-019-12552-4), a
   result derived for gradient-descent learners on binary classification tasks
   rather than measured in a classroom).
   70% is a little looser, so a stack grows steadily instead of stalling on one
   stubborn card.
-- **Grow by two.** A small stack spaces its repetitions too closely: drilling a
-  few cards over and over masses their practice, and one large stack, with more
-  cards between each repetition, beats several small ones
+- **One card at a time, as soon as the bar is met.** Folding-in introduces
+  unknown items one at a time into a set that is mostly known — Incremental
+  Rehearsal itself runs at about 90% known — and Burns's meta-analysis found
+  strong effects at any ratio of at least half known. Checking after every
+  rating grows the stack the moment it is ready, rather than at the end of a
+  round, and adding one card before checking again keeps new cards a small
+  share of it. The stack does have to grow: a small stack spaces its
+  repetitions too closely, drilling a few cards over and over masses their
+  practice, and one large stack, with more cards between each repetition,
+  beats several small ones
   ([Kornell 2009](https://doi.org/10.1002/acp.1537)).
-  So the stack has to grow, but two at a time keeps the share of new cards
-  small, as folding-in does.
-- **Where a card goes back.** Delaying the first retrieval matters more than
-  how later ones are spaced
+- **Where a card goes back, and the minimum gap.** Delaying the first
+  retrieval matters more than how later ones are spaced
   ([Karpicke & Roediger 2007](https://doi.org/10.1037/0278-7393.33.4.704)), so a
   card you missed is never shown again straight away. A harder retrieval at a
   longer lag strengthens memory more, provided it still succeeds
   ([Pyc & Rawson 2009](https://doi.org/10.1016/j.jml.2009.01.004)): Again
-  comes back soon enough to be recalled, Hard waits longer, and Good and Easy
-  wait longest.
+  comes back soon enough to be recalled, but only after at least three other
+  cards, and Hard one card later than that; Good and Easy wait longest, and Good
+  never sooner than Hard, so a small stack keeps that order.
+  Incremental Rehearsal does the same, lengthening the gap before an unknown
+  item returns by one known item each time round.
+- **Discarding after two Easy ratings in a row.** Incremental Rehearsal's own
+  procedure puts the most recently added known item away as each new one comes
+  in, keeping the ratio
+  ([Intervention Central](https://www.interventioncentral.org/academic-interventions/math-facts/math-computation-promote-mastery-math-facts-through-incremental-re)).
+  But dropping an item from testing after one correct recall sharply cut what
+  was remembered a week later
+  ([Karpicke & Roediger 2008](https://doi.org/10.1126/science.1152408)), which
+  is why it takes two Easy ratings and why Good never discards a card. About
+  three correct recalls during initial learning, plus relearning in later
+  sessions, gave the most durable learning for the time spent
+  ([Rawson & Dunlosky 2011](https://doi.org/10.1037/a0023956)); two Easy
+  ratings, each sending the card to the back of the stack, sit close to that,
+  and with editing on the saved ratings let FSRS schedule the relearning.
+  Learners left to decide drop cards too early
+  ([Kornell & Bjork 2008](https://doi.org/10.1080/09658210701763899)), so
+  discarding is a fixed rule rather than a button. Discarded cards go back to
+  the pool at the lowest priority, so they return once everything else is in
+  play.
+- **Struggled cards first.** When cards are picked from the pool, the ones you
+  missed last time come first and never-reviewed ones next, for the same reason
+  the starting stack is seeded with them (below): they need the practice most.
 - **A quarter challenging.** Seeding a quarter of the stack with cards you
   struggled with (or have never seen) makes sure they get practice, while
   three quarters stay cards you are likely to know. That is looser than
   Incremental Rehearsal's seven to nine known items per unknown, but within the
   range of mostly-known ratios that worked well in Burns's 2004 meta-analysis.
+  Only the start is seeded this way; picking the whole starting stack in
+  priority order would fill it with every struggled and new card.
 
 ## Filtering by section
 
