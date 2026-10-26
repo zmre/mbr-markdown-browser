@@ -182,6 +182,88 @@ fn extract_favicon(head: &ElementRef, selector: &Selector) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+static BASE_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("base[href]").expect("Invalid base selector"));
+
+/// Resolve a URL taken from a fetched page's markup (`og:image`, a favicon
+/// `href`) to an absolute `http(s)` URL, or `None`.
+///
+/// The card is rendered into *our* page, so a value left as authored
+/// (`/favicon.ico`, `icon.png`) would be requested from the mbr server and
+/// 404 (reported by `errors.json` as a broken image). Resolution follows the
+/// browser: against the document's base URL, which is the first `<base href>`
+/// (itself resolved against the page's final URL, used only when it is
+/// http(s)) else the page's final URL after redirects. Protocol-relative
+/// `//host/x` takes the base's scheme. Anything that does not resolve to
+/// http(s) — `javascript:`, `data:`, `file:`, garbage — is dropped.
+fn resolve_page_url(document_base: &Url, raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    document_base
+        .join(raw)
+        .ok()
+        .filter(|resolved| matches!(resolved.scheme(), "http" | "https"))
+        .map(String::from)
+}
+
+/// The document's base URL: the first `<base href>` resolved against the
+/// page URL when that yields http(s), else the page URL itself.
+fn document_base_url(document: &Html, page_url: &Url) -> Url {
+    document
+        .select(&BASE_SELECTOR)
+        .next()
+        .and_then(|el| el.value().attr("href"))
+        .and_then(|href| page_url.join(href.trim()).ok())
+        .filter(|base| matches!(base.scheme(), "http" | "https"))
+        .unwrap_or_else(|| page_url.clone())
+}
+
+/// Extract `(title, description, image)` from a fetched page's HTML.
+///
+/// `page_url` is the page's final URL (after redirects); the image is
+/// resolved against the document's base URL (see [`resolve_page_url`]).
+/// All metadata lives in `<head>`: og:* first, then fallbacks. A candidate
+/// image that does not resolve to http(s) is skipped in favour of the next.
+fn extract_page_metadata(
+    body: &str,
+    page_url: &Url,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let document = Html::parse_document(body);
+    let base = document_base_url(&document, page_url);
+    document
+        .select(&HEAD_SELECTOR)
+        .next()
+        .map(|head| {
+            // Priority: og:* tags first
+            let og_title = extract_content(&head, &OG_TITLE_SELECTOR);
+            let og_desc = extract_content(&head, &OG_DESCRIPTION_SELECTOR);
+
+            // Fallbacks only computed if og:* not found
+            let title = og_title.or_else(|| {
+                head.select(&TITLE_SELECTOR)
+                    .next()
+                    .map(|el| el.text().collect::<String>())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| html_escape::encode_text(&s).to_string())
+            });
+
+            let description =
+                og_desc.or_else(|| extract_content(&head, &META_DESCRIPTION_SELECTOR));
+
+            // Raw: image is only rendered in attribute context, escaped there
+            let resolve = |raw: String| resolve_page_url(&base, &raw);
+            let image = extract_content_raw(&head, &OG_IMAGE_SELECTOR)
+                .and_then(resolve)
+                .or_else(|| extract_favicon(&head, &FAVICON_SELECTOR).and_then(resolve))
+                .or_else(|| extract_favicon(&head, &ALT_FAVICON_SELECTOR).and_then(resolve));
+
+            (title, description, image)
+        })
+        .unwrap_or((None, None, None))
+}
+
 // Giphy regex patterns - compiled once for efficiency
 static GIPHY_MEDIA_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"https?://(?:media\d*|i)\.giphy\.com/").unwrap());
@@ -450,38 +532,7 @@ impl PageInfo {
         // pages, which may garble some metadata. That is acceptable graceful
         // degradation for a best-effort link preview.
         let body = String::from_utf8_lossy(&buf);
-        let document = Html::parse_document(&body);
-
-        // All metadata lives in <head> - extract with og:* priority, then fallbacks
-        let (title, description, image) = document
-            .select(&HEAD_SELECTOR)
-            .next()
-            .map(|head| {
-                // Priority: og:* tags first
-                let og_title = extract_content(&head, &OG_TITLE_SELECTOR);
-                let og_desc = extract_content(&head, &OG_DESCRIPTION_SELECTOR);
-                // Raw: image is only rendered in attribute context, escaped there
-                let og_image = extract_content_raw(&head, &OG_IMAGE_SELECTOR);
-
-                // Fallbacks only computed if og:* not found
-                let title = og_title.or_else(|| {
-                    head.select(&TITLE_SELECTOR)
-                        .next()
-                        .map(|el| el.text().collect::<String>())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| html_escape::encode_text(&s).to_string())
-                });
-
-                let description =
-                    og_desc.or_else(|| extract_content(&head, &META_DESCRIPTION_SELECTOR));
-
-                let image = og_image
-                    .or_else(|| extract_favicon(&head, &FAVICON_SELECTOR))
-                    .or_else(|| extract_favicon(&head, &ALT_FAVICON_SELECTOR));
-
-                (title, description, image)
-            })
-            .unwrap_or((None, None, None));
+        let (title, description, image) = extract_page_metadata(&body, &current_url);
 
         Ok(PageInfo {
             url: url.to_string(),
@@ -1301,5 +1352,199 @@ mod tests {
         assert!(embed.is_some());
         let html = embed.unwrap();
         assert!(html.contains(url));
+    }
+
+    // --- URLs taken from fetched page metadata resolve against the page ---
+
+    fn page(url: &str) -> Url {
+        Url::parse(url).unwrap()
+    }
+
+    /// The image extracted from a `<head>` fixture fetched from `page_url`.
+    fn image_from_head(head: &str, page_url: &str) -> Option<String> {
+        let body = format!("<html><head>{head}</head><body></body></html>");
+        extract_page_metadata(&body, &page(page_url)).2
+    }
+
+    #[test]
+    fn favicon_absolute_path_resolves_against_page_host() {
+        // The markup rubikstrainer.com actually serves (2LOLL/163).
+        let image = image_from_head(
+            r#"<title>2LOLL</title>
+               <link rel="icon" type="image/png" href="/static/favicon/cube_favicon_16.ico" />"#,
+            "https://www.rubikstrainer.com/2LOLL/163",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://www.rubikstrainer.com/static/favicon/cube_favicon_16.ico")
+        );
+    }
+
+    #[test]
+    fn favicon_relative_path_resolves_against_page_directory() {
+        let image = image_from_head(
+            r#"<link rel="icon" href="favicon.png">"#,
+            "https://example.com/a/b/page",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://example.com/a/b/favicon.png")
+        );
+        let image = image_from_head(
+            r#"<link rel="icon" href="../icons/fav.png">"#,
+            "https://example.com/a/b/page",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://example.com/a/icons/fav.png")
+        );
+    }
+
+    #[test]
+    fn protocol_relative_image_takes_page_scheme() {
+        let image = image_from_head(
+            r#"<meta property="og:image" content="//cdn.example.net/og.png">"#,
+            "http://example.com/x",
+        );
+        assert_eq!(image.as_deref(), Some("http://cdn.example.net/og.png"));
+        let image = image_from_head(
+            r#"<link rel="icon" href="//cdn.example.net/f.ico">"#,
+            "https://example.com/x",
+        );
+        assert_eq!(image.as_deref(), Some("https://cdn.example.net/f.ico"));
+    }
+
+    #[test]
+    fn already_absolute_image_is_unchanged() {
+        let image = image_from_head(
+            r#"<meta property="og:image" content="https://img.example.org/p/1.jpg?w=600&h=300">"#,
+            "https://example.com/post",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://img.example.org/p/1.jpg?w=600&h=300")
+        );
+    }
+
+    #[test]
+    fn relative_og_image_resolves() {
+        let image = image_from_head(
+            r#"<meta property="og:image" content="/img/card.png">"#,
+            "https://example.com/blog/post/",
+        );
+        assert_eq!(image.as_deref(), Some("https://example.com/img/card.png"));
+    }
+
+    #[test]
+    fn base_href_is_honoured() {
+        // Absolute base on another host
+        let image = image_from_head(
+            r#"<base href="https://static.example.net/assets/">
+               <link rel="icon" href="fav.png">"#,
+            "https://example.com/a/page",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://static.example.net/assets/fav.png")
+        );
+        // Relative base resolves against the page first
+        let image = image_from_head(
+            r#"<base href="/root/sub/"><link rel="icon" href="fav.png">"#,
+            "https://example.com/a/page",
+        );
+        assert_eq!(
+            image.as_deref(),
+            Some("https://example.com/root/sub/fav.png")
+        );
+        // A non-http(s) base is ignored; the page URL is the base
+        let image = image_from_head(
+            r#"<base href="javascript:alert(1)//"><link rel="icon" href="fav.png">"#,
+            "https://example.com/a/page",
+        );
+        assert_eq!(image.as_deref(), Some("https://example.com/a/fav.png"));
+    }
+
+    #[test]
+    fn bad_scheme_images_are_dropped() {
+        for raw in [
+            "javascript:alert(1)",
+            " JavaScript:alert(1)",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "file:///etc/passwd",
+            "mailto:x@example.com",
+            "",
+            "   ",
+        ] {
+            let head = format!(r#"<meta property="og:image" content="{raw}">"#);
+            assert_eq!(
+                image_from_head(&head, "https://example.com/"),
+                None,
+                "{raw:?} must not become a card image"
+            );
+            let head = format!(r#"<link rel="icon" href="{raw}">"#);
+            assert_eq!(
+                image_from_head(&head, "https://example.com/"),
+                None,
+                "{raw:?} must not become a card favicon"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_og_image_falls_back_to_favicon() {
+        let image = image_from_head(
+            r#"<meta property="og:image" content="javascript:alert(1)">
+               <link rel="icon" href="/favicon.png">"#,
+            "https://example.com/p",
+        );
+        assert_eq!(image.as_deref(), Some("https://example.com/favicon.png"));
+    }
+
+    #[test]
+    fn extract_page_metadata_keeps_title_and_description() {
+        let (title, description, image) = extract_page_metadata(
+            r#"<html><head><title>A &amp; B</title>
+               <meta name="description" content="d <x>">
+               <link rel="icon" href="/f.ico"></head></html>"#,
+            &page("https://example.com/"),
+        );
+        assert_eq!(title.as_deref(), Some("A &amp; B"));
+        assert_eq!(description.as_deref(), Some("d &lt;x&gt;"));
+        assert_eq!(image.as_deref(), Some("https://example.com/f.ico"));
+    }
+
+    /// Regression: the rendered card must point at the remote host, never at
+    /// a path the mbr server would be asked for. Resolution uses the URL
+    /// *after* redirects, so the favicon comes from the final host.
+    #[tokio::test]
+    async fn fetched_card_favicon_is_absolute_on_final_host() {
+        let (final_addr, _) = spawn_mock_server(|_| {
+            html_response(
+                r#"<html><head><title>Final</title>
+                   <link rel="icon" type="image/png" href="favicon.png"></head></html>"#,
+            )
+        })
+        .await;
+        let (start_addr, _) = spawn_mock_server(move |_| {
+            format!(
+                "HTTP/1.1 301 Moved\r\nLocation: http://127.0.0.1:{}/final/page\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                final_addr.port()
+            )
+        })
+        .await;
+        let url = format!("http://127.0.0.1:{}/2LOLL/163", start_addr.port());
+        let info = PageInfo::fetch_page_info_inner(&url, Duration::from_secs(5), |_| true)
+            .await
+            .unwrap();
+        let expected = format!("http://127.0.0.1:{}/final/favicon.png", final_addr.port());
+        assert_eq!(info.image.as_deref(), Some(expected.as_str()));
+        // The card still links the URL the author wrote
+        assert_eq!(info.url, url);
+        let html = info.html();
+        assert!(
+            html.contains(&format!(r#"<img src="{expected}"/>"#)),
+            "card must carry the absolute favicon URL: {html}"
+        );
+        assert!(!html.contains(r#"src="favicon.png""#));
     }
 }
