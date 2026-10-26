@@ -663,7 +663,7 @@ export class MbrInfoElement extends LitElement {
               <ul class="links-list">
                 ${internalLinks.map(link => html`
                   <li class="link-item">
-                    <a href="${safeHref(`${link.to}${link.anchor || ''}`)}" class="link-url" @click=${() => this._close()}>
+                    <a href="${safeHref(resolveUrl(`${link.to}${link.anchor || ''}`))}" class="link-url" @click=${() => this._close()}>
                       ${link.text || link.to}
                     </a>
                     ${link.anchor ? html`<span class="link-anchor">${link.anchor}</span>` : nothing}
@@ -717,7 +717,7 @@ export class MbrInfoElement extends LitElement {
           <ul class="links-list">
             ${inbound.map(link => html`
               <li class="link-item">
-                <a href="${link.from}" class="link-url" @click=${() => this._close()}>
+                <a href="${safeHref(resolveUrl(`${link.from}`))}" class="link-url" @click=${() => this._close()}>
                   <span class="link-source">${link.from}</span>
                 </a>
                 ${link.text ? html`<span class="link-text">"${link.text}"</span>` : nothing}

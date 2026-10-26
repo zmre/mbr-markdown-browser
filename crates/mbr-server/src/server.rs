@@ -268,50 +268,15 @@ fn index_page_links(
         repo.vault().as_ref(),
         path,
         &cfg.base_dir,
-        link_transform_config,
+        link_transform_config.clone(),
         true, // server_mode
         cfg.valid_tag_sources.clone(),
         Some(repo.wikilink_index.clone()),
     ) {
         Ok(links) => {
-            // `OutboundLink.to` is the *raw* markdown destination
-            // (`alpha.md`, `../notes/x.md`) — the renderer records it before
-            // rewriting the href. Resolving that directly against the page URL
-            // yields `/alpha.md/`, which matches no page, so every
-            // extension-style link would silently produce no backlink.
-            // Running it through the same `transform_link` the renderer uses
-            // for the href first gives `../alpha/`, which resolves to the
-            // page's real URL.
-            let resolved: Vec<mbr_core::link_index::OutboundLink> = links
-                .into_iter()
-                .map(|mut link| {
-                    if link.internal && !link.to.is_empty() {
-                        link.to = mbr_core::link_transform::transform_link(
-                            &link.to,
-                            &LinkTransformConfig {
-                                markdown_extensions: cfg.markdown_extensions.clone(),
-                                index_file: cfg.index_file.clone(),
-                                is_index_file,
-                                url_depth: None,
-                                current_page_url: url_path.to_string(),
-                                markdown_page_probe: None,
-                            },
-                        );
-                    }
-                    link
-                })
-                .collect();
-            // `true`, not `is_index_file`. These hrefs have *already* been
-            // through `transform_link`, which added the `../` that compensates
-            // for the trailing-slash URL convention. Passing `is_index_file`
-            // here makes `resolve_relative_url` strip the page URL's last
-            // segment a second time, so `docs/beta.md` linking `alpha.md`
-            // recorded a backlink on `/alpha/` instead of `/docs/alpha/`. The
-            // bug hid at the repository root, where the (former) silent clamp
-            // on an above-root `..` cancelled the extra hop. This is the same
-            // reasoning `page_errors::validate_media_references` documents for
-            // post-transform srcs.
-            let resolved = resolve_outbound_links(url_path, resolved, true);
+            // The same resolution `links.json` publishes, so a backlink is
+            // recorded exactly where the page's outbound list says it points.
+            let resolved = resolve_outbound_links(links, &link_transform_config);
             index.set_page_links(url_path, &resolved);
         }
         Err(e) => {
@@ -6160,6 +6125,9 @@ impl Server {
                         markdown_page_probe: None,
                     };
 
+                    // Kept for resolving the collected links against this
+                    // page; the render consumes its own copy.
+                    let page_links_config = link_transform_config.clone();
                     let valid_tag_sources =
                         mbr_core::config::tag_sources_to_set(&config.tag_sources);
                     match markdown::render_from_vault_with_cache(
@@ -6182,11 +6150,10 @@ impl Server {
                     .await
                     {
                         Ok(render_result) => {
-                            // Resolve relative URLs to absolute before caching
+                            // Resolve to site-absolute page URLs before caching.
                             let resolved_links = resolve_outbound_links(
-                                &page_url_path,
                                 render_result.outbound_links,
-                                is_index_file,
+                                &page_links_config,
                             );
                             // Cache the outbound links
                             config
@@ -6453,6 +6420,9 @@ impl Server {
                     ),
                 };
 
+                // Kept for resolving the collected links against this page;
+                // the render consumes its own copy.
+                let page_links_config = link_transform_config.clone();
                 let valid_tag_sources = mbr_core::config::tag_sources_to_set(&config.tag_sources);
 
                 match markdown::render_from_vault_with_cache(
@@ -6475,9 +6445,8 @@ impl Server {
                 {
                     Ok(render_result) => {
                         let resolved_links = resolve_outbound_links(
-                            &page_url_path,
                             render_result.outbound_links,
-                            is_index_file,
+                            &page_links_config,
                         );
                         // Back-fill the link cache so a subsequent links.json
                         // call is a hit (mirrors `try_serve_links_json`).
@@ -7478,6 +7447,10 @@ impl Server {
             )),
         };
 
+        // Kept for resolving the page's outbound links (the link cache
+        // below); the render consumes its own copy.
+        let page_links_config = link_transform_config.clone();
+
         // Transcoding is only available with media-metadata feature
         #[cfg(feature = "media-metadata")]
         let transcode_enabled = config.transcode_enabled;
@@ -7592,9 +7565,15 @@ impl Server {
         // a page that just lost its last link serving its stale pre-edit entry
         // (`LinkCache` has no TTL and nothing else overwrites it).
         if config.link_tracking {
-            // Resolve relative URLs to absolute before caching
-            let resolved_links =
-                resolve_outbound_links(&current_url, outbound_links, is_index_file);
+            // Resolve to site-absolute page URLs before caching, against the
+            // same URL the cache is keyed by.
+            let resolved_links = resolve_outbound_links(
+                outbound_links,
+                &LinkTransformConfig {
+                    current_page_url: current_url.clone(),
+                    ..page_links_config
+                },
+            );
             config
                 .link_cache
                 .insert(current_url.clone(), resolved_links);

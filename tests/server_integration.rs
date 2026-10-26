@@ -3853,6 +3853,33 @@ async fn test_links_json_contains_outbound_links() {
     );
 }
 
+/// The server resolves outbound destinations through the same
+/// `link_index::resolve_outbound_links` as the static build, so both publish
+/// the same site-absolute targets (the build test holds it to this fixture
+/// too). Extension-style links (`editing.md`) used to come out as
+/// `/modes/editing.md/`, a URL no page has.
+#[tokio::test]
+async fn test_links_json_outbound_targets_are_site_absolute() {
+    let repo = TestRepo::new();
+    let expected = common::create_link_resolution_fixture(&repo);
+
+    let server = TestServer::start(&repo).await;
+
+    for (page, targets) in expected {
+        let body: serde_json::Value = server
+            .get(&format!("{page}links.json"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            common::outbound_targets(&body),
+            targets,
+            "outbound targets of {page}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_links_json_contains_inbound_links() {
     let repo = TestRepo::new();

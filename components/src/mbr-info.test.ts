@@ -433,3 +433,46 @@ describe('MbrInfoElement link sanitization', () => {
     expect(hrefs).toEqual(['#', '/docs/guide/#intro'])
   })
 })
+
+describe('MbrInfoElement link hrefs in a static build', () => {
+  let element: HTMLElement
+
+  beforeEach(() => {
+    window.frontmatter = {}
+    element = document.createElement('mbr-info')
+    document.body.appendChild(element)
+  })
+
+  afterEach(() => {
+    element.remove()
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  async function hrefs(config: Window['__MBR_CONFIG__']): Promise<string[]> {
+    window.__MBR_CONFIG__ = config
+    const el = element as any
+    el._isOpen = true
+    el._links = {
+      inbound: [{ from: '/modes/', text: 'back' }],
+      outbound: [{ to: '/modes/gui/', text: 'GUI', internal: true, anchor: '#menu' }],
+    }
+    el.requestUpdate()
+    await el.updateComplete
+    return Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('a.link-url')).map(
+      (a) => a.getAttribute('href') ?? ''
+    )
+  }
+
+  it('resolves site-absolute targets against the base path', async () => {
+    // Regression: these were written verbatim, so under a deployment prefix
+    // `/modes/gui/` left the site.
+    expect(await hrefs({ serverMode: false, guiMode: false, basePath: '../../' })).toEqual([
+      '../../modes/gui/#menu',
+      '../../modes/',
+    ])
+  })
+
+  it('keeps server-mode targets as they are', async () => {
+    expect(await hrefs({ serverMode: true, guiMode: false })).toEqual(['/modes/gui/#menu', '/modes/'])
+  })
+})

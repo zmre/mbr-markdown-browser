@@ -24,7 +24,10 @@ use mbr_core::{
     config::Config,
     embedded_katex, embedded_pico,
     errors::BuildError,
-    link_index::{InboundLink, OutboundLink, PageLinks, resolve_relative_url, sort_inbound_links},
+    link_index::{
+        InboundLink, OutboundLink, PageLinks, resolve_outbound_links, resolve_relative_url,
+        sort_inbound_links,
+    },
     link_transform::{LinkTransformConfig, make_relative_url},
     markdown,
     media::MediaViewerType,
@@ -852,57 +855,32 @@ impl Builder {
         let mut outbound_index: HashMap<String, Vec<OutboundLink>> = HashMap::new();
 
         for (source_url, (is_index_file, outbound_links)) in outbound_guard.iter() {
-            // An anchor-only link (`[Top](#top)`) reaches here as
-            // `OutboundLink { to: "", anchor: Some("#top") }`, because the
-            // renderer splits the fragment off before storing. It targets the
-            // current page, not another one, so resolving `""` against the
-            // source URL would name the parent directory and invent both an
-            // outbound link and — once inverted below — a backlink on a page
-            // the author never linked to. Dropping it here mirrors
-            // `link_index::resolve_outbound_links`, which does the same for
-            // server mode, so the two modes agree.
-            let outbound_links: Vec<OutboundLink> = outbound_links
-                .iter()
-                .filter(|link| !link.to.is_empty())
-                .cloned()
-                .collect();
+            // `link_index::resolve_outbound_links` is the one resolution both
+            // modes use: it drops anchor-only links (`[Top](#top)`, stored as
+            // `to: ""`) and turns each raw, file-relative destination
+            // (`beta.md`, `../notes/`) into the site-absolute URL of the page
+            // its rendered href reaches (`/docs/beta/`). Published as-is, so
+            // a static `links.json` says what the server's does; it used to
+            // carry the raw destination, which every client read as
+            // site-absolute and so resolved wrongly from any page below the
+            // root.
+            let outbound_links = resolve_outbound_links(
+                outbound_links.clone(),
+                &LinkTransformConfig {
+                    markdown_extensions: self.config.markdown_extensions.clone(),
+                    index_file: self.config.index_file.clone(),
+                    is_index_file: *is_index_file,
+                    url_depth: None,
+                    current_page_url: source_url.clone(),
+                    markdown_page_probe: None,
+                },
+            );
 
-            // Only internal links produce backlinks on their target.
+            // Only internal links produce backlinks on their target. The
+            // target is already resolved; this only normalizes a root-relative
+            // one (`/docs`) to the page key (`/docs/`).
             for link in outbound_links.iter().filter(|link| link.internal) {
-                // `link.to` is the *raw* markdown destination — the renderer
-                // records it before rewriting the href — so an ordinary
-                // `[beta](beta.md)` arrives as `beta.md` and resolves to
-                // `/beta.md/`, a URL no page has. Every extension-style link,
-                // the most common form there is, silently produced no backlink
-                // at all, while `[beta](beta/)` and `[[Beta]]` worked. Running
-                // it through the same `transform_link` the renderer applies to
-                // the href yields `../beta/`, which resolves to the real page
-                // URL. The server's inbound index does the same, so both modes
-                // now agree.
-                let transformed = mbr_core::link_transform::transform_link(
-                    &link.to,
-                    &LinkTransformConfig {
-                        markdown_extensions: self.config.markdown_extensions.clone(),
-                        index_file: self.config.index_file.clone(),
-                        is_index_file: *is_index_file,
-                        url_depth: None,
-                        current_page_url: source_url.clone(),
-                        markdown_page_probe: None,
-                    },
-                );
-                // Resolve the relative URL to an absolute URL based on the
-                // source page. `true`, not `*is_index_file`: `transformed` has
-                // already been through `transform_link`, which added the `../`
-                // that compensates for the trailing-slash URL convention.
-                // Passing `*is_index_file` strips the page URL's last segment a
-                // second time, so `docs/beta.md` linking `alpha.md` recorded a
-                // backlink on `/alpha/` instead of `/docs/alpha/`. The bug hid
-                // at the repository root, where the (former) silent clamp on an
-                // above-root `..` cancelled the extra hop. Same reasoning as
-                // `page_errors::validate_media_references` for post-transform
-                // srcs, and as `server::index_page_links`, so the two modes
-                // still agree.
-                let target_url = resolve_relative_url(source_url, &transformed, true);
+                let target_url = resolve_relative_url(source_url, &link.to, true);
 
                 let inbound_link = InboundLink {
                     from: source_url.clone(),

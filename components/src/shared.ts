@@ -197,23 +197,6 @@ export function getTagSources(): TagSourceConfig[] {
 }
 
 /**
- * Get the canonical path from window.location.pathname.
- *
- * In server mode, the pathname is already canonical (e.g., "/docs/guide/").
- * In static mode deployed at a subdirectory, we need to strip the deployment
- * prefix to get the canonical path that matches site.json entries.
- *
- * The basePath tells us the depth (number of "../" segments), which we use
- * to extract just the canonical portion of the pathname.
- *
- * Example:
- *   Deployed at: https://example.com/my-site/
- *   Current page: https://example.com/my-site/docs/guide/
- *   window.location.pathname = "/my-site/docs/guide/"
- *   basePath = "../../" (depth 2)
- *   Result: "/docs/guide/"
- */
-/**
  * Percent-decode a URL path, falling back to the raw string on a malformed
  * escape sequence (e.g. a lone `%`) so a bad URL never throws.
  */
@@ -225,36 +208,66 @@ export function safeDecodePath(p: string): string {
   }
 }
 
-export function getCanonicalPath(): string {
+/**
+ * The canonical site path (`/docs/guide/`, the form site.json's `url_path` and
+ * links.json's `to`/`from` use) of the page at `pathname`.
+ *
+ * Server mode serves the site at `/`, so the pathname already is canonical
+ * (returned decoded and otherwise untouched). A
+ * static build may be deployed anywhere — at a host's root or under a prefix
+ * such as GitHub Pages' `/my-site/` — and the page only knows `basePath`, the
+ * relative path from itself to the site root (`""` or `"./"` at the root,
+ * `"../../"` two levels down). Resolving `basePath` against the pathname, as
+ * the browser does for every relative URL on the page, yields the site root's
+ * pathname whatever the deployment prefix; the canonical path is what follows
+ * it.
+ *
+ * This replaced counting `../` and keeping that many trailing segments, which
+ * had no answer for depth 0: the root page of a site under `/my-site/` came
+ * back as `/my-site/`, so its links.json was requested at
+ * `my-site/links.json` (a 404, read as "link tracking off") and its info
+ * panel, fuzzy-nav links and sidebar highlight were all empty.
+ *
+ * A trailing `index.html` (a page opened by its file name) is dropped and a
+ * missing trailing slash added, so both name the same page as its directory
+ * URL. The result is percent-DECODED, because site.json stores paths decoded.
+ */
+export function canonicalPathFor(pathname: string, basePath: string, serverMode: boolean): string {
   // `window.location.pathname` is percent-encoded (e.g. spaces → `%20`), but
-  // site.json stores `url_path`/`neighbor` DECODED (literal spaces). Decode once
-  // here so both the server-mode return and the static-mode segment
-  // reconstruction match site.json keys. `%`-encoding never yields a literal
-  // `/`, so the static-mode `split('/')` below is unaffected.
-  const pathname = safeDecodePath(window.location.pathname);
-
-  // In server mode, pathname is already canonical
-  if (window.__MBR_CONFIG__?.serverMode) {
-    return pathname;
+  // site.json stores `url_path`/`neighbor` DECODED (literal spaces). Decode
+  // once, last, so the prefix arithmetic below runs on one consistent form.
+  if (serverMode) {
+    return safeDecodePath(pathname);
   }
 
-  const basePath = window.__MBR_CONFIG__?.basePath || './';
+  // Every mbr page is a directory URL, so a missing trailing slash (a host
+  // that serves `/a/b` without redirecting) still names directory `b`; without
+  // it `basePath` would resolve one level too high.
+  const stripped = pathname.replace(/\/index\.html$/, '/');
+  const page = stripped.endsWith('/') ? stripped : `${stripped}/`;
 
-  // Count depth from basePath (each "../" is one level)
-  const depth = (basePath.match(/\.\.\//g) || []).length;
-
-  // If depth is 0 (at root level), the pathname is already canonical
-  if (depth === 0) {
-    return pathname;
+  // Any origin will do: only the path arithmetic matters, and resolving
+  // through `URL` normalizes `./`, `../` and an empty base the way the
+  // browser does for the page's own relative links.
+  let root: string;
+  try {
+    root = new URL(basePath || './', `http://mbr.invalid${page.startsWith('/') ? '' : '/'}${page}`).pathname;
+  } catch {
+    root = '/';
   }
 
-  // Split pathname and get last `depth` segments
-  const segments = pathname.split('/').filter(p => p);
-  const canonicalSegments = segments.slice(-depth);
+  // `page` ends in `/`, so `rest` is empty (the root) or ends in `/` too.
+  const rest = page.startsWith(root) ? page.slice(root.length) : page.replace(/^\/+/, '');
+  return `/${safeDecodePath(rest)}`;
+}
 
-  // Reconstruct canonical path
-  const canonical = '/' + canonicalSegments.join('/');
-  return canonical.endsWith('/') || canonical === '/' ? canonical : canonical + '/';
+/** {@link canonicalPathFor} for the current page. */
+export function getCanonicalPath(): string {
+  return canonicalPathFor(
+    window.location.pathname,
+    window.__MBR_CONFIG__?.basePath ?? '',
+    Boolean(window.__MBR_CONFIG__?.serverMode),
+  );
 }
 
 /**

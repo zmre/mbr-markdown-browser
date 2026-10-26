@@ -90,8 +90,17 @@ fn bench_resolve_outbound_links(c: &mut Criterion) {
         })
         .collect();
 
+    let page = LinkTransformConfig {
+        markdown_extensions: vec!["md".to_string()],
+        index_file: "index.md".to_string(),
+        is_index_file: false,
+        url_depth: None,
+        current_page_url: "/docs/current/".to_string(),
+        markdown_page_probe: None,
+    };
+
     group.bench_function("50_links", |b| {
-        b.iter(|| resolve_outbound_links("/docs/current/", links.clone(), false));
+        b.iter(|| resolve_outbound_links(links.clone(), &page));
     });
 
     group.finish();
