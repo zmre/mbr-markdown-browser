@@ -35,6 +35,11 @@ pub mod quicklook;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 
+// QuickLook, the desktop server and the iOS core load the same media for the
+// same references; each column runs where its code is built.
+#[cfg(all(test, any(target_vendor = "apple", feature = "mobile")))]
+mod media_parity;
+
 #[cfg(target_vendor = "apple")]
 pub use quicklook::{
     PreviewAttachment, PreviewDocument, QuickLookConfig, QuickLookError, ThumbnailDocument,

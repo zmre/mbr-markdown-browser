@@ -42,7 +42,7 @@ mod iopolicy;
 mod mbr_dir;
 mod runtime;
 mod single_file;
-mod transport;
+pub(crate) mod transport;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};

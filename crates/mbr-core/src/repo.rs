@@ -641,6 +641,70 @@ impl StaticFileMetadata {
     }
 }
 
+/// The storage of a repository on the local filesystem: see [`local_vaults`].
+#[derive(Debug, Clone)]
+pub struct LocalVaults {
+    /// The repository itself ([`Repo::vault`]).
+    pub vault: Arc<dyn Vault>,
+    /// The external static overlay ([`Repo::static_vault`]), when
+    /// `static_folder` resolves outside the repository and the policy accepts
+    /// it.
+    pub static_vault: Option<Arc<dyn Vault>>,
+}
+
+/// The vaults of a repository on the local filesystem at `root_dir`: the
+/// repository, plus a second one for an *external* static overlay
+/// (`static_folder = "../static"`, `"../../static"`) when
+/// [`crate::config::resolve_static_overlay`] accepts it.
+///
+/// The single definition of "a local repository's storage": [`Repo::init`]
+/// (the server and the static build) and QuickLook's asset lookup, which
+/// resolves URLs exactly as the server does without ever scanning, both start
+/// here, so they cannot disagree about which folders a URL may reach.
+///
+/// With `symlink_mounts`, both vaults serve links out of them as read-only
+/// **mounts** ([`crate::vault::MountPolicy`]), each protecting the other's
+/// root; without, they are plain [`LocalVault`]s on which a link out is
+/// `OutsideRoot` (`--no-symlink-mounts`, and QuickLook).
+pub fn local_vaults(root_dir: &Path, static_folder: &str, symlink_mounts: bool) -> LocalVaults {
+    let canonical_root = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf());
+    // Ask the config policy, rather than re-deriving containment here, so a
+    // refused overlay is never reachable. A policy error is not re-reported:
+    // `Config::validate` already aborted startup on it, and the only callers
+    // that reach here with a bad value are tests constructing a `Repo`
+    // directly, and QuickLook, which reads a config it does not validate.
+    let overlay_dir = match crate::config::resolve_static_overlay(&canonical_root, static_folder) {
+        Ok(crate::config::StaticOverlay::External(dir)) => Some(dir),
+        Ok(crate::config::StaticOverlay::WithinRoot) => None,
+        Err(e) => {
+            tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
+            None
+        }
+    };
+    if !symlink_mounts {
+        return LocalVaults {
+            vault: Arc::new(LocalVault::new(root_dir)),
+            static_vault: overlay_dir.map(|dir| Arc::new(LocalVault::new(dir)) as Arc<dyn Vault>),
+        };
+    }
+    let vault: Arc<dyn Vault> = Arc::new(LocalVault::with_mounts(
+        root_dir,
+        MountPolicy::new(overlay_dir.iter().cloned().collect()),
+    ));
+    let static_vault = overlay_dir.map(|dir| {
+        Arc::new(LocalVault::with_mounts(
+            dir,
+            MountPolicy::new(vec![canonical_root.clone()]).with_markdown_root(canonical_root),
+        )) as Arc<dyn Vault>
+    });
+    LocalVaults {
+        vault,
+        static_vault,
+    }
+}
+
 impl Repo {
     pub fn init_from_config(c: &Config) -> Self {
         Self::init(
@@ -732,33 +796,11 @@ impl Repo {
         relationship_types: &[RelationType],
     ) -> Self {
         let root_dir: PathBuf = root_dir.into();
-        let canonical_root = root_dir.canonicalize().unwrap_or_else(|_| root_dir.clone());
         let static_folder = static_folder.into();
-        // Ask the config policy, rather than re-deriving containment here, so a
-        // refused overlay is never scannable. A policy error is not re-reported:
-        // `Config::validate` already aborted startup on it, and the only callers
-        // that reach here with a bad value are tests constructing a `Repo`
-        // directly.
-        let overlay_dir =
-            match crate::config::resolve_static_overlay(&canonical_root, &static_folder) {
-                Ok(crate::config::StaticOverlay::External(dir)) => Some(dir),
-                Ok(crate::config::StaticOverlay::WithinRoot) => None,
-                Err(e) => {
-                    tracing::warn!("Not indexing static_folder {static_folder:?}: {e}");
-                    None
-                }
-            };
-        let vault: Arc<dyn Vault> = Arc::new(LocalVault::with_mounts(
-            root_dir,
-            MountPolicy::new(overlay_dir.iter().cloned().collect()),
-        ));
-        let static_vault: Option<Arc<dyn Vault>> = overlay_dir.map(|dir| {
-            Arc::new(LocalVault::with_mounts(
-                dir,
-                MountPolicy::new(vec![canonical_root.clone()])
-                    .with_markdown_root(canonical_root.clone()),
-            )) as Arc<dyn Vault>
-        });
+        let LocalVaults {
+            vault,
+            static_vault,
+        } = local_vaults(&root_dir, &static_folder, true);
 
         Self::init_with_vault(
             vault,
