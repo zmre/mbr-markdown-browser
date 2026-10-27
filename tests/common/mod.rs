@@ -229,6 +229,62 @@ impl Default for PeerStaticSite {
     }
 }
 
+/// A repository whose pages link out from every position that resolves a
+/// relative destination differently: the root index (`/`), a nested index
+/// (`/modes/`) and a non-index page (`/modes/editing/`), with folder-style,
+/// extension-style, `../` and external destinations.
+///
+/// Returns each page's URL with the outbound `to` values its `links.json`
+/// must carry, in document order. Shared by the server and build tests so
+/// both modes are held to the same answer.
+#[allow(dead_code)]
+pub fn create_link_resolution_fixture(repo: &TestRepo) -> Vec<(&'static str, Vec<&'static str>)> {
+    repo.create_markdown(
+        "index.md",
+        "# Home\n\n[Start](getting-started/) and [Editing](modes/editing.md)\n",
+    );
+    repo.create_markdown("getting-started.md", "# Getting Started\n");
+    repo.create_markdown(
+        "modes/index.md",
+        "# Modes\n\n[GUI](gui/), [Editing](editing.md), [Start](../getting-started/)\n",
+    );
+    repo.create_markdown("modes/gui.md", "# GUI\n");
+    repo.create_markdown(
+        "modes/editing.md",
+        "# Editing\n\n[Properties](editing-frontmatter/), [Tasks](../markdown/tasks.md), \
+         [Example](https://example.com/)\n",
+    );
+    repo.create_markdown("modes/editing-frontmatter.md", "# Properties\n");
+    repo.create_markdown("markdown/tasks.md", "# Tasks\n");
+
+    vec![
+        ("/", vec!["/getting-started/", "/modes/editing/"]),
+        (
+            "/modes/",
+            vec!["/modes/gui/", "/modes/editing/", "/getting-started/"],
+        ),
+        (
+            "/modes/editing/",
+            vec![
+                "/modes/editing-frontmatter/",
+                "/markdown/tasks/",
+                "https://example.com/",
+            ],
+        ),
+    ]
+}
+
+/// The `to` values of a `links.json` payload's outbound list, in order.
+#[allow(dead_code)]
+pub fn outbound_targets(links: &serde_json::Value) -> Vec<String> {
+    links["outbound"]
+        .as_array()
+        .expect("outbound array")
+        .iter()
+        .map(|link| link["to"].as_str().expect("string `to`").to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

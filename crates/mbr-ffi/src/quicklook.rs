@@ -18,7 +18,9 @@
 //! a stronger one than the `mbrfile://` scheme handler it replaced: a `<script>`
 //! in untrusted markdown could ask that handler for *any* path, whereas `cid:`
 //! resolves against this list and nothing else. The list only ever contains
-//! regular files that canonically live inside the previewed repository.
+//! regular files the server would serve for the same URLs: canonically inside
+//! the previewed repository or its configured static overlay (see
+//! [`AssetResolver`]).
 //!
 //! [reply]: https://developer.apple.com/documentation/quicklook/qlpreviewreply
 
@@ -29,9 +31,12 @@ use mbr_core::embedded_pico;
 use mbr_core::link_transform::LinkTransformConfig;
 use mbr_core::markdown;
 use mbr_core::page_context::{self, UrlMode};
+use mbr_core::path_resolver::{self, OwnedPathResolverConfig, ResolvedPath};
 use mbr_core::relationships::{self, RelationTypeRegistry};
+use mbr_core::repo;
 use mbr_core::templates;
 use mbr_core::url_path::{self, url_scheme};
+use mbr_core::vault::VaultPath;
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 use std::borrow::Cow;
@@ -395,13 +400,8 @@ pub fn render_thumbnail(
     // one YAML parse and one definition of what the frontmatter says.
     let mut rendered = target.render_markdown(&source)?;
 
-    if let Some(path) = target.canonical_root().and_then(|canonical_root| {
-        thumbnail_cover_image(
-            &rendered.frontmatter,
-            &canonical_root,
-            target.path.parent().unwrap_or(&canonical_root),
-            &target.config.static_folder,
-        )
+    if let Some(path) = AssetResolver::new(&target.root_path, &target.config).and_then(|resolver| {
+        thumbnail_cover_image(&rendered.frontmatter, &resolver, &target.base_dir_url())
     }) {
         return Ok(ThumbnailDocument::Image { path });
     }
@@ -457,12 +457,6 @@ impl QuickLookTarget {
         })
     }
 
-    /// The canonical repository root, or `None` if it cannot be resolved - in
-    /// which case nothing can be proven to be inside it.
-    fn canonical_root(&self) -> Option<PathBuf> {
-        self.root_path.canonicalize().ok()
-    }
-
     /// The URL of the folder holding this file, ending in `/` (`/notes/` for
     /// both `notes/note.md` and `notes/index.md`, `/` for a note at the root):
     /// what the rendered HTML's relative URLs are relative to.
@@ -480,7 +474,7 @@ impl QuickLookTarget {
         let root = canonical(&self.root_path);
         // A note outside its root (only possible with an explicit
         // `config_root`) falls back to the root itself; containment of what the
-        // URLs then name is still judged by `resolve_asset_path`.
+        // URLs then name is still judged by `AssetResolver`.
         let relative_dir = note
             .parent()
             .and_then(|dir| dir.strip_prefix(&root).ok())
@@ -620,51 +614,40 @@ fn cut_at_line_boundary(bytes: &[u8]) -> &[u8] {
 /// The cover image a thumbnail should use instead of the rendered page.
 ///
 /// Tries each of [`COVER_IMAGE_KEYS`] in order and returns the first that names
-/// a usable image: a string that is not a URL with a scheme, resolves to a
-/// regular file canonically inside `canonical_root`, has one of
-/// [`COVER_IMAGE_EXTENSIONS`], and is non-empty and no larger than
-/// [`MAX_ATTACHMENT_BYTES`]. A root-relative value (`/images/x.png`) resolves
-/// the way a page's root-relative asset does (direct, then the static folder);
-/// any other value is relative to the note's own directory, as it is for a
-/// contact portrait.
+/// a usable image: a string that is not a URL with a scheme, names a file the
+/// server would serve, has one of [`COVER_IMAGE_EXTENSIONS`], and is non-empty
+/// and no larger than [`MAX_ATTACHMENT_BYTES`]. The value is read exactly as an
+/// `<img src>` in the page is ([`asset_url_path`]): a root-relative value
+/// (`/images/x.png`) resolves like a root-relative asset (direct, then the
+/// static folder, inside the root or an external overlay); any other value is
+/// relative to the note's own folder (`base_dir_url`), as it is for a contact
+/// portrait.
 ///
 /// # Security
 ///
 /// The value is attacker-controlled frontmatter and the returned path is read by
 /// the thumbnail extension, whose sandbox can read anything the user can. So the
-/// same containment as attachments applies - [`contained_canonical`] on the
-/// resolved path, never on the authored string - and the extension test runs
-/// on the *canonical* name, so a `cover.png` symlink to a non-image is refused.
+/// same boundary as attachments applies - [`AssetResolver`], on canonical
+/// paths, never on the authored string - and the extension test runs on the
+/// *canonical* name, so a `cover.png` symlink to a non-image is refused.
 fn thumbnail_cover_image(
     frontmatter: &markdown::SimpleMetadata,
-    canonical_root: &Path,
-    note_dir: &Path,
-    static_folder: &str,
+    resolver: &AssetResolver,
+    base_dir_url: &str,
 ) -> Option<String> {
     COVER_IMAGE_KEYS
         .iter()
         .filter_map(|key| frontmatter.get(*key)?.as_str())
-        .find_map(|value| {
-            resolve_cover_image(value.trim(), canonical_root, note_dir, static_folder)
-        })
+        .find_map(|value| resolve_cover_image(value.trim(), resolver, base_dir_url))
 }
 
 /// One candidate of [`thumbnail_cover_image`], resolved and vetted.
 fn resolve_cover_image(
     value: &str,
-    canonical_root: &Path,
-    note_dir: &Path,
-    static_folder: &str,
+    resolver: &AssetResolver,
+    base_dir_url: &str,
 ) -> Option<String> {
-    if value.is_empty() || mbr_core::url_path::url_scheme(value).is_some() {
-        return None;
-    }
-
-    let resolved = if value.starts_with('/') {
-        resolve_asset_path(canonical_root, static_folder, value)
-    } else {
-        contained_canonical(canonical_root, &note_dir.join(value))
-    }?;
+    let resolved = resolver.resolve(&asset_url_path(base_dir_url, value)?)?;
 
     let is_image = resolved
         .extension()
@@ -790,59 +773,93 @@ pub fn find_config_root(file_path: String) -> String {
     config::find_root_dir(&path).to_string_lossy().into_owned()
 }
 
-/// Canonical form of `candidate`, but only if it is a regular file inside
-/// `canonical_root`.
+/// Where a local asset URL leads: the file the **server** would serve for it.
 ///
-/// `canonicalize` resolves `..` and every symlink, so its *result* is the only
-/// trustworthy answer; containment is therefore checked on the resolved path and
-/// never on the input string. `Path::starts_with` compares whole components, so
-/// a sibling root like `/notes-evil` does not count as inside `/notes`.
-///
-/// The `is_file` test is load-bearing rather than tidiness: `starts_with` is
-/// reflexive, so `/` (whose relative form is the empty string) canonicalizes to
-/// the root itself and would otherwise pass containment and be attached as a
-/// zero-byte "asset".
-///
-/// This mirrors `safe_join` in `path_resolver.rs`, which guards the same class of
-/// traversal for the server. QuickLook only ever attaches files that already
-/// exist, so unlike `safe_join` there is no "parent exists, leaf does not" case
-/// to handle.
-fn contained_canonical(canonical_root: &Path, candidate: &Path) -> Option<PathBuf> {
-    let canonical = candidate.canonicalize().ok()?;
-    (canonical.is_file() && canonical.starts_with(canonical_root)).then_some(canonical)
-}
-
-/// Resolve a root-relative URL path to an on-disk asset, checking the direct path
-/// first, then falling back to the static folder.
-///
-/// This mirrors the logic in `path_resolver.rs` for consistent behavior between
-/// server mode and QuickLook previews.
+/// A thin wrapper around [`path_resolver::resolve_request_path`] over the
+/// repository's vaults ([`repo::local_vaults`]: the repository plus an external
+/// static overlay such as SvelteKit's `static_folder = "../../static"`), so a
+/// preview finds every asset the server finds - direct path, then the static
+/// folder, inside the root or out of it - and refuses everything it refuses. It
+/// used to be a parallel reimplementation that joined `static_folder` onto the
+/// root and then demanded the result stay *inside* the root, which silently
+/// refused every external overlay.
 ///
 /// # Security
 ///
-/// `url_path` comes from attacker-controlled markdown. The returned path is always
-/// the canonical path of a file that exists *inside* `canonical_root`; `..`
-/// traversal, an absolute path smuggled in after the leading slash, and symlinks
-/// pointing out of the repository all yield `None`. Callers must not attach a
-/// file when this returns `None`.
-fn resolve_asset_path(
-    canonical_root: &Path,
-    static_folder: &str,
-    url_path: &str,
-) -> Option<PathBuf> {
-    // url_path is like "/images/photo.jpg" - remove leading slashes for join
-    let relative_path = url_path.trim_start_matches('/');
+/// Every URL it is asked about comes from attacker-controlled markdown. What it
+/// returns is the canonical path of an existing regular file that the resolver
+/// placed inside the repository or the configured static overlay (itself vetted
+/// by [`config::resolve_static_overlay`]): `..` above the root, absolute paths,
+/// hidden segments (`.git/config`, `.env`) and symlinks out of either vault are
+/// refused there, on canonical paths. Symlink **mounts** are deliberately off
+/// (unlike the desktop server's default): a previewed folder is often one the
+/// user merely downloaded, and the preview should not read through its links to
+/// elsewhere on the disk.
+struct AssetResolver {
+    paths: OwnedPathResolverConfig,
+}
 
-    // Check direct path first, then fall back to the static folder overlay.
-    contained_canonical(canonical_root, &canonical_root.join(relative_path)).or_else(|| {
-        if static_folder.is_empty() {
-            return None;
-        }
-        contained_canonical(
-            canonical_root,
-            &canonical_root.join(static_folder).join(relative_path),
-        )
-    })
+impl AssetResolver {
+    /// The resolver for the repository at `root_path`, configured by `config`;
+    /// `None` when the root cannot be canonicalized, in which case nothing can
+    /// be proven to be inside it.
+    fn new(root_path: &Path, config: &Config) -> Option<Self> {
+        let canonical_root = root_path.canonicalize().ok()?;
+        let repo::LocalVaults {
+            vault,
+            static_vault,
+        } = repo::local_vaults(&canonical_root, &config.static_folder, false);
+        Some(Self {
+            paths: OwnedPathResolverConfig {
+                vault,
+                static_vault,
+                static_folder: config.static_folder.clone(),
+                markdown_extensions: config.markdown_extensions.clone(),
+                index_file: config.index_file.clone(),
+                // Tag pages are not files.
+                tag_sources: Vec::new(),
+                exempt_hidden_dirs: config
+                    .explicit_hidden_dirs
+                    .iter()
+                    .filter_map(|dir| VaultPath::from_relative_native(dir).ok())
+                    .collect(),
+            },
+        })
+    }
+
+    /// The file a root-relative, decoded `url_path` (`/images/a.png`) names,
+    /// or `None` when the server would not serve one there.
+    ///
+    /// Only a *file the URL names* counts: a static file, or a markdown file
+    /// named with its extension (`/docs/readme.md`, attached as before). A page
+    /// URL that the server renders (`/docs/` for `docs/index.md`, `/guide/` for
+    /// `guide.md`), a directory listing or a redirect is not an asset.
+    fn resolve(&self, url_path: &str) -> Option<PathBuf> {
+        // The server's catch-all route captures the path without its leading
+        // slash; a vault path with one is absolute and refused.
+        let request = url_path.trim_start_matches('/');
+        let key = match path_resolver::resolve_request_path(&self.paths.as_config(), request) {
+            ResolvedPath::StaticFile(key) => key,
+            ResolvedPath::MarkdownFile(key) if self.names_markdown_file(request) => key,
+            _ => return None,
+        };
+        // Keys of a `LocalVault` are canonical paths; the resolver has stat'ed
+        // them as files, and this re-check is what `cid_for` reads the size of.
+        std::fs::metadata(&key)
+            .is_ok_and(|metadata| metadata.is_file())
+            .then_some(key)
+    }
+
+    /// Whether `request`'s last segment carries a markdown extension, i.e. it
+    /// names the file itself rather than its page.
+    fn names_markdown_file(&self, request: &str) -> bool {
+        Path::new(request)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                repo::is_markdown_extension(extension, &self.paths.markdown_extensions)
+            })
+    }
 }
 
 /// The root-relative, decoded file path an attribute value names, or `None` when
@@ -859,8 +876,8 @@ fn resolve_asset_path(
 /// alone.
 ///
 /// This is *not* a containment check: the result is attacker-controlled and may
-/// still name `/../../etc/passwd` after decoding. [`resolve_asset_path`] judges
-/// it on the canonical path, as it does every root-relative URL.
+/// still name `/../../etc/passwd` after decoding. [`AssetResolver::resolve`]
+/// judges it, as the server judges every request path.
 fn asset_url_path(base_dir_url: &str, value: &str) -> Option<String> {
     let value = html_escape::decode_html_entities(value);
     if value.is_empty()
@@ -910,8 +927,7 @@ fn resolve_relative_url(base_dir_url: &str, relative: &str) -> Option<String> {
 /// share one id space, one dedup table and one byte budget: the same image
 /// referenced twice must become one attachment, not two copies of the file.
 struct AttachmentCollector<'a> {
-    canonical_root: &'a Path,
-    static_folder: &'a str,
+    resolver: &'a AssetResolver,
     /// The URL of the previewed file's folder; relative attribute values
     /// resolve against it (see [`asset_url_path`]).
     base_dir_url: &'a str,
@@ -922,10 +938,9 @@ struct AttachmentCollector<'a> {
 }
 
 impl<'a> AttachmentCollector<'a> {
-    fn new(canonical_root: &'a Path, static_folder: &'a str, base_dir_url: &'a str) -> Self {
+    fn new(resolver: &'a AssetResolver, base_dir_url: &'a str) -> Self {
         Self {
-            canonical_root,
-            static_folder,
+            resolver,
             base_dir_url,
             seen: HashMap::new(),
             attachments: Vec::new(),
@@ -937,11 +952,12 @@ impl<'a> AttachmentCollector<'a> {
     /// the URL as authored.
     ///
     /// `None` means "this preview will not show that file", for any of the
-    /// reasons that can apply: it does not exist, it is not a regular file, it
-    /// lives outside the repository, its name is not valid UTF-8, or attaching
+    /// reasons that can apply: the server would not serve a file there (it does
+    /// not exist, is not a regular file, lives outside the repository and its
+    /// static overlay, or is hidden), its name is not valid UTF-8, or attaching
     /// it would blow the size budget.
     fn cid_for(&mut self, url_path: &str) -> Option<String> {
-        let resolved = resolve_asset_path(self.canonical_root, self.static_folder, url_path)?;
+        let resolved = self.resolver.resolve(url_path)?;
 
         if let Some(id) = self.seen.get(&resolved) {
             return Some(format!("cid:{id}"));
@@ -999,31 +1015,28 @@ impl<'a> AttachmentCollector<'a> {
 /// resolved here against `base_dir_url`, the note's folder: QuickLook renders
 /// markdown links without the trailing-slash `../` compensation, so relative
 /// markdown and raw-HTML URLs both mean what they do on GitHub or in an
-/// editor. Assets are then resolved with the
-/// same fallback the server uses: the direct path first, then the static
-/// folder.
+/// editor. Each resulting URL is then resolved by the server's own resolver
+/// ([`AssetResolver`]): the direct path first, then the static folder, inside
+/// the root or an external overlay.
 ///
 /// # Security
 ///
 /// This is the boundary. The returned list is the *only* set of local files a
-/// preview can read, so nothing may enter it that is not a regular file
-/// canonically inside `root_path` - see [`contained_canonical`]. If `root_path`
-/// itself cannot be canonicalized there is nothing to contain against, so the
-/// HTML is returned untouched and nothing is attached, rather than rewritten
-/// optimistically.
+/// preview can read, so nothing may enter it that the server would not serve
+/// from the repository or its static overlay - see [`AssetResolver`]. Without a
+/// resolver (the root cannot be canonicalized) there is nothing to contain
+/// against, so the HTML is returned untouched and nothing is attached, rather
+/// than rewritten optimistically.
 fn collect_preview_attachments(
     html: &str,
-    root_path: &Path,
-    static_folder: &str,
+    resolver: Option<&AssetResolver>,
     base_dir_url: &str,
 ) -> (String, Vec<PreviewAttachment>) {
-    // Canonicalize the root once: every containment check compares against it,
-    // and per-attribute canonicalization of the root would be wasted syscalls.
-    let Ok(canonical_root) = root_path.canonicalize() else {
+    let Some(resolver) = resolver else {
         return (html.to_string(), Vec::new());
     };
 
-    let mut collector = AttachmentCollector::new(&canonical_root, static_folder, base_dir_url);
+    let mut collector = AttachmentCollector::new(resolver, base_dir_url);
 
     // First pass: handle double-quoted attributes
     let result = ASSET_ATTRIBUTE_DOUBLE_QUOTED
@@ -1093,10 +1106,11 @@ fn render_quicklook_template(
     let page_html = card_html + markdown_html;
 
     // Turn local asset URLs (root-relative, or relative to `base_dir_url`) into
-    // cid: references and collect the files they name. Uses static_folder
-    // fallback logic to find files in the correct location.
+    // cid: references and collect the files they name, wherever the server
+    // would find them (the static folder included, in or out of the root).
+    let resolver = AssetResolver::new(root_path, config);
     let (markdown_html, attachments) =
-        collect_preview_attachments(&page_html, root_path, &config.static_folder, base_dir_url);
+        collect_preview_attachments(&page_html, resolver.as_ref(), base_dir_url);
 
     // Load custom theme CSS if available
     let custom_theme = load_custom_theme(root_path);
@@ -1603,6 +1617,35 @@ mod tests {
     /// canonical repo root. The canonical root is what the rewriter emits, and
     /// on macOS it differs from `tempdir.path()`
     /// (`/var/folders/...` -> `/private/var/folders/...`).
+    /// The resolver a preview of a repository at `root` with `static_folder`
+    /// (and every other setting at its default) would use.
+    fn test_resolver(root: &Path, static_folder: &str) -> Option<AssetResolver> {
+        let config = Config {
+            static_folder: static_folder.to_string(),
+            ..Config::default()
+        };
+        AssetResolver::new(root, &config)
+    }
+
+    /// The file a root-relative `url_path` resolves to in a preview.
+    fn resolve_asset_path(root: &Path, static_folder: &str, url_path: &str) -> Option<PathBuf> {
+        test_resolver(root, static_folder)?.resolve(url_path)
+    }
+
+    /// [`collect_preview_attachments`] for a repository at `root`.
+    fn collect_attachments(
+        html: &str,
+        root: &Path,
+        static_folder: &str,
+        base_dir_url: &str,
+    ) -> (String, Vec<PreviewAttachment>) {
+        collect_preview_attachments(
+            html,
+            test_resolver(root, static_folder).as_ref(),
+            base_dir_url,
+        )
+    }
+
     fn repo_with_file(relative_file: &str) -> (tempfile::TempDir, PathBuf) {
         let temp_dir = tempfile::tempdir().unwrap();
         let file = temp_dir.path().join("repo").join(relative_file);
@@ -1616,7 +1659,7 @@ mod tests {
     fn test_collect_attachments_double_quotes() {
         let (_tmp, root) = repo_with_file("images/test.png");
         let html = r#"<img src="/images/test.png" alt="test">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/test.png"));
         assert_eq!(result, format!(r#"<img src="{cid}" alt="test">"#));
@@ -1627,7 +1670,7 @@ mod tests {
     fn test_collect_attachments_single_quotes() {
         let (_tmp, root) = repo_with_file("videos/test.mp4");
         let html = r#"<source src='/videos/test.mp4' type="video/mp4">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("videos/test.mp4"));
         assert_eq!(result, format!(r#"<source src='{cid}' type="video/mp4">"#));
@@ -1637,7 +1680,7 @@ mod tests {
     fn test_collect_attachments_href() {
         let (_tmp, root) = repo_with_file("docs/readme.md");
         let html = r#"<a href="/docs/readme.md">Link</a>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("docs/readme.md"));
         assert_eq!(result, format!(r#"<a href="{cid}">Link</a>"#));
@@ -1647,7 +1690,7 @@ mod tests {
     fn test_collect_attachments_poster() {
         let (_tmp, root) = repo_with_file("images/thumb.jpg");
         let html = r#"<video poster="/images/thumb.jpg"></video>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/thumb.jpg"));
         assert_eq!(result, format!(r#"<video poster="{cid}"></video>"#));
@@ -1663,7 +1706,7 @@ mod tests {
             r#"<img src='/images/test.png'>"#,
             r#"<a href="/images/test.png">x</a>"#,
         );
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         assert_eq!(attachments.len(), 1);
         let cid = cid_of(&attachments, &root.join("images/test.png"));
@@ -1676,7 +1719,7 @@ mod tests {
         // so the HTML must be left alone rather than rewritten optimistically.
         let html = r#"<img src="/images/test.png">"#;
         let (result, attachments) =
-            collect_preview_attachments(html, Path::new("/no/such/root"), "static", "/");
+            collect_attachments(html, Path::new("/no/such/root"), "static", "/");
         assert_eq!(result, html);
         assert!(attachments.is_empty());
     }
@@ -1743,7 +1786,7 @@ mod tests {
     fn test_collect_attachments_resolves_relative_against_base_dir_url() {
         let (_tmp, root) = repo_with_file("notes/img/a.png");
         let html = r#"<img src="img/a.png"><img src='./img/a.png'>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/notes/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/notes/");
 
         let cid = cid_of(&attachments, &root.join("notes/img/a.png"));
         assert_eq!(result, format!(r#"<img src="{cid}"><img src='{cid}'>"#));
@@ -1754,7 +1797,7 @@ mod tests {
     fn test_collect_attachments_relative_uses_static_folder_fallback() {
         let (_tmp, root) = repo_with_file("static/pics/c.png");
         let html = r#"<img src="pics/c.png">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "static", "/");
+        let (result, attachments) = collect_attachments(html, &root, "static", "/");
 
         let cid = cid_of(&attachments, &root.join("static/pics/c.png"));
         assert_eq!(result, format!(r#"<img src="{cid}">"#));
@@ -1766,7 +1809,7 @@ mod tests {
         // root-relative image with a space in its name never loaded either.
         let (_tmp, root) = repo_with_file("images/my photo.png");
         let html = r#"<img src="/images/my%20photo.png">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/my photo.png"));
         assert_eq!(result, format!(r#"<img src="{cid}">"#));
@@ -1781,7 +1824,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(temp_dir.path().join("secret.txt"), b"secret").unwrap();
         let html = r#"<a href="/%2E%2E/secret.txt">x</a><a href="/..%2Fsecret.txt">y</a>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
         assert_eq!(result, html);
         assert!(attachments.is_empty());
     }
@@ -1792,7 +1835,7 @@ mod tests {
         // the repository.
         let (_tmp, root) = repo_with_file("host/x.png");
         let html = r#"<img src="//host/x.png">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
         assert_eq!(result, html);
         assert!(attachments.is_empty());
     }
@@ -1802,7 +1845,7 @@ mod tests {
         // HTTP URLs should NOT be converted
         let html = r#"<img src="https://example.com/image.png">"#;
         let (_tmp, root) = repo_with_file("images/test.png");
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
         assert_eq!(result, r#"<img src="https://example.com/image.png">"#);
         assert!(attachments.is_empty());
     }
@@ -1816,8 +1859,7 @@ mod tests {
         std::fs::write(static_images.join("photo.jpg"), b"image data").unwrap();
 
         let html = r#"<img src="/images/photo.jpg">"#;
-        let (result, attachments) =
-            collect_preview_attachments(html, temp_dir.path(), "static", "/");
+        let (result, attachments) = collect_attachments(html, temp_dir.path(), "static", "/");
 
         // Should resolve to static/images/photo.jpg since /images/photo.jpg doesn't exist
         let expected_path = static_images.canonicalize().unwrap().join("photo.jpg");
@@ -1841,8 +1883,7 @@ mod tests {
         std::fs::write(static_images.join("photo.jpg"), b"static image").unwrap();
 
         let html = r#"<img src="/images/photo.jpg">"#;
-        let (_result, attachments) =
-            collect_preview_attachments(html, temp_dir.path(), "static", "/");
+        let (_result, attachments) = collect_attachments(html, temp_dir.path(), "static", "/");
 
         // Should resolve to direct path since it exists
         let expected_path = direct_images.canonicalize().unwrap().join("photo.jpg");
@@ -1863,8 +1904,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let html = r#"<img src="/images/missing.jpg">"#;
-        let (result, attachments) =
-            collect_preview_attachments(html, temp_dir.path(), "static", "/");
+        let (result, attachments) = collect_attachments(html, temp_dir.path(), "static", "/");
 
         assert_eq!(result, html);
         assert!(attachments.is_empty());
@@ -1881,7 +1921,7 @@ mod tests {
         drop(file);
 
         let html = r#"<img src="/images/small.png"><video src="/images/huge.mp4"></video>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("images/small.png"));
         assert_eq!(attachments.len(), 1, "only the small asset is attached");
@@ -1910,7 +1950,7 @@ mod tests {
             .iter()
             .map(|name| format!(r#"<img src="/images/{name}">"#))
             .collect();
-        let (result, attachments) = collect_preview_attachments(&html, &root, "", "/");
+        let (result, attachments) = collect_attachments(&html, &root, "", "/");
 
         assert_eq!(attachments.len(), fit, "the last asset busts the budget");
         assert_eq!(
@@ -1930,7 +1970,7 @@ mod tests {
         let (_tmp, root) = repo_with_file("images/test.png");
 
         let html = r#"<img src="/"><img src="/images"><img src="/images/">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         assert!(attachments.is_empty(), "got {attachments:?}");
         assert_eq!(result, html);
@@ -2085,7 +2125,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, root.join("images/leak.png")).unwrap();
 
         let html = r#"<img src="/images/leak.png"><img src='/../id_rsa'>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "static", "/");
+        let (result, attachments) = collect_attachments(html, &root, "static", "/");
 
         assert_eq!(result, html);
         assert!(attachments.is_empty(), "got {attachments:?}");
@@ -2388,7 +2428,7 @@ mod tests {
 
     #[test]
     fn test_text_preview_does_not_rewrite_urls_in_content() {
-        // collect_preview_attachments() runs over the rendered HTML. A source
+        // collect_attachments() runs over the rendered HTML. A source
         // file that merely mentions src="/..." must be shown, not rewritten.
         let (_dir, html) = preview_file("page.txt", b"<img src=\"/images/x.png\">\n");
 
@@ -2751,7 +2791,7 @@ mod tests {
             "\n   ",
             r#"https://example.com/c.png 3x, ../../outside.png 4x">"#,
         );
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         let cid = cid_of(&attachments, &root.join("img/a.png"));
         assert_eq!(
@@ -2767,7 +2807,7 @@ mod tests {
     fn test_collect_attachments_srcset_single_quoted_and_deduped_with_src() {
         let (_tmp, root) = repo_with_file("img/a.png");
         let html = r#"<picture><source srcset='img/a.png 640w'><img src="img/a.png" srcset="/img/a.png 2x"></picture>"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
 
         assert_eq!(attachments.len(), 1, "{attachments:?}");
         let cid = cid_of(&attachments, &root.join("img/a.png"));
@@ -2783,7 +2823,7 @@ mod tests {
     fn test_collect_attachments_srcset_nothing_local_is_untouched() {
         let (_tmp, root) = repo_with_file("img/a.png");
         let html = r#"<img srcset="https://x/a.png 1x, img/none.png 2x">"#;
-        let (result, attachments) = collect_preview_attachments(html, &root, "", "/");
+        let (result, attachments) = collect_attachments(html, &root, "", "/");
         assert_eq!(result, html);
         assert!(attachments.is_empty());
     }

@@ -3,6 +3,7 @@
 //! Provides data structures and caching for tracking inbound and outbound links
 //! between markdown pages, enabling wiki-style backlink features.
 
+use crate::link_transform::{LinkTransformConfig, transform_link};
 use papaya::HashMap as ConcurrentHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -244,30 +245,56 @@ fn resolve_relative_url_parts(
     (url, escaped)
 }
 
-/// Resolves all relative URLs in outbound links to absolute URLs.
+/// Resolves every internal outbound link to the site-absolute URL of the page
+/// it lands on (`/docs/alpha/`), the one form `links.json` publishes.
 ///
-/// This is used before caching outbound links so the frontend can use them
-/// directly. `is_index_file` indicates whether `base_url` corresponds to an
-/// index markdown file; see [`resolve_relative_url`] for why this matters.
+/// `page` describes the page the links were collected from: its
+/// [`LinkTransformConfig::current_page_url`] and
+/// [`LinkTransformConfig::is_index_file`], plus the markdown extensions and
+/// index file name. It is the same configuration the renderer rewrote the
+/// page's hrefs with, so a link's target here is by construction the page its
+/// rendered `<a href>` reaches.
+///
+/// This is the **only** place an outbound target is resolved — the server's
+/// `links.json`, the server's backlink index and the static build's
+/// `links.json` and backlinks all call it — so the two modes publish the same
+/// targets. They used not to: the static build wrote the raw, file-relative
+/// destination (`getting-started/` on the root page, `editing-frontmatter/` on
+/// `/modes/editing/`), which a client can only read correctly by knowing the
+/// source file's directory, and every consumer read it as site-absolute — so
+/// from any page below the root the info panel and the fuzzy-nav "links out"
+/// list pointed one or more levels off, and the link graph's targets matched
+/// no note.
+///
+/// `OutboundLink.to` arrives as the *raw* markdown destination (`alpha.md`,
+/// `../notes/x.md`, `folder/`), recorded before the renderer rewrote the
+/// href. It goes through [`transform_link`] first — resolving `alpha.md`
+/// directly would give `/alpha.md/`, a URL no page has — and the result is
+/// resolved with `is_index_file = true`, because `transform_link` has already
+/// added the `../` that compensates for the trailing-slash URL convention;
+/// passing the page's own flag would strip its last segment a second time.
+/// Root-relative targets (including wikilinks the renderer resolved globally)
+/// are already site-absolute and are left as authored, so `page.url_depth`
+/// never applies.
 ///
 /// Links with an empty target are dropped. The renderer splits `#anchor` off
 /// the destination before storing it, so an anchor-only link like
-/// `[Top](#top)` arrives as `to: ""` with `anchor: Some("#top")` — the
-/// `starts_with('#')` guard below never sees it. Such a link targets the
-/// current page, not another one; resolving `""` against `base_url` used to
-/// invent an outbound link to the parent directory (and, once inverted, a
-/// phantom backlink on a page the author never linked to).
+/// `[Top](#top)` arrives as `to: ""` with `anchor: Some("#top")`. Such a link
+/// targets the current page, not another one; resolving `""` against the page
+/// URL used to invent an outbound link to the parent directory (and, once
+/// inverted, a phantom backlink on a page the author never linked to).
 pub fn resolve_outbound_links(
-    base_url: &str,
     links: Vec<OutboundLink>,
-    is_index_file: bool,
+    page: &LinkTransformConfig,
 ) -> Vec<OutboundLink> {
+    let base_url = page.current_page_url.as_str();
     links
         .into_iter()
         .filter(|link| !link.to.is_empty())
         .map(|mut link| {
             if link.internal && !link.to.starts_with('/') && !link.to.starts_with('#') {
-                link.to = resolve_relative_url(base_url, &link.to, is_index_file);
+                let href = transform_link(&link.to, page);
+                link.to = resolve_relative_url(base_url, &href, true);
             }
             link
         })
@@ -1168,7 +1195,7 @@ mod tests {
             internal: true,
         }];
 
-        let resolved = resolve_outbound_links("/docs/guide/", links, false);
+        let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));
 
         assert!(
             resolved.is_empty(),
@@ -1193,10 +1220,96 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_outbound_links("/docs/guide/", links, false);
+        let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].to, "/docs/intro/");
+    }
+
+    /// The page an outbound list was collected from, as the renderer saw it.
+    fn page_config(url: &str, is_index_file: bool) -> LinkTransformConfig {
+        LinkTransformConfig {
+            markdown_extensions: vec!["md".to_string()],
+            index_file: "index.md".to_string(),
+            is_index_file,
+            url_depth: None,
+            current_page_url: url.to_string(),
+            markdown_page_probe: None,
+        }
+    }
+
+    fn internal(to: &str) -> OutboundLink {
+        OutboundLink {
+            to: to.to_string(),
+            text: String::new(),
+            anchor: None,
+            internal: true,
+        }
+    }
+
+    fn resolved_targets(url: &str, is_index_file: bool, raw: &[&str]) -> Vec<String> {
+        let links = raw.iter().map(|to| internal(to)).collect();
+        resolve_outbound_links(links, &page_config(url, is_index_file))
+            .into_iter()
+            .map(|link| link.to)
+            .collect()
+    }
+
+    #[test]
+    fn test_resolve_outbound_links_root_index_page() {
+        // docs/index.md → `/`: its destinations are relative to the root.
+        assert_eq!(
+            resolved_targets("/", true, &["getting-started/", "modes/editing.md", "x.md"]),
+            ["/getting-started/", "/modes/editing/", "/x/"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_outbound_links_nested_index_page() {
+        // docs/modes/index.md → `/modes/`: siblings live inside the folder.
+        assert_eq!(
+            resolved_targets("/modes/", true, &["gui/", "editing.md", "../markdown/"]),
+            ["/modes/gui/", "/modes/editing/", "/markdown/"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_outbound_links_non_index_page() {
+        // docs/modes/editing.md → `/modes/editing/`: siblings live in
+        // `/modes/`, which is where the rendered `../editing-frontmatter/`
+        // href lands from the trailing-slash URL.
+        assert_eq!(
+            resolved_targets(
+                "/modes/editing/",
+                false,
+                &[
+                    "editing-frontmatter/",
+                    "editing-frontmatter.md",
+                    "../markdown/tasks.md"
+                ]
+            ),
+            [
+                "/modes/editing-frontmatter/",
+                "/modes/editing-frontmatter/",
+                "/markdown/tasks/"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_outbound_links_keeps_absolute_and_external() {
+        let links = vec![
+            internal("/people/alice/"),
+            OutboundLink {
+                to: "https://example.com/a.md".to_string(),
+                text: String::new(),
+                anchor: None,
+                internal: false,
+            },
+        ];
+        let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));
+        assert_eq!(resolved[0].to, "/people/alice/");
+        assert_eq!(resolved[1].to, "https://example.com/a.md");
     }
 
     #[test]

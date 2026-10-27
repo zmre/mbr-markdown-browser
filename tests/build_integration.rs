@@ -887,6 +887,43 @@ async fn test_build_links_json_contains_outbound_links() {
     assert!(has_external, "Should have external link: {:?}", outbound);
 }
 
+/// Regression: the static build published each outbound link's *raw*,
+/// file-relative destination (`editing-frontmatter/` on `/modes/editing/`),
+/// while every client reads `to` as a site-absolute page URL — so from any page
+/// below the root the info panel, the fuzzy-nav "links out" list and the link
+/// graph pointed at the wrong page. `to` must be what the server publishes.
+#[tokio::test]
+async fn test_build_links_json_outbound_targets_are_site_absolute() {
+    let repo = TestRepo::new();
+    let expected = common::create_link_resolution_fixture(&repo);
+
+    let output = build_site(&repo).await;
+
+    for (page, targets) in expected {
+        let file = output.join(page.trim_start_matches('/')).join("links.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            common::outbound_targets(&json),
+            targets,
+            "outbound targets of {page}"
+        );
+    }
+
+    // Backlinks are inverted from the same resolved targets.
+    let editing: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("modes/editing/links.json")).unwrap())
+            .unwrap();
+    let mut from: Vec<&str> = editing["inbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["from"].as_str().unwrap())
+        .collect();
+    from.sort_unstable();
+    assert_eq!(from, ["/", "/modes/"]);
+}
+
 #[tokio::test]
 async fn test_build_links_json_contains_inbound_links() {
     let repo = TestRepo::new();

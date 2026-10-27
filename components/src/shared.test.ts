@@ -6,6 +6,7 @@ import {
   isNewTabModifier,
   openInNewTab,
   getCanonicalPath,
+  canonicalPathFor,
   getGraphDepth,
   getFlashcardsConcentricThreshold,
   isFlashcardsProgressEnabled,
@@ -98,6 +99,53 @@ describe('getCanonicalPath', () => {
     window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '../../' };
     setLocation('/prefix/Walsh/Patrick%20Joseph%20Walsh%20b.1977-10-01/');
     expect(getCanonicalPath()).toBe('/Walsh/Patrick Joseph Walsh b.1977-10-01/');
+  });
+
+  it('returns the site root for the root page of a build deployed under a prefix', () => {
+    // Regression: depth 0 kept the whole pathname, so the root page of
+    // https://zmre.github.io/mbr-markdown-browser/ was "/mbr-markdown-browser/"
+    // and asked for links.json under that name (a 404).
+    window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '' };
+    setLocation('/mbr-markdown-browser/');
+    expect(getCanonicalPath()).toBe('/');
+  });
+});
+
+describe('canonicalPathFor', () => {
+  // [pathname, basePath (the build's `relative_root`), canonical]
+  const staticCases: Array<[string, string, string]> = [
+    // Deployed at the host's root.
+    ['/', '', '/'],
+    ['/', './', '/'],
+    ['/modes/', '../', '/modes/'],
+    ['/modes/editing/', '../../', '/modes/editing/'],
+    // Deployed under a prefix (GitHub Pages project site).
+    ['/mbr-markdown-browser/', '', '/'],
+    ['/mbr-markdown-browser/', './', '/'],
+    ['/mbr-markdown-browser/modes/', '../', '/modes/'],
+    ['/mbr-markdown-browser/modes/editing/', '../../', '/modes/editing/'],
+    // Under a deeper prefix.
+    ['/a/b/c/notes/x/', '../../', '/notes/x/'],
+    // Opened by file name, or served without the trailing slash.
+    ['/mbr-markdown-browser/index.html', '', '/'],
+    ['/mbr-markdown-browser/modes/index.html', '../', '/modes/'],
+    ['/mbr-markdown-browser/modes', '../', '/modes/'],
+    // Decoded, like site.json's url_path.
+    ['/pre%20fix/my%20notes/a%20b/', '../../', '/my notes/a b/'],
+  ];
+
+  for (const [pathname, basePath, expected] of staticCases) {
+    it(`static: ${pathname} with basePath "${basePath}" is ${expected}`, () => {
+      expect(canonicalPathFor(pathname, basePath, false)).toBe(expected);
+    });
+  }
+
+  it('leaves server-mode paths alone apart from decoding', () => {
+    expect(canonicalPathFor('/', '', true)).toBe('/');
+    expect(canonicalPathFor('/modes/editing/', '', true)).toBe('/modes/editing/');
+    expect(canonicalPathFor('/a%20b/', '', true)).toBe('/a b/');
+    // The server serves at "/", so a first segment is never a prefix.
+    expect(canonicalPathFor('/mbr-markdown-browser/', '', true)).toBe('/mbr-markdown-browser/');
   });
 });
 
