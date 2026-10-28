@@ -24,7 +24,7 @@ resolver = "3"
 # internal-crate pins in [workspace.dependencies] below (bump-version.sh does
 # both).
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Patrick Walsh <pwalsh@well.com>"]
@@ -36,10 +36,10 @@ documentation = "https://zmre.github.io/mbr-markdown-browser/"
 [workspace.dependencies]
 # Internal crates. `version` is what crates.io records; the exact pin keeps
 # the published crates in lockstep (scripts/bump-version.sh rewrites it).
-mbr-core = { path = "crates/mbr-core", version = "=0.7.0" }
-mbr-ffi = { path = "crates/mbr-ffi", version = "=0.7.0" }
-mbr-server = { path = "crates/mbr-server", version = "=0.7.0" }
-mbr-ssg = { path = "crates/mbr-ssg", version = "=0.7.0" }
+mbr-core = { path = "crates/mbr-core", version = "=0.7.1" }
+mbr-ffi = { path = "crates/mbr-ffi", version = "=0.7.1" }
+mbr-server = { path = "crates/mbr-server", version = "=0.7.1" }
+mbr-ssg = { path = "crates/mbr-ssg", version = "=0.7.1" }
 
 aho-corasick = "1.1"
 # Editing feature: password/token hashing for the edit endpoint
