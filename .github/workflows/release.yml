@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@4d65ea9cab522b6d9f29a170aed23ededc1b27af # v3.23.0
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3.24.1
 
       # Without this the flake's own extra-substituters are ignored ("untrusted
       # flake configuration"), so nothing is pulled from the zmre cache and every
@@ -137,7 +137,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@4d65ea9cab522b6d9f29a170aed23ededc1b27af # v3.23.0
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3.24.1
 
       # Same setup as build-components above — see the comment there for why the
       # cachix step and `extraPullNames` are load-bearing rather than cosmetic.
@@ -265,7 +265,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@4d65ea9cab522b6d9f29a170aed23ededc1b27af # v3.23.0
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3.24.1
 
       # Same setup as build-components above — see the comment there for why the
       # cachix step and `extraPullNames` are load-bearing rather than cosmetic.
