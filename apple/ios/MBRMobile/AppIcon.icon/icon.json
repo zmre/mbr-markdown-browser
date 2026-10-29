@@ -1,0 +1,60 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "solid" : "srgb:0.17255,0.12941,0.30980,1.00000"
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "solid" : "srgb:0.17255,0.12941,0.30980,1.00000"
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "name" : "Nodes",
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "nodes.svg",
+          "name" : "2 nodes"
+        }
+      ],
+      "lighting" : "individual",
+      "specular" : true,
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      },
+      "blur-material" : 0.5
+    },
+    {
+      "name" : "Lines",
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "lines.svg",
+          "name" : "1 lines"
+        }
+      ],
+      "specular" : false,
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

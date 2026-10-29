@@ -33,22 +33,26 @@ else
     fi
 fi
 
-# Ensure icon is up to date
-if [ "$PROJECT_DIR/mbr-icon.png" -nt "$PROJECT_DIR/macos/AppIcon.icns" ]; then
-    echo "Regenerating icon..."
-    mkdir -p "$PROJECT_DIR/macos/AppIcon.iconset"
-    sips -z 16 16     "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_16x16.png" > /dev/null
-    sips -z 32 32     "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_16x16@2x.png" > /dev/null
-    sips -z 32 32     "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_32x32.png" > /dev/null
-    sips -z 64 64     "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_32x32@2x.png" > /dev/null
-    sips -z 128 128   "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_128x128.png" > /dev/null
-    sips -z 256 256   "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_128x128@2x.png" > /dev/null
-    sips -z 256 256   "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_256x256.png" > /dev/null
-    sips -z 512 512   "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_256x256@2x.png" > /dev/null
-    sips -z 512 512   "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_512x512.png" > /dev/null
-    sips -z 1024 1024 "$PROJECT_DIR/mbr-icon.png" --out "$PROJECT_DIR/macos/AppIcon.iconset/icon_512x512@2x.png" > /dev/null
-    iconutil -c icns "$PROJECT_DIR/macos/AppIcon.iconset" -o "$PROJECT_DIR/macos/AppIcon.icns"
-    cp "$PROJECT_DIR/macos/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+# The icons are checked in: Assets.car (what macOS 26 draws, via
+# CFBundleIconName) and AppIcon.icns (the fallback, via CFBundleIconFile).
+# scripts/gen-app-icons.sh regenerates both from the Icon Composer package (it
+# needs Xcode's Icon Composer and actool, so it is not run from here); warn when
+# a checked-in icon is missing or looks older than what it is made from.
+ICNS="$PROJECT_DIR/macos/AppIcon.icns"
+CAR="$PROJECT_DIR/macos/Assets.car"
+for icon in "$ICNS" "$CAR"; do
+    if [ ! -f "$icon" ]; then
+        echo "warning: ${icon#"$PROJECT_DIR/"} is missing; run scripts/gen-app-icons.sh"
+    elif [ -n "$(find "$SCRIPT_DIR/gen-app-icons.sh" "$PROJECT_DIR/apple/ios/MBRMobile/AppIcon.icon" \
+            -type f -newer "$icon" -print -quit)" ]; then
+        echo "warning: ${icon#"$PROJECT_DIR/"} is older than the icon sources; run scripts/gen-app-icons.sh"
+    fi
+done
+mkdir -p "$APP_DIR/Contents/Resources"
+cp "$ICNS" "$APP_DIR/Contents/Resources/AppIcon.icns"
+# The template's copy of the car is gitignored (its .icns is checked in).
+if [ -f "$CAR" ]; then
+    cp "$CAR" "$APP_DIR/Contents/Resources/Assets.car"
 fi
 
 echo ""
