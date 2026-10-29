@@ -98,6 +98,8 @@
           <string>mbr</string>
           <key>CFBundleIconFile</key>
           <string>AppIcon</string>
+          <key>CFBundleIconName</key>
+          <string>AppIcon</string>
           <key>CFBundleIdentifier</key>
           <string>com.zmre.mbr</string>
           <key>CFBundleInfoDictionaryVersion</key>
@@ -849,6 +851,7 @@
 
                   cp ${infoPlist} $out/Applications/MBR.app/Contents/Info.plist
                   cp ${./macos/AppIcon.icns} $out/Applications/MBR.app/Contents/Resources/AppIcon.icns
+                  cp ${./macos/Assets.car} $out/Applications/MBR.app/Contents/Resources/Assets.car
 
                   # QuickLook extensions: previews and thumbnails
                   cp -R ${packages.mbr-quicklook}/MBRPreview.appex \

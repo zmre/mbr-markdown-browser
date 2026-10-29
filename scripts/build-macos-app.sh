@@ -33,16 +33,27 @@ else
     fi
 fi
 
-# The icon is checked in. scripts/gen-app-icons.sh regenerates it from the
-# Icon Composer package (it needs Xcode's Icon Composer, so it is not run from
-# here); warn when the checked-in .icns looks older than what it is made from.
+# The icons are checked in: Assets.car (what macOS 26 draws, via
+# CFBundleIconName) and AppIcon.icns (the fallback, via CFBundleIconFile).
+# scripts/gen-app-icons.sh regenerates both from the Icon Composer package (it
+# needs Xcode's Icon Composer and actool, so it is not run from here); warn when
+# a checked-in icon is missing or looks older than what it is made from.
 ICNS="$PROJECT_DIR/macos/AppIcon.icns"
-if [ -n "$(find "$SCRIPT_DIR/gen-app-icons.sh" "$PROJECT_DIR/apple/ios/MBRMobile/AppIcon.icon" \
-        -type f -newer "$ICNS" -print -quit)" ]; then
-    echo "warning: macos/AppIcon.icns is older than the icon sources; run scripts/gen-app-icons.sh"
-fi
+CAR="$PROJECT_DIR/macos/Assets.car"
+for icon in "$ICNS" "$CAR"; do
+    if [ ! -f "$icon" ]; then
+        echo "warning: ${icon#"$PROJECT_DIR/"} is missing; run scripts/gen-app-icons.sh"
+    elif [ -n "$(find "$SCRIPT_DIR/gen-app-icons.sh" "$PROJECT_DIR/apple/ios/MBRMobile/AppIcon.icon" \
+            -type f -newer "$icon" -print -quit)" ]; then
+        echo "warning: ${icon#"$PROJECT_DIR/"} is older than the icon sources; run scripts/gen-app-icons.sh"
+    fi
+done
 mkdir -p "$APP_DIR/Contents/Resources"
 cp "$ICNS" "$APP_DIR/Contents/Resources/AppIcon.icns"
+# The template's copy of the car is gitignored (its .icns is checked in).
+if [ -f "$CAR" ]; then
+    cp "$CAR" "$APP_DIR/Contents/Resources/Assets.car"
+fi
 
 echo ""
 echo "✅ MBR.app built successfully!"

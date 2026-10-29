@@ -10,6 +10,8 @@
   <string>mbr</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.zmre.mbr</string>
   <key>CFBundleInfoDictionaryVersion</key>
