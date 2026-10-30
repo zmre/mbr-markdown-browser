@@ -1723,8 +1723,16 @@ function endsOwnHtmlBlock(node: RootContent): boolean {
  * default join separates the two with a comment) — unless the list's last
  * item is empty, which nothing after a blank line continues — or after
  * indented code, which it would join.
+ *
+ * A rule straight under a paragraph in a tight list item stays adjacent:
+ * {@link printRule} never prints a `-` rule there, so nothing can underline
+ * the paragraph. mdast-util-to-markdown 2.2.1 separates the two with a blank
+ * line whenever the configured rule is `-`, which would make the list loose.
  */
 const joinAuthoredGaps: Join = (left, right, parent) => {
+  if (parent.type === 'listItem' && parent.spread === false && left.type === 'paragraph' && right.type === 'thematicBreak') {
+    return 0;
+  }
   if (parent.type === 'list') return unheldItemGaps.has(parent) ? undefined : authoredGap(left, right);
   if (parent.type !== 'root') return undefined;
   const gap = authoredGap(left, right);

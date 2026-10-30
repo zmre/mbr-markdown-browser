@@ -75,7 +75,7 @@ pub const FLASHCARDS_JS: &[u8] = include_bytes!("../templates/components-js/mbr-
 pub const FLASHCARDS_READING_JS: &[u8] =
     include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js");
 
-pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.1.0.min.js");
+pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.2.0.min.js");
 
 // Reveal.js presentation framework
 pub const REVEAL_JS: &[u8] = include_bytes!("../templates/reveal.6.0.2.js");
