@@ -129,7 +129,7 @@ webpki-roots = "1"
 yaml-rust2 = { version = "0.13", default-features = false }
 
 # GUI stack (the `mbr` binary's `gui` feature).
-gio = "0.18"
+gio = "0.22"
 gtk = "0.18"
 muda = "0.21"
 objc2-app-kit = { version = "0.3.2", default-features = false }
