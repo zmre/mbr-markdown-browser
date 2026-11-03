@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// The deck clones card faces, so opening waits for the page's math; each test
+// controls when it is "rendered".
+const katexMocks = vi.hoisted(() => ({ mathSettled: vi.fn(() => Promise.resolve()) }))
+vi.mock('./mbr-katex.js', () => ({ mathSettled: katexMocks.mathSettled }))
+
 import { setFlashcardsChunkImporter, type MbrFlashcardsElement } from './mbr-flashcards.js'
 import { installDeckPage } from './flashcards/test-fixtures.js'
 
@@ -118,6 +124,26 @@ describe('<mbr-flashcards>', () => {
     expect(trigger.isOpen).toBe(false)
     expect(document.querySelector('mbr-flashcard-deck')).toBeNull()
     window.frontmatter = undefined
+  })
+
+  it('appends the deck only once the page math is rendered', async () => {
+    installDeckPage()
+    let rendered!: () => void
+    katexMocks.mathSettled.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          rendered = resolve
+        })
+    )
+    await mount()
+    pressP()
+    expect(trigger.isOpen).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Cloning a card now would copy raw TeX into the cached faces.
+    expect(document.querySelector('mbr-flashcard-deck')).toBeNull()
+
+    rendered()
+    await vi.waitFor(() => expect(document.querySelector('mbr-flashcard-deck')).not.toBeNull())
   })
 
   it('offers no spaced repetition without editing', async () => {

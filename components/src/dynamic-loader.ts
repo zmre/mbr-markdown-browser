@@ -119,3 +119,20 @@ export function scheduleIdleTask(task: () => void, timeout = 2000): void {
     setTimeout(task, 0)
   }
 }
+
+/**
+ * Resolves when `promise` does or after `ms`, whichever is first; never
+ * rejects. For a bounded wait on something that must not hold a user action
+ * hostage, e.g. `<mbr-slides>` and the flashcard deck waiting for the page's
+ * diagrams and math to render before they clone it.
+ */
+export function withTimeout(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    const done = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    void promise.then(done, done)
+  })
+}

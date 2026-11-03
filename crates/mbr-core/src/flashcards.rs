@@ -1559,6 +1559,7 @@ mod tests {
             mark_incomplete: false,
             incomplete_markers: &[],
             wikilink_index: None,
+            math_fences: true,
         };
         render_str(source, std::path::Path::new("deck.md"), opts)
             .expect("renders")

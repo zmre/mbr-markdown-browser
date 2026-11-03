@@ -17,15 +17,16 @@
  */
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
+import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask, withTimeout } from './dynamic-loader.ts'
 import { isPlayKey } from './mbr-keys.js'
 import { FAB_CSS, PlayFabController } from './fab.ts'
 import { ICON_BUTTON_CSS } from './controls.ts'
 import { ICON_LG, ICON_SM, icon, iconElement, iconPlay, iconX } from './icons.ts'
 import { mermaidSettled } from './mbr-mermaid.ts'
+import { mathSettled } from './mbr-katex.ts'
 
 /**
- * How long Play waits for the page's diagrams before cloning the slides
+ * How long Play waits for the page's diagrams and math before cloning the slides
  * anyway. Generous, because a phone can take seconds over a large diagram,
  * but bounded so a stuck render never leaves the button spinning.
  */
@@ -44,17 +45,6 @@ export const SLIDES_STATE_EVENT = 'mbr-slides-state'
 /** Tell the app bridge (and anyone else) whether a presentation is playing. */
 function announceSlidesState(playing: boolean): void {
   document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing } }))
-}
-
-/** Resolves when `promise` does or after `ms`, whichever is first. */
-function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    void promise.then(() => {
-      clearTimeout(timer)
-      resolve()
-    })
-  })
 }
 
 interface RevealPlugin {
@@ -265,10 +255,12 @@ export class MbrSlidesElement extends LitElement {
         loadCss(`${assetBase}reveal-slides.css`),
         loadScript(`${assetBase}reveal.js`),
         loadScript(`${assetBase}reveal-notes.js`),
-        // `_transformDom` deep-clones the slides, so diagrams must be drawn
-        // first: a clone of a block mermaid has not reached yet stays raw
-        // source, and mermaid then draws into the detached original.
-        withTimeout(mermaidSettled(), DIAGRAM_WAIT_MS),
+        // `_transformDom` deep-clones the slides, so diagrams and math must be
+        // drawn first: a clone of a block mermaid or KaTeX has not reached yet
+        // stays raw source, and they then draw into the detached original.
+        // One bound for both. If it runs out, KaTeX still renders the clones:
+        // its render pass queries the page when it runs, not at startup.
+        withTimeout(Promise.all([mermaidSettled(), mathSettled()]), DIAGRAM_WAIT_MS),
       ])
 
       const win = window as WindowWithReveal

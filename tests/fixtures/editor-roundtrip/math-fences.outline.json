@@ -1,0 +1,13 @@
+[
+  {"depth":0,"kind":"heading","lines":[1,1],"level":1},
+  {"depth":0,"kind":"paragraph","lines":[3,3]},
+  {"depth":0,"kind":"code","lines":[5,12],"fenced":true,"lang":"latex"},
+  {"depth":0,"kind":"code","lines":[14,16],"fenced":true,"lang":"katex"},
+  {"depth":0,"kind":"code","lines":[18,24],"fenced":true,"lang":"math"},
+  {"depth":0,"kind":"code","lines":[26,30],"fenced":true,"lang":"asciimath"},
+  {"depth":0,"kind":"code","lines":[32,38],"fenced":true,"lang":"tex"},
+  {"depth":0,"kind":"list","lines":[40,44],"ordered":false,"tight":false},
+  {"depth":1,"kind":"item","lines":[40,44]},
+  {"depth":2,"kind":"paragraph","lines":[40,40]},
+  {"depth":2,"kind":"code","lines":[42,44],"fenced":true,"lang":"LaTeX"}
+]

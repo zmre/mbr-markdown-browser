@@ -1394,6 +1394,54 @@ async fn test_default_css_served() {
     assert!(content_type.to_str().unwrap().contains("text/css"));
 }
 
+/// `<mbr-katex>` fetches the AsciiMath converter from `/.mbr/` only on a page
+/// with an ```` ```asciimath ```` fence; it is a compiled-in default asset.
+#[tokio::test]
+async fn test_asciimath2tex_asset_served() {
+    let repo = TestRepo::new();
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/.mbr/asciimath2tex.min.js").await;
+
+    assert_eq!(response.status(), 200);
+    let content_type = response.headers().get("content-type").unwrap();
+    assert!(
+        content_type
+            .to_str()
+            .unwrap()
+            .contains("application/javascript"),
+        "{content_type:?}"
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.contains("AsciiMathParser"));
+}
+
+/// A server page renders math fences as display math for `<mbr-katex>`.
+#[tokio::test]
+async fn test_math_fences_render_as_display_math() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "math.md",
+        "# Math\n\n```latex\na &= b \\\\\n- c &= d\n```\n\n```asciimath\nsum_(i=1)^n i\n```\n\n```tex\n\\documentclass{article}\n```\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    let page = server.get_text("/math/").await;
+
+    assert!(
+        page.contains(">a &amp;= b \\\\\n- c &amp;= d\n</div>"),
+        "latex fence body kept verbatim in a div: {page}"
+    );
+    assert!(
+        page.contains("math math-display math-asciimath"),
+        "asciimath fence: {page}"
+    );
+    assert!(
+        page.contains("<code class=\"language-tex\">"),
+        "tex stays code: {page}"
+    );
+}
+
 /// The print stylesheet hides chrome with an allowlist -- it hides *every*
 /// child of `<body>` that is not `<main>` (see the "Print Styles" section of
 /// `templates/theme.css`). That is only safe while the page templates actually

@@ -29,7 +29,8 @@
  */
 import { LitElement, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.js'
+import { getMbrAssetBase, scheduleIdleTask, waitForDom, withTimeout } from './dynamic-loader.js'
+import { mathSettled } from './mbr-katex.js'
 import { getFlashcardsConcentricThreshold, isEditEnabled, isFlashcardsProgressEnabled } from './shared.js'
 import { isPlayKey } from './mbr-keys.js'
 import { MbrSlidesElement } from './mbr-slides.js'
@@ -47,6 +48,12 @@ import {
 } from './task-toggle.js'
 import type { ReviewRecorder, ReviewServices } from './flashcards/types.js'
 import type { MbrOverlay } from './overlay.js'
+
+/**
+ * How long opening a deck waits for the page's math to render before cloning
+ * cards anyway (`<mbr-slides>`' `DIAGRAM_WAIT_MS`, same reasoning).
+ */
+const MATH_WAIT_MS = 8000
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -209,7 +216,10 @@ export class MbrFlashcardsElement extends LitElement implements MbrOverlay {
     this._isOpen = true
     // On failure: no deck this page load; the trigger stays inert.
     deckChunk ??= importChunk('mbr-flashcards.min.js').catch(chunkFailed)
-    const chunk = await deckChunk
+    // The deck clones card faces from the page and caches them, so the page's
+    // math must be drawn first or a deck opened while KaTeX is loading shows
+    // raw TeX for the whole session. Waited for alongside the chunk, bounded.
+    const [chunk] = await Promise.all([deckChunk, withTimeout(mathSettled(), MATH_WAIT_MS)])
     // Closed (Esc) while loading, or the chunk failed: show nothing.
     if (!this._isOpen || !chunk) {
       this._isOpen = false

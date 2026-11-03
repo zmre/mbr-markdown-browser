@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { getMbrAssetBase, loadCss, loadScript, scheduleIdleTask, waitForDom } from './dynamic-loader.ts'
+import { getMbrAssetBase, loadCss, loadScript, scheduleIdleTask, waitForDom, withTimeout } from './dynamic-loader.ts'
 
 /**
  * Tests for the shared on-demand asset loader used by <mbr-hljs>, <mbr-katex>,
@@ -526,5 +526,37 @@ describe('scheduleIdleTask', () => {
     scheduleIdleTask(() => {}, 500)
 
     expect(ric.mock.calls[0][1]).toEqual({ timeout: 500 })
+  })
+})
+
+describe('withTimeout', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('resolves with the promise, before the bound', async () => {
+    vi.useFakeTimers()
+    let done = false
+    void withTimeout(Promise.resolve('x'), 1000).then(() => {
+      done = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(done).toBe(true)
+  })
+
+  it('resolves, not rejects, when the promise rejects', async () => {
+    await expect(withTimeout(Promise.reject(new Error('no')), 1000)).resolves.toBeUndefined()
+  })
+
+  it('resolves at the bound when the promise never settles', async () => {
+    vi.useFakeTimers()
+    let done = false
+    void withTimeout(new Promise(() => {}), 1000).then(() => {
+      done = true
+    })
+    await vi.advanceTimersByTimeAsync(999)
+    expect(done).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(done).toBe(true)
   })
 })
