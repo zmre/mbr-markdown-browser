@@ -1720,6 +1720,11 @@ pub struct RenderOptions<'a> {
     pub mark_incomplete: bool,
     pub incomplete_markers: &'a [String],
     pub wikilink_index: Option<Arc<WikilinkIndex>>,
+    /// Render ```` ```latex ````/`katex`/`math`/`asciimath` fences as display
+    /// math (`HtmlConfig::enable_math_fences`). True wherever the page loads
+    /// KaTeX (server, GUI, static build, CLI); QuickLook turns it off so a
+    /// preview, which has no KaTeX, keeps a highlighted code block.
+    pub math_fences: bool,
 }
 
 /// Rewrites the URL-valued Reveal.js background attributes of every
@@ -2020,6 +2025,9 @@ fn finish_render(
     // Detect if the first heading is an H1 (used for conditional title rendering in templates)
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
+    // Read before `opts` is taken apart by pass 2.
+    let math_fences = opts.math_fences;
+
     // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
     let (processed_events, state) = process_all_events(
         events,
@@ -2046,15 +2054,22 @@ fn finish_render(
         None => processed_events,
     };
 
+    let html_config = crate::html::HtmlConfig {
+        enable_math_fences: math_fences,
+        ..crate::html::HtmlConfig::mbr_with_attrs_and_block_lines(
+            section_attrs,
+            block_lines.into_entries(),
+        )
+    };
+
     // Generate HTML output and extract frontmatter
     finalize_render(
         processed_events,
         state,
-        section_attrs,
+        html_config,
         markdown_input,
         headings,
         has_h1,
-        block_lines,
     )
 }
 
@@ -2169,6 +2184,7 @@ pub async fn render_with_cache(
         mark_incomplete,
         incomplete_markers,
         wikilink_index,
+        math_fences: true,
     };
     render_text_with_cache(&raw_markdown_input, &file, opts).await
 }
@@ -2206,6 +2222,7 @@ pub async fn render_from_vault_with_cache(
         mark_incomplete,
         incomplete_markers,
         wikilink_index,
+        math_fences: true,
     };
     render_text_with_cache(&raw_markdown_input, &file, opts).await
 }
@@ -2678,18 +2695,18 @@ fn mark_incomplete_blocks<'a>(
 /// deduplicates outbound links, generates HTML, extracts frontmatter, and
 /// injects H1 title fallback.
 ///
-/// `block_lines` is taken by value because the writer owns it from here. When it
-/// is empty — every caller that did not ask for `data-mbr-line` — the config is
-/// exactly `HtmlConfig::mbr_with_section_attrs`, so the output is byte-identical
-/// to what `push_html_mbr_with_attrs` produced before the attribute existed.
+/// `html_config` is built by [`finish_render`]: the MBR defaults plus the page's
+/// section attributes, its `data-mbr-line` table and the math-fence switch. With
+/// an empty table it is exactly `HtmlConfig::mbr_with_section_attrs`, so the
+/// output is byte-identical to what `push_html_mbr_with_attrs` produced before
+/// the attribute existed.
 fn finalize_render(
     processed_events: Vec<Event<'_>>,
     state: EventState,
-    section_attrs: HashMap<usize, ParsedAttrs>,
+    html_config: crate::html::HtmlConfig,
     markdown_input: &str,
     headings: Vec<HeadingInfo>,
     has_h1: bool,
-    block_lines: BlockLines,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     // Write to a new String buffer with MBR extensions (sections, mermaid)
     let mut html_output = String::with_capacity(markdown_input.len() * 2);
@@ -2703,14 +2720,7 @@ fn finalize_render(
         .filter(|link| seen_targets.insert(link.to.clone()))
         .collect();
 
-    crate::html::push_html_with_config(
-        &mut html_output,
-        processed_events.into_iter(),
-        crate::html::HtmlConfig::mbr_with_attrs_and_block_lines(
-            section_attrs,
-            block_lines.into_entries(),
-        ),
-    );
+    crate::html::push_html_with_config(&mut html_output, processed_events.into_iter(), html_config);
 
     // Extract frontmatter and inject H1 title if no frontmatter title exists
     let mut frontmatter = yaml_frontmatter_simplified(&state.metadata_parsed);
@@ -2791,6 +2801,7 @@ pub fn render_sync(
             mark_incomplete,
             incomplete_markers,
             wikilink_index,
+            math_fences: true,
         },
     )
 }
@@ -2829,6 +2840,7 @@ pub fn render_sync_from_vault(
             mark_incomplete,
             incomplete_markers,
             wikilink_index,
+            math_fences: true,
         },
     )
 }
@@ -3692,6 +3704,7 @@ mod tests {
             mark_incomplete: false,
             incomplete_markers: &[],
             wikilink_index: None,
+            math_fences: true,
         }
     }
 
@@ -6242,6 +6255,63 @@ mod tests {
         );
     }
 
+    /// A math fence is still a code block in the event stream, so the
+    /// incomplete-marker pass leaves its TeX alone and the review table gives
+    /// its `<div>` the line the `<pre>` would have had — top level and inside
+    /// a list item, where pass 3 shifts the table.
+    #[test]
+    fn math_fence_is_code_to_markers_and_keeps_its_review_line() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
+        let md =
+            "TODO intro\n\n```latex\nTODO x\n\n- y\n```\n\n- item\n  ```asciimath\n  TK z\n  ```\n";
+        let html = render_str(
+            md,
+            &root.join("note.md"),
+            RenderOptions {
+                review: ReviewLines::Emit,
+                mark_incomplete: true,
+                incomplete_markers: &markers,
+                ..plain_options(root, true)
+            },
+        )
+        .unwrap()
+        .html;
+        assert!(
+            html.contains(
+                "<div class=\"math math-display\" data-mbr-line=\"3\">TODO x\n\n- y\n</div>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<div class=\"math math-display math-asciimath\" data-mbr-line=\"10\">TK z\n</div>"
+            ),
+            "{html}"
+        );
+        // The prose marker is highlighted; neither fence's is.
+        assert_eq!(html.matches("mbr-incomplete").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn math_fences_off_render_code_blocks() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let html = render_str(
+            "```math\nx^2\n```\n",
+            &root.join("note.md"),
+            RenderOptions {
+                math_fences: false,
+                ..plain_options(root, false)
+            },
+        )
+        .unwrap()
+        .html;
+        assert!(
+            html.contains("<pre><code class=\"language-math\">x^2\n</code></pre>"),
+            "{html}"
+        );
+    }
+
     #[tokio::test]
     async fn test_incomplete_negative_frontmatter() {
         let md = "---\ntitle: TK rename later\n---\n\nNormal paragraph.";
@@ -8184,6 +8254,7 @@ mod tests {
                 mark_incomplete: false,
                 incomplete_markers: &[],
                 wikilink_index: None,
+                math_fences: true,
             },
         )
         .unwrap();

@@ -77,6 +77,12 @@ pub const FLASHCARDS_READING_JS: &[u8] =
 
 pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.2.0.min.js");
 
+/// AsciiMath → TeX converter (asciimath2tex, Apache-2.0; its license is
+/// vendored beside it as `templates/asciimath2tex.LICENSE`). Loaded by
+/// `<mbr-katex>` only on pages with an ```` ```asciimath ```` fence, whose
+/// TeX it hands to KaTeX. Vendored by `scripts/update-assets.sh --asciimath2tex`.
+pub const ASCIIMATH2TEX_JS: &[u8] = include_bytes!("../templates/asciimath2tex.1.5.0.min.js");
+
 // Reveal.js presentation framework
 pub const REVEAL_JS: &[u8] = include_bytes!("../templates/reveal.6.0.2.js");
 pub const REVEAL_CSS: &[u8] = include_bytes!("../templates/reveal.6.0.2.css");
@@ -132,6 +138,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ("/hljs.lang.dockerfile.js", hljs::HLJS_LANG_DOCKERFILE, JS),
     ("/hljs.lang.markdown.js", hljs::HLJS_LANG_MARKDOWN, JS),
     ("/mermaid.min.js", MERMAID_JS, JS),
+    ("/asciimath2tex.min.js", ASCIIMATH2TEX_JS, JS),
     ("/reveal.js", REVEAL_JS, JS),
     ("/reveal.css", REVEAL_CSS, CSS),
     ("/reveal-theme-blank.css", REVEAL_THEME_BLANK_CSS, CSS),
@@ -183,6 +190,21 @@ mod tests {
         ] {
             assert!(default_file(route).is_some(), "{route} missing");
         }
+    }
+
+    /// Apache-2.0 asks that the license travel with the file, and the served
+    /// asset is what a static site redistributes: the banner names it, and the
+    /// UMD build defines the global `<mbr-katex>` reads.
+    #[test]
+    fn asciimath2tex_is_served_with_its_license_banner() {
+        let (bytes, mime) = default_file("/asciimath2tex.min.js").expect("in the table");
+        assert_eq!(mime, JS);
+        let text = std::str::from_utf8(bytes).expect("utf-8");
+        let banner = text.lines().next().unwrap_or_default();
+        assert!(banner.starts_with("/*! asciimath2tex "), "{banner}");
+        assert!(banner.contains("Apache-2.0"), "{banner}");
+        assert!(text.contains("AsciiMathParser"));
+        assert!(!text.contains("sourceMappingURL"));
     }
 
     #[test]

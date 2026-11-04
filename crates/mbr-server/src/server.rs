@@ -7489,6 +7489,7 @@ impl Server {
                 mark_incomplete: config.mark_incomplete,
                 incomplete_markers: &config.incomplete_markers,
                 wikilink_index: Some(config.repo.wikilink_index.clone()),
+                math_fences: true,
             },
         )
         .await

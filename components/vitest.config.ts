@@ -69,6 +69,18 @@ const readEditorFixtures = (): Record<string, { source: string; outline: string 
   return fixtures
 }
 
+/**
+ * The vendored asciimath2tex UMD build (`asciimath2tex.<version>.min.js`, the
+ * version in the name), so `math-render.test.ts` can run the converter
+ * `<mbr-katex>` actually ships rather than a stand-in.
+ */
+function readAsciiMath2Tex(): string {
+  const dir = fileURLToPath(new URL('../crates/mbr-core/templates/', import.meta.url))
+  const file = readdirSync(dir).find((name) => /^asciimath2tex\..+\.min\.js$/.test(name))
+  if (!file) throw new Error(`no asciimath2tex.*.min.js in ${dir}`)
+  return readFileSync(`${dir}${file}`, 'utf8')
+}
+
 export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
@@ -80,6 +92,7 @@ export default defineConfig({
     __MBR_EDITOR_FIXTURES__: JSON.stringify(readEditorFixtures()),
     // Shared with mbr-core's `editor_math_parity`; under tests/fixtures/ so the
     // Nix test sandbox (flake.nix's source filter) has it too.
+    __MBR_ASCIIMATH2TEX_JS__: JSON.stringify(readAsciiMath2Tex()),
     __MBR_EDITOR_MATH_CASES__: JSON.stringify(readRepoFile('../tests/fixtures/editor-math-cases.json')),
   },
   test: {

@@ -9,9 +9,12 @@ const mocks = vi.hoisted(() => ({
   loadScript: vi.fn(() => Promise.resolve()),
   loadCss: vi.fn(() => Promise.resolve()),
   mermaidSettled: vi.fn(() => Promise.resolve()),
+  mathSettled: vi.fn(() => Promise.resolve()),
 }))
 
-vi.mock('./dynamic-loader.ts', () => ({
+vi.mock('./dynamic-loader.ts', async (importOriginal) => ({
+  // The real bounded wait: the timeout tests drive it with fake timers.
+  withTimeout: (await importOriginal<typeof import('./dynamic-loader.ts')>()).withTimeout,
   waitForDom: () => Promise.resolve(),
   loadScript: mocks.loadScript,
   loadCss: mocks.loadCss,
@@ -23,6 +26,11 @@ vi.mock('./dynamic-loader.ts', () => ({
 // only need its "diagrams are drawn" promise, which each test controls.
 vi.mock('./mbr-mermaid.ts', () => ({
   mermaidSettled: mocks.mermaidSettled,
+}))
+
+// Likewise for KaTeX's "math is rendered" promise.
+vi.mock('./mbr-katex.ts', () => ({
+  mathSettled: mocks.mathSettled,
 }))
 
 import type { MbrSlidesElement } from './mbr-slides.ts'
@@ -224,7 +232,50 @@ describe('UNIT MbrSlidesElement', () => {
 
     afterEach(() => {
       mocks.mermaidSettled.mockImplementation(() => Promise.resolve())
+      mocks.mathSettled.mockImplementation(() => Promise.resolve())
       vi.useRealTimers()
+    })
+
+    it('clones the slides only once the math is rendered', async () => {
+      setupPage('<section><div class="math math-display">x^2</div></section>')
+      let rendered!: () => void
+      mocks.mathSettled.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            rendered = resolve
+          })
+      )
+      element = await mount()
+      await play(element)
+
+      // Still waiting: cloning now would copy raw TeX.
+      expect(document.querySelector('#wrapper .reveal')).toBeNull()
+
+      // KaTeX renders into the page's original element.
+      document.querySelector('.math')!.innerHTML = '<span class="katex" id="typeset"></span>'
+      rendered()
+      await flush(element)
+
+      expect(document.querySelector('#wrapper .reveal .slides section .katex#typeset')).toBeTruthy()
+    })
+
+    it('waits for diagrams and math under one bound', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      setupPage('<section><pre class="mermaid">graph TD; A--&gt;B</pre><span class="math math-inline">x</span></section>')
+      // Diagrams finish at once; math never does.
+      mocks.mathSettled.mockImplementation(() => new Promise<void>(() => {}))
+      const el = document.createElement('mbr-slides')
+      document.body.appendChild(el)
+      element = el
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+
+      el.open()
+      await vi.advanceTimersByTimeAsync(7000)
+      expect(document.querySelector('#wrapper .reveal')).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(1500)
+      expect(document.querySelector('#wrapper .reveal .slides section .math')).toBeTruthy()
     })
 
     it('clones the slides only once the diagrams are drawn', async () => {
