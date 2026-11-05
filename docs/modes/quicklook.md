@@ -19,7 +19,7 @@ With mbr's QuickLook extension, markdown files render as formatted HTML instead 
 - **Full rendering**: Headers, lists, tables, code blocks
 - **Syntax highlighting**: Colored code with language detection
 - **Mermaid diagrams**: Flowcharts and diagrams render inline
-- **Math equations**: LaTeX rendering (if configured)
+- **Math equations**: shown as their TeX source (the preview does not load KaTeX); ` ```latex ` / ` ```math ` / ` ```asciimath ` fences stay highlighted code blocks
 - **Custom styling**: Respects your `.mbr/theme.css`
 - **Table of contents**: In the QuickLook info panel
 - **Frontmatter display**: Shows metadata in a clean format

@@ -30,6 +30,7 @@
 //! |-----------|-------------|-------------|
 //! | **Section wrapping** | `enable_sections` | Wraps content in `<section>` tags with `<hr>` as dividers |
 //! | **Mermaid diagrams** | `enable_mermaid` | Renders \`\`\`mermaid blocks as `<pre class="mermaid">` |
+//! | **Math fences** | `enable_math_fences` | Renders \`\`\`latex/katex/math/asciimath blocks as `<div class="math math-display">` |
 //!
 //! ## Usage
 //!
@@ -38,7 +39,7 @@
 //! html::push_html_mbr(&mut output, events);
 //!
 //! // Or configure explicitly
-//! let config = HtmlConfig { enable_sections: true, enable_mermaid: false };
+//! let config = HtmlConfig { enable_sections: true, enable_mermaid: false, ..Default::default() };
 //! html::push_html_with_config(&mut output, events, config);
 //! ```
 //!
@@ -51,7 +52,7 @@
 //! - Added `section_started` field for section tracking
 //! - Added `container_depth` field so section boundaries are only emitted at
 //!   top level (a `</section>` inside a blockquote or list mis-nests)
-//! - Added `codeblock_state` field for mermaid closing tag handling
+//! - Added `codeblock_state` field for mermaid and math-fence closing tag handling
 //! - Link and image destinations with a script-capable scheme (`javascript:`,
 //!   `vbscript:`, non-image `data:`) are replaced with an inert value
 //! - Images are emitted with `loading="lazy" decoding="async"`
@@ -114,6 +115,16 @@ pub struct HtmlConfig {
     /// the `<code>` wrapper, allowing mermaid.js to render diagrams directly.
     pub enable_mermaid: bool,
 
+    /// Render \`\`\`latex, \`\`\`katex, \`\`\`math and \`\`\`asciimath code blocks
+    /// as display math: `<div class="math math-display">` (plus
+    /// `math-asciimath` for AsciiMath) holding the escaped body, with no
+    /// `<code>`, so `<mbr-katex>` renders it and `<mbr-hljs>` never sees it.
+    /// See [`math_fence_class`] for the matching rule.
+    ///
+    /// Off where nothing on the page loads KaTeX (QuickLook): there a
+    /// highlighted code block of TeX reads better than an unstyled `<div>`.
+    pub enable_math_fences: bool,
+
     /// Attributes for each section (by 1-based index).
     ///
     /// Section 0 is the first section (before any `---`), section 1 is after the
@@ -143,6 +154,7 @@ impl HtmlConfig {
         Self {
             enable_sections: true,
             enable_mermaid: true,
+            enable_math_fences: true,
             section_attrs: HashMap::new(),
             block_lines: Vec::new(),
         }
@@ -153,6 +165,7 @@ impl HtmlConfig {
         Self {
             enable_sections: true,
             enable_mermaid: true,
+            enable_math_fences: true,
             section_attrs,
             block_lines: Vec::new(),
         }
@@ -170,9 +183,35 @@ impl HtmlConfig {
         Self {
             enable_sections: true,
             enable_mermaid: true,
+            enable_math_fences: true,
             section_attrs,
             block_lines,
         }
+    }
+}
+
+/// The class list of a fenced code block rendered as display math, or `None`
+/// when `lang` (the first word of the info string) is not a math language.
+///
+/// `latex`, `katex` and `math` hold TeX; `asciimath` holds AsciiMath, which
+/// `<mbr-katex>` converts to TeX in the browser, so it carries
+/// `math-asciimath` as well. `tex` is deliberately absent: it is the usual
+/// language for a TeX *source* listing (a preamble, a macro file), which wants
+/// highlighting, not typesetting.
+///
+/// Matched ASCII-case-insensitively, unlike `mermaid`: `LaTeX` is how the
+/// language is normally spelled, and a ```` ```LaTeX ```` fence that silently
+/// stayed code would look like a bug. Highlighters (GitHub's linguist,
+/// highlight.js) treat fence languages case-insensitively too.
+#[must_use]
+pub fn math_fence_class(lang: &str) -> Option<&'static str> {
+    const TEX_LANGS: [&str; 3] = ["latex", "katex", "math"];
+    if TEX_LANGS.iter().any(|l| lang.eq_ignore_ascii_case(l)) {
+        Some("math math-display")
+    } else if lang.eq_ignore_ascii_case("asciimath") {
+        Some("math math-display math-asciimath")
+    } else {
+        None
     }
 }
 
@@ -913,6 +952,20 @@ where
                                 self.write_block_line()?;
                             }
                             self.write(">")
+                        // MBR EXTENSION: fenced display math. The body arrives
+                        // as `Text` and is escaped by the `Text` arm like any
+                        // code block's, so only the wrapper differs.
+                        } else if self.config.enable_math_fences
+                            && let Some(class) = math_fence_class(lang)
+                        {
+                            self.codeblock_state = Some("</div>".into());
+                            self.write("<div class=\"")?;
+                            self.write(class)?;
+                            self.write("\"")?;
+                            if self.emit_block_lines {
+                                self.write_block_line()?;
+                            }
+                            self.write(">")
                         } else {
                             self.write_pre_open()?;
                             self.write("<code class=\"language-")?;
@@ -1408,6 +1461,7 @@ pub fn push_html_mbr_with_attrs<'a, I>(
 /// let config = HtmlConfig {
 ///     enable_sections: true,
 ///     enable_mermaid: false,
+///     ..Default::default()
 /// };
 ///
 /// let markdown = "Hello world";
@@ -1579,6 +1633,7 @@ mod tests {
         let config = HtmlConfig {
             enable_sections: false,
             enable_mermaid: false,
+            enable_math_fences: false,
             section_attrs: HashMap::new(),
             block_lines: Vec::new(),
         };
@@ -1646,6 +1701,7 @@ mod tests {
         let config = HtmlConfig {
             enable_sections: false,
             enable_mermaid: false,
+            enable_math_fences: false,
             section_attrs: HashMap::new(),
             block_lines: Vec::new(),
         };
@@ -1665,6 +1721,7 @@ mod tests {
         let config = HtmlConfig {
             enable_sections: false,
             enable_mermaid: true,
+            enable_math_fences: true,
             section_attrs: HashMap::new(),
             block_lines: Vec::new(),
         };
@@ -1681,6 +1738,118 @@ mod tests {
             !html.contains("<code"),
             "Mermaid should not have code wrapper. Got: {}",
             html
+        );
+    }
+
+    // ---- math fences -----------------------------------------------------
+
+    fn math_fences_config(enable_math_fences: bool) -> HtmlConfig {
+        HtmlConfig {
+            enable_math_fences,
+            ..HtmlConfig::default()
+        }
+    }
+
+    fn render_math_fence(lang: &str, body: &str) -> String {
+        render_with_config(
+            &format!("```{lang}\n{body}\n```\n"),
+            math_fences_config(true),
+        )
+    }
+
+    #[test]
+    fn math_fences_render_as_display_math_divs() {
+        for lang in ["latex", "katex", "math"] {
+            assert_eq!(
+                render_math_fence(lang, "x^2"),
+                "<div class=\"math math-display\">x^2\n</div>\n",
+                "{lang}"
+            );
+        }
+        assert_eq!(
+            render_math_fence("asciimath", "x^2"),
+            "<div class=\"math math-display math-asciimath\">x^2\n</div>\n"
+        );
+    }
+
+    #[test]
+    fn math_fence_language_is_ascii_case_insensitive_first_word() {
+        assert!(
+            render_math_fence("LaTeX", "x").starts_with("<div class=\"math math-display\">"),
+            "LaTeX"
+        );
+        assert!(
+            render_math_fence("AsciiMath", "x").contains("math-asciimath"),
+            "AsciiMath"
+        );
+        // Only the first word of the info string names the language.
+        assert!(
+            render_math_fence("math title=\"Euler\"", "x").starts_with("<div class=\"math"),
+            "info string with attributes"
+        );
+    }
+
+    #[test]
+    fn non_math_fences_stay_code() {
+        for lang in ["tex", "latexx", "mathematica", "ascii", "plaintex"] {
+            let html = render_math_fence(lang, "x");
+            assert!(
+                html.starts_with(&format!("<pre><code class=\"language-{lang}\">")),
+                "{lang}: {html}"
+            );
+            assert!(!html.contains("math-display"), "{lang}: {html}");
+        }
+        assert_eq!(math_fence_class("tex"), None);
+        assert_eq!(math_fence_class(""), None);
+    }
+
+    #[test]
+    fn math_fence_body_is_escaped_and_has_no_code_element() {
+        let html = render_math_fence("latex", "a < b & c > d </div><script>");
+        assert_eq!(
+            html,
+            "<div class=\"math math-display\">a &lt; b &amp; c &gt; d &lt;/div&gt;&lt;script&gt;\n</div>\n"
+        );
+        assert!(!html.contains("<code"), "{html}");
+    }
+
+    #[test]
+    fn math_fences_disabled_fall_back_to_code_blocks() {
+        let html = render_with_config("```latex\nx^2\n```\n", math_fences_config(false));
+        assert_eq!(
+            html,
+            "<pre><code class=\"language-latex\">x^2\n</code></pre>\n"
+        );
+        let html = render_with_config("```asciimath\nx^2\n```\n", math_fences_config(false));
+        assert_eq!(
+            html,
+            "<pre><code class=\"language-asciimath\">x^2\n</code></pre>\n"
+        );
+    }
+
+    /// The reason the fence exists: inside `$$ … $$` a blank line or a line
+    /// starting `- ` ends the paragraph and tears the math apart. A fence's
+    /// body is verbatim.
+    #[test]
+    fn math_fence_body_keeps_blank_lines_and_list_markers() {
+        let body = "\\begin{aligned}\na &= b \\\\\n- c &= d\n\n> e\n# f\n\\end{aligned}";
+        let html = render_with_config(&format!("```math\n{body}\n```\n"), math_fences_config(true));
+        assert_eq!(
+            html,
+            "<div class=\"math math-display\">\\begin{aligned}\na &amp;= b \\\\\n- c &amp;= d\n\n&gt; e\n# f\n\\end{aligned}\n</div>\n"
+        );
+        assert!(!html.contains("<ul>") && !html.contains("<p>"), "{html}");
+    }
+
+    #[test]
+    fn math_fence_in_a_list_item_closes_its_div() {
+        let html = render_with_config(
+            "- item\n\n  ```latex\n  x\n  ```\n- next\n",
+            math_fences_config(true),
+        );
+        assert!(
+            html.contains("<div class=\"math math-display\">x\n</div>\n</li>"),
+            "{html}"
         );
     }
 
@@ -2066,6 +2235,7 @@ mod tests {
         let config = HtmlConfig {
             enable_sections: false,
             enable_mermaid: true,
+            enable_math_fences: true,
             section_attrs: HashMap::new(),
             block_lines,
         };
@@ -2386,6 +2556,24 @@ mod tests {
         assert!(
             !html.contains("<code"),
             "mermaid keeps its bare <pre>: {html}"
+        );
+    }
+
+    #[test]
+    fn math_fence_div_carries_block_line() {
+        let html = render_markdown_with_block_lines("```latex\nx\n```\n", |e| {
+            matches!(e, Start(Tag::CodeBlock(_)))
+        });
+        assert!(
+            html.contains(r#"<div class="math math-display" data-mbr-line="1">"#),
+            "{html}"
+        );
+        let html = render_markdown_with_block_lines("```asciimath\nx\n```\n", |e| {
+            matches!(e, Start(Tag::CodeBlock(_)))
+        });
+        assert!(
+            html.contains(r#"<div class="math math-display math-asciimath" data-mbr-line="1">"#),
+            "{html}"
         );
     }
 

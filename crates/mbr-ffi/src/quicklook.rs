@@ -589,6 +589,9 @@ impl QuickLookTarget {
                 incomplete_markers: &config.incomplete_markers,
                 // No repo wikilink index in QuickLook.
                 wikilink_index: None,
+                // A preview inlines no KaTeX, so a math fence stays a
+                // highlighted code block: readable TeX, not an unstyled div.
+                math_fences: false,
             },
         )
         .map_err(|e| QuickLookError::MarkdownRenderError {
@@ -2441,6 +2444,26 @@ mod tests {
         // The quotes are escaped (which is what defeats the rewriter); the
         // slashes are not, so the reader still sees the original path.
         assert!(html.contains("&quot;/images/x.png&quot;"));
+    }
+
+    /// A preview inlines no KaTeX, so a math fence must stay a highlighted
+    /// code block rather than become an unstyled `<div>` of raw TeX.
+    #[test]
+    fn test_math_fence_stays_a_code_block() {
+        let (_dir, html) = preview_file(
+            "note.md",
+            b"# Math\n\n```latex\na &= b\n\n- c\n```\n\n```asciimath\nx^2\n```\n",
+        );
+
+        assert!(
+            html.contains("<code class=\"language-latex\">a &amp;= b\n\n- c\n</code>"),
+            "{html}"
+        );
+        assert!(html.contains("<code class=\"language-asciimath\">"));
+        // Only the rendered body: the inlined theme.css, ahead of it, names
+        // the math-fence markup in its rules and comments.
+        let body = &html[html.find("<h1").expect("rendered heading")..];
+        assert!(!body.contains("math-display"), "{body}");
     }
 
     #[test]

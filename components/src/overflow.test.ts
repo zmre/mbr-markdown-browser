@@ -183,6 +183,10 @@ describe('theme.css: nothing widens the page', () => {
   it('scrolls wide display math and caps media at the column width', () => {
     const katex = rulesFor('.katex-display')
     expect(katex.some((r) => declaration(r, 'overflow-x') === 'auto')).toBe(true)
+    // A math fence's <div> scrolls too: before KaTeX draws it (and when it
+    // cannot) it shows its source with `white-space: pre`.
+    const fence = rulesFor('div.math-display')
+    expect(fence.some((r) => declaration(r, 'overflow-x') === 'auto')).toBe(true)
     const media = rulesFor('main :where(img, video, iframe, embed, object)')
     expect(media.some((r) => declaration(r, 'max-width') === '100%')).toBe(true)
   })

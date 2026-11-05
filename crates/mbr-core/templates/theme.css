@@ -1364,6 +1364,33 @@ main :is(td, th) :is(code, a) {
   padding-block: 0.15em;
 }
 
+/* A ```latex / ```katex / ```math / ```asciimath fence is display math in a
+ * block <div class="math math-display"> (`$$` math is a span inside a <p>).
+ * It takes a code block's spacing; once KaTeX draws it, the inner
+ * .katex-display drops its own 1em margins so the block is not double-spaced.
+ * Until then — and for good when it cannot be drawn (no JavaScript, KaTeX
+ * failed, an AsciiMath block without its converter) — it shows its source,
+ * so it is styled as source: line breaks kept, monospace, code background,
+ * scrolling sideways rather than widening the page. */
+div.math-display {
+  margin-block: 0 var(--pico-typography-spacing-vertical);
+  overflow-x: auto;
+}
+
+div.math-display > .katex-display {
+  margin-block: 0;
+}
+
+div.math-display:not([data-mbr-math="rendered"]) {
+  padding: var(--pico-spacing);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-code-background-color);
+  color: var(--pico-code-color);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.875em;
+  white-space: pre;
+}
+
 /* Media never wider than the column. Zero specificity beyond `main`, so the
  * theater figure's own sizing still wins. */
 main :where(img, video, iframe, embed, object) {

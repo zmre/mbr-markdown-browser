@@ -7,7 +7,7 @@
 #   ./scripts/update-assets.sh --hljs 11.11.2     # update one asset to an exact version
 #   ./scripts/update-assets.sh --katex latest     # ...or to whatever upstream calls latest
 #
-# Assets covered: highlight.js, mermaid, KaTeX (+ fonts), reveal.js, Pico CSS.
+# Assets covered: highlight.js, mermaid, KaTeX (+ fonts), asciimath2tex, reveal.js, Pico CSS.
 #
 # Most of these files carry their version in the filename and are named by
 # `include_bytes!` in crates/mbr-core/src/, so a version bump renames files the Rust code
@@ -109,6 +109,12 @@ current_katex() {
     [[ -n "$f" ]] && basename "$f" | sed 's/katex\.\(.*\)\.min\.js/\1/'
     return 0
 }
+current_asciimath2tex() {
+    local f
+    f=$(ls "$TEMPLATES_DIR"/asciimath2tex.*.min.js 2>/dev/null | head -1 || true)
+    [[ -n "$f" ]] && basename "$f" | sed 's/asciimath2tex\.\(.*\)\.min\.js/\1/'
+    return 0
+}
 current_reveal() {
     local f
     f=$(ls "$TEMPLATES_DIR"/reveal.*.js 2>/dev/null | grep -v '\.notes\.' | head -1 || true)
@@ -126,11 +132,12 @@ report_versions() {
     echo "Vendored asset versions in templates/:"
     echo
     printf "  %-14s %-12s %s\n" "ASSET" "VENDORED" "LATEST"
-    for name in highlight.js mermaid katex reveal.js pico; do
+    for name in highlight.js mermaid katex asciimath2tex reveal.js pico; do
         case "$name" in
             highlight.js) cur=$(current_hljs) ;;
             mermaid)      cur=$(current_mermaid) ;;
             katex)        cur=$(current_katex) ;;
+            asciimath2tex) cur=$(current_asciimath2tex) ;;
             reveal.js)    cur=$(current_reveal) ;;
             pico)         cur=$(current_pico) ;;
         esac
@@ -319,6 +326,49 @@ download_katex() {
     echo
 }
 
+# --- asciimath2tex --------------------------------------------------------
+
+# AsciiMath -> TeX converter that <mbr-katex> loads only on pages with an
+# ```asciimath fence. The UMD build (already minified upstream) defines the
+# `AsciiMathParser` global the loader expects; the `.mjs`/CommonJS builds do not.
+#
+# Apache-2.0 asks that redistributions carry the license, so the license file
+# is vendored beside the script (as icons/LICENSE is for Lucide) and the script
+# gets a one-line `/*! … */` banner naming it, since the served file is what a
+# static site redistributes. The trailing sourceMappingURL is dropped: the map
+# is not vendored, and a dangling one is a 404 in every devtools session.
+download_asciimath2tex() {
+    local version="$1"
+    local old; old=$(current_asciimath2tex)
+    local base="https://cdn.jsdelivr.net/npm/asciimath2tex@${version}"
+    local dest="$STAGE/asciimath2tex/asciimath2tex.${version}.min.js"
+
+    info "Downloading asciimath2tex v${version}..."
+    mkdir -p "$STAGE/asciimath2tex"
+
+    info "  Core: dist/asciimath2tex.umd.js"
+    fetch "${base}/dist/asciimath2tex.umd.js" "$STAGE/asciimath2tex/umd.js"
+    grep -q 'AsciiMathParser' "$STAGE/asciimath2tex/umd.js" \
+        || error "asciimath2tex.umd.js no longer defines AsciiMathParser — check the upstream build"
+    info "  License"
+    fetch "${base}/LICENSE" "$STAGE/asciimath2tex/asciimath2tex.LICENSE"
+
+    {
+        printf '/*! asciimath2tex %s | (c) Christian Lawson-Perfect | Apache-2.0 | https://github.com/christianp/asciimath2tex | license: asciimath2tex.LICENSE */\n' "$version"
+        grep -v '^//# sourceMappingURL=' "$STAGE/asciimath2tex/umd.js"
+    } > "$dest"
+    rm -f "$STAGE/asciimath2tex/umd.js"
+
+    if [[ -n "$old" && "$old" != "$version" ]]; then
+        rm -f "$TEMPLATES_DIR/asciimath2tex.${old}.min.js"
+        rename_refs "asciimath2tex.${old}.min.js" "asciimath2tex.${version}.min.js"
+    fi
+    mv "$STAGE"/asciimath2tex/* "$TEMPLATES_DIR/"
+
+    info "asciimath2tex v${version} installed; src/ references updated."
+    echo
+}
+
 # --- reveal.js -----------------------------------------------------------
 
 # Core and the notes plugin only. The three vendored themes
@@ -402,13 +452,14 @@ download_pico() {
 HLJS_VERSION=""
 MERMAID_VERSION=""
 KATEX_VERSION=""
+ASCIIMATH2TEX_VERSION=""
 REVEAL_VERSION=""
 PICO_VERSION=""
 UPDATE_ALL=false
 
 usage() {
     cat <<'EOF'
-Usage: update-assets.sh [--all] [--hljs V] [--mermaid V] [--katex V] [--reveal V] [--pico V]
+Usage: update-assets.sh [--all] [--hljs V] [--mermaid V] [--katex V] [--asciimath2tex V] [--reveal V] [--pico V]
 
 With no arguments, reports the vendored version of each asset alongside the
 latest published upstream version.
@@ -418,6 +469,8 @@ Options:
   --hljs VERSION     highlight.js       (VERSION may be "latest")
   --mermaid VERSION  mermaid
   --katex VERSION    KaTeX, including its font files
+  --asciimath2tex VERSION
+                     asciimath2tex (AsciiMath -> TeX for ```asciimath fences) + its LICENSE
   --reveal VERSION   reveal.js core + notes plugin (themes are mbr-modified; skipped)
   --pico VERSION     Pico CSS
   -h, --help         Show this help message
@@ -435,6 +488,7 @@ while [[ $# -gt 0 ]]; do
         --hljs)    HLJS_VERSION="${2:?--hljs needs a version}"; shift 2 ;;
         --mermaid) MERMAID_VERSION="${2:?--mermaid needs a version}"; shift 2 ;;
         --katex)   KATEX_VERSION="${2:?--katex needs a version}"; shift 2 ;;
+        --asciimath2tex) ASCIIMATH2TEX_VERSION="${2:?--asciimath2tex needs a version}"; shift 2 ;;
         --reveal)  REVEAL_VERSION="${2:?--reveal needs a version}"; shift 2 ;;
         --pico)    PICO_VERSION="${2:?--pico needs a version}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -446,6 +500,7 @@ if $UPDATE_ALL; then
     HLJS_VERSION="${HLJS_VERSION:-latest}"
     MERMAID_VERSION="${MERMAID_VERSION:-latest}"
     KATEX_VERSION="${KATEX_VERSION:-latest}"
+    ASCIIMATH2TEX_VERSION="${ASCIIMATH2TEX_VERSION:-latest}"
     REVEAL_VERSION="${REVEAL_VERSION:-latest}"
     PICO_VERSION="${PICO_VERSION:-latest}"
 fi
@@ -462,7 +517,7 @@ resolve() {
     fi
 }
 
-if [[ -z "$HLJS_VERSION$MERMAID_VERSION$KATEX_VERSION$REVEAL_VERSION$PICO_VERSION" ]]; then
+if [[ -z "$HLJS_VERSION$MERMAID_VERSION$KATEX_VERSION$ASCIIMATH2TEX_VERSION$REVEAL_VERSION$PICO_VERSION" ]]; then
     report_versions true
     echo "To update, pass versions explicitly or use --all:"
     echo "  $0 --all"
@@ -473,6 +528,9 @@ fi
 if [[ -n "$HLJS_VERSION" ]];    then download_hljs    "$(resolve highlight.js "$HLJS_VERSION")"; fi
 if [[ -n "$MERMAID_VERSION" ]]; then download_mermaid "$(resolve mermaid "$MERMAID_VERSION")"; fi
 if [[ -n "$KATEX_VERSION" ]];   then download_katex   "$(resolve katex "$KATEX_VERSION")"; fi
+if [[ -n "$ASCIIMATH2TEX_VERSION" ]]; then
+    download_asciimath2tex "$(resolve asciimath2tex "$ASCIIMATH2TEX_VERSION")"
+fi
 if [[ -n "$REVEAL_VERSION" ]];  then download_reveal  "$(resolve reveal.js "$REVEAL_VERSION")"; fi
 if [[ -n "$PICO_VERSION" ]];    then download_pico    "$(resolve @picocss/pico "$PICO_VERSION")"; fi
 

@@ -473,6 +473,25 @@ async fn test_build_writes_katex_assets() {
     assert!(font.exists(), "Expected KaTeX font at {:?}", font);
 }
 
+/// The AsciiMath converter `<mbr-katex>` loads for ```` ```asciimath ````
+/// fences must be in a static site's `.mbr/`, beside KaTeX, and the page must
+/// carry the display-math div it converts.
+#[tokio::test]
+async fn test_build_writes_asciimath2tex_asset() {
+    let repo = TestRepo::new();
+    repo.create_markdown("math.md", "# Math\n\n```asciimath\nx^2\n```\n");
+
+    let output = build_site(&repo).await;
+
+    let js = output.join(".mbr").join("asciimath2tex.min.js");
+    assert!(js.exists(), "Expected asciimath2tex at {:?}", js);
+    let page = fs::read_to_string(output.join("math").join("index.html")).unwrap();
+    assert!(
+        page.contains("<div class=\"math math-display math-asciimath\">x^2\n</div>"),
+        "{page}"
+    );
+}
+
 // ============================================================================
 // Directory exclusion tests
 // ============================================================================

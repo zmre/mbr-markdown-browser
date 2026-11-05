@@ -145,7 +145,7 @@ page's error panel, the same as a broken image.
 
 - **Images**: Use standard markdown image syntax
 - **Code blocks**: Syntax highlighting works automatically
-- **Math**: KaTeX equations render in slides
+- **Math**: KaTeX equations render in slides, including ` ```latex ` / ` ```math ` / ` ```asciimath ` [math fences](index.md#multi-line-math-with-fenced-blocks)
 - **Mermaid**: Diagrams work in presentation mode
 
 ## Example
