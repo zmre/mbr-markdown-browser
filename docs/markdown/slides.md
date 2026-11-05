@@ -155,6 +155,30 @@ shorthand when it is an image URL. Colours and gradients (`#336`, `red`,
 as written. A background image or video that doesn't exist shows up in the
 page's error panel, the same as a broken image.
 
+### Media Beside Text
+
+Give a slide the `media-float-right` or `media-float-left` class to put its
+image or embed on one side, up to half the slide's width, with the heading's
+bullets and paragraphs beside it:
+
+```markdown
+--- {.media-float-right}
+
+## Why buoys?
+
+![](images/buoy.jpg)
+
+- Cheap to deploy
+- Report every ten minutes
+```
+
+This works for images, videos, audio, PDFs, YouTube links and Giphy links,
+all written with the usual `![](...)` syntax. Video, audio, PDF and YouTube
+take the full half; images and GIFs keep their own size up to it. A floated PDF
+is shown square, so it doesn't fill the slide. Figure captions are hidden while
+the slides play. The classes work on ordinary pages too (see
+[Floating Media Beside Text](media/#floating-media-beside-text)).
+
 ## Keyboard Shortcuts
 
 While the slides play, the keyboard belongs to them: mbr's own page shortcuts

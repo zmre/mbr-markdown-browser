@@ -3454,13 +3454,65 @@ main .mbr-fc-pie-unreviewed {
 }
 
 /* Below are for slides or any section or doc */
-.image-float-right img {
-  float: right;
-  max-width: 50%;
-  padding-left: 2em;
+.reveal figure figcaption {
+  display: none;
 }
-.image-float-left img {
-  float: left;
+.media-float-right,
+.media-float-left {
+  display: flow-root;
+}
+.media-float-right ul,
+.media-float-right ol,
+.media-float-left ul,
+.media-float-left ol {
+  display: block !important; /* to turn off inline-block in slides */
+}
+/* The floated wrapper is the `<p>` around a markdown image, or the `<figure>`
+ * of any other embed: video, audio, PDF (`<object>`), YouTube (`<iframe>`) and
+ * Giphy (`<img>`). The renderer writes those figures inside a `<p>`, which the
+ * HTML parser closes, so in the DOM the figure is the section's own child. */
+:is(.media-float-right, .media-float-left) p:has(> img) img,
+:is(.media-float-right, .media-float-left)
+  figure
+  > :is(video, audio, object, iframe, img) {
+  display: block;
+  max-width: 100%;
+}
+:is(.media-float-right, .media-float-left)
+  :is(p:has(> img), figure:has(> :is(video, audio, object, iframe, img))) {
+  box-sizing: border-box;
+  margin: 0;
   max-width: 50%;
+}
+.media-float-right
+  :is(p:has(> img), figure:has(> :is(video, audio, object, iframe, img))) {
+  float: right;
+  padding-left: 1em;
+}
+.media-float-left
+  :is(p:has(> img), figure:has(> :is(video, audio, object, iframe, img))) {
+  float: left;
   padding-right: 2em;
+}
+/* Video (`preload="none"`: its size is unknown until played), audio controls,
+ * PDFs and iframes have no useful intrinsic width, and a floated box shrinks
+ * to 300px for them, so their figure takes the full half. */
+:is(.media-float-right, .media-float-left)
+  figure:has(> :is(video, audio, object, iframe)) {
+  width: 50%;
+}
+:is(.media-float-right, .media-float-left)
+  figure
+  > :is(video, audio, object, iframe) {
+  width: 100%;
+}
+/* 16:9 until a video's own size is known; an iframe never has one. */
+:is(.media-float-right, .media-float-left) figure > :is(video, iframe) {
+  height: auto;
+  aspect-ratio: auto 16 / 9;
+}
+/* A PDF's 600px default would fill a slide; show the top of the page instead. */
+:is(.media-float-right, .media-float-left) figure > object {
+  height: auto;
+  aspect-ratio: 1;
 }

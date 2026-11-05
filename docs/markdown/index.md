@@ -705,7 +705,10 @@ Multiple attributes can be combined:
 
 **Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds.
 
-**Styling:** Target specific sections with CSS using IDs or classes.
+**Styling:** Target specific sections with CSS using IDs or classes. Two
+classes ship with mbr: `.media-float-left` and `.media-float-right` float the
+section's image, video, audio, PDF or YouTube embed beside its text (see
+[Floating Media Beside Text](media/#floating-media-beside-text)).
 
 **JavaScript hooks:** Add data attributes for interactive behavior.
 
