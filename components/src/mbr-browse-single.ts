@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
-import { isInputTarget } from './mbr-keys.js'
+import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { ICON_BUTTON_CSS } from './controls.ts'
 import { ICON_SM, icon, iconChevronRight, iconX } from './icons.ts'
@@ -276,8 +276,9 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
 
   private _setupKeyboardHandler() {
     this._keyboardHandler = (e: KeyboardEvent) => {
-      // Handle - and F2 for toggle (in overlay mode)
-      if (this._isOverlayMode && !isInputTarget(e)) {
+      // Handle - and F2 for toggle (in overlay mode). Not while a slide deck
+      // plays: it owns the keyboard, and the drawer would open behind it.
+      if (this._isOverlayMode && !isInputTarget(e) && !isPresentationPlaying()) {
         if ((e.key === '-' && !e.ctrlKey && !e.metaKey) || e.key === 'F2') {
           e.preventDefault();
           this.toggle();

@@ -664,7 +664,7 @@ Plain section (no attributes).
 
 ### Attribute Syntax
 
-The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html):
+The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html), plus quoted values:
 
 | Syntax | Result | Example |
 |--------|--------|---------|
@@ -672,6 +672,9 @@ The attribute block follows [pulldown-cmark's heading attributes syntax](https:/
 | `.class` | CSS class | `{.highlight}` → `class="highlight"` |
 | `key=value` | Custom attribute | `{data-x=y}` → `data-x="y"` |
 | `key="value"` | Quoted value | `{title="Hello World"}` |
+| `key='value'` | Single-quoted value | `{data-q='say "hi"'}` → `data-q="say &quot;hi&quot;"` |
+
+Values are used exactly as written. Smart punctuation does not touch them, so `--`, `...` and quotes inside a value stay as typed: `--- {style="--pico-color: cyan;"}` sets the CSS custom property. A `#` or `.` inside a quoted value is part of the value (`style="color: #fff"` sets no id). Backslash escapes and HTML entities are not decoded inside the braces.
 
 Multiple attributes can be combined:
 

@@ -112,6 +112,23 @@ Custom Highlight API and inserts nothing into the page, so it cannot disturb
 find-in-page, copy-and-paste, or any other enhancement that reads the document's
 text. A browser without the API loses the wash and keeps every marker.
 
+Hovering the washed text shows the same popover as hovering its marker: the
+note's type (Issue, Suggestion, Note, Praise, Question, Insight) and its text.
+When several notes quote the same passage, the popover lists them all. A hover
+popover shows the first few lines of a long note; click the marker to pin the
+popover and read all of it. On a touch screen, where nothing can hover, tap the
+marker or the washed text: either opens the popover pinned. A page with no notes
+does no hover or tap tracking at all.
+
+Notes work in a playing [slide deck](../markdown/slides/) too: the wash is drawn
+again over the slides when the presentation starts, and you can select text on a
+slide and press `r` to add a note. The markers are hidden while the slides play,
+so they do not sit on the audience's slides; hover the washed text (or tap it on
+a touch screen) to see the note, or open the list with the review button, which
+moves up above the slide arrows. While the note form is
+open, every key you type goes into it rather than to the slides (`g`, Space and
+the arrows included).
+
 The popover has **Edit** and **Delete** buttons. Delete asks first — there is no
 undo anywhere in this feature.
 

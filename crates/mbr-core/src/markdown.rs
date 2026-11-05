@@ -408,6 +408,19 @@ pub(crate) fn section_rule_attrs(text: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// The `{…}` block of a `--- {attrs}` section rule exactly as written, given
+/// the source of the paragraph [`section_rule_attrs`] matched.
+///
+/// The paragraph is one line, `---`/`—`/an entity, a space, then the block, so
+/// the block runs from its first `{` to its last `}` (a trailing newline may be
+/// in the range). Nothing before the block can contain a brace. `None` only
+/// when the braces are spelled as entities, where the caller keeps the text.
+fn section_rule_source_attrs(paragraph_source: &str) -> Option<&str> {
+    let open = paragraph_source.find('{')?;
+    let close = paragraph_source.rfind('}')?;
+    paragraph_source.get(open..=close).filter(|_| open < close)
+}
+
 /// Maps a non-standard [remark-hint](https://github.com/sergioramos/remark-hint)
 /// paragraph prefix to its GitHub-alert equivalent.
 ///
@@ -1425,8 +1438,16 @@ fn collect_events_and_headings<'a>(
                     };
 
                     if let Some(attrs) = rule_attrs {
-                        // Extract and parse attrs from the text event
-                        let parsed = ParsedAttrs::parse(attrs);
+                        // Detected on the rendered text, but parsed from the
+                        // source: smart punctuation has rewritten the text
+                        // (`--` → en dash, `'` → curly quote), which breaks
+                        // `style="--pico-color:cyan"` and `key='v'`.
+                        let parsed = ParsedAttrs::parse(
+                            markdown_input
+                                .get(range.clone())
+                                .and_then(section_rule_source_attrs)
+                                .unwrap_or(attrs),
+                        );
 
                         // Remove the Start(Paragraph) and Text events. The Text
                         // is recorded, and the `Rule` pushed below reuses its
@@ -5406,6 +5427,129 @@ mod tests {
         );
     }
 
+    // Section attributes are parsed from the source, not from the
+    // smart-punctuated paragraph text (`--` → en dash, `'` → curly quote).
+
+    #[tokio::test]
+    async fn section_attrs_keep_double_dashes() {
+        let md = "First\n\n--- {style=\"--pico-color:cyan;\"}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section style="--pico-color:cyan;">"#),
+            "`--` in a value must survive smart punctuation. Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_accept_single_quotes() {
+        let md = "First\n\n--- {data-x='a b'}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section data-x="a b">"#),
+            "single-quoted value with a space. Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_mixed_quotes_dashes_and_ellipses() {
+        let md = "First\n\n--- {#s .c title=\"it's -- fine...\" data-q='say \"hi\"' data-n=a--b...}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(
+                r#"<section id="s" class="c" title="it's -- fine..." data-q="say &quot;hi&quot;" data-n="a--b...">"#
+            ),
+            "values must be the source text, escaped once. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_attrs_from_source_in_render_str() {
+        // The synchronous pipeline (QuickLook, render_sync) shares pass 1.
+        let html = render_str_with_mode("A\n\n--- {style='--a:b'}\n\nB", false).html;
+        assert!(html.contains(r#"<section style="--a:b">"#), "Got: {html}");
+    }
+
+    #[tokio::test]
+    async fn section_attrs_from_source_after_nested_rule() {
+        // A `--- {…}` inside a blockquote or list item is a plain `<hr />` (a
+        // nested rule cannot close a section), but it still counts, so the next
+        // top-level rule's attributes are the ones from *its* source line.
+        let md = "A\n\n> --- {style=\"--q:1\"}\n\n- --- {style=\"--l:2\"}\n\n--- {style=\"--top:3\"}\n\nB";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<section style="--top:3">"#), "Got: {html}");
+        assert!(
+            !html.contains("--q:1") && !html.contains("--l:2"),
+            "Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_literal_em_dash_marker() {
+        // `—` typed directly is the same rule; its attributes come from source too.
+        let md = "A\n\n\u{2014} {style=\"--x:y\"}\n\nB";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<section style="--x:y">"#), "Got: {html}");
+    }
+
+    #[test]
+    fn section_attrs_background_url_with_double_dash() {
+        // The Reveal background rewrite sees the source value, so a file name
+        // with `--` resolves instead of pointing at an en-dash name.
+        let html = render_with_depth(
+            "A\n\n--- {data-background-image=\"img--wide.png\"}\n\nB",
+            Some(1),
+        );
+        assert!(
+            html.contains(r#"data-background-image="../img--wide.png""#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_attrs_keep_block_lines() {
+        // The rule replaces the paragraph in place; later blocks keep their lines.
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let opts = RenderOptions {
+            review: ReviewLines::Emit,
+            ..plain_options(root, true)
+        };
+        let html = render_str(
+            "A\n\n--- {style=\"--x:y\" title='a...b'}\n\nB",
+            &root.join("deck.md"),
+            opts,
+        )
+        .unwrap()
+        .html;
+        assert!(
+            html.contains(r#"<section style="--x:y" title="a...b">"#),
+            "Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">B</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn heading_attrs_are_not_smart_punctuated() {
+        // pulldown-cmark parses heading attributes from the source itself.
+        let html = render_str_with_mode("# Title {style=--x:y data-n=a...b}", false).html;
+        assert!(
+            html.contains(r#"style="--x:y""#) && html.contains(r#"data-n="a...b""#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_rule_source_attrs_slices_the_block() {
+        assert_eq!(
+            section_rule_source_attrs("--- {style=\"--a\"}\n"),
+            Some("{style=\"--a\"}")
+        );
+        assert_eq!(section_rule_source_attrs("&mdash; {a=b}"), Some("{a=b}"));
+        assert_eq!(section_rule_source_attrs("--- &#123;a&#125;"), None);
+    }
+
     // ============ Raw HTML URL tests ============
 
     /// The `href` a markdown link to `path` gets on a non-index page.
@@ -8408,6 +8552,52 @@ mod proptests {
                 .collect();
             let unique: HashSet<&String> = ids.iter().collect();
             prop_assert_eq!(unique.len(), ids.len());
+        }
+    }
+
+    proptest! {
+        /// A section attribute value made of characters that form no inline
+        /// markdown reaches the HTML exactly as written — in particular `--`,
+        /// `...` and quotes, which smart punctuation would otherwise rewrite.
+        #[test]
+        fn section_attr_values_reach_html_verbatim(
+            double in "[A-Za-z0-9 .,:;#()/%+'-]{0,30}",
+            single in "[A-Za-z0-9 .,:;#()/%+\"-]{0,30}",
+        ) {
+            let md = format!("A\n\n--- {{data-d=\"{double}\" data-s='{single}'}}\n\nB");
+            let html = render_str(
+                &md,
+                Path::new("/nonexistent/deck.md"),
+                RenderOptions {
+                    root_path: Path::new("/nonexistent"),
+                    oembed_timeout_ms: 0,
+                    link_transform_config: LinkTransformConfig {
+                        markdown_extensions: vec!["md".to_string()],
+                        index_file: "index.md".to_string(),
+                        is_index_file: false,
+                        url_depth: None,
+                        current_page_url: String::new(),
+                        markdown_page_probe: None,
+                    },
+                    oembed_cache: None,
+                    server_mode: true,
+                    transcode_enabled: false,
+                    valid_tag_sources: HashSet::new(),
+                    review: ReviewLines::Omit,
+                    mark_incomplete: false,
+                    incomplete_markers: &[],
+                    wikilink_index: None,
+                    math_fences: true,
+                },
+            )
+            .unwrap()
+            .html;
+            let expected = format!(
+                "<section data-d=\"{}\" data-s=\"{}\">",
+                double,
+                single.replace('"', "&quot;")
+            );
+            prop_assert!(html.contains(&expected), "expected {expected} in {html}");
         }
     }
 

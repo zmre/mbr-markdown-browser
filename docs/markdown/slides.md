@@ -61,12 +61,36 @@ Final slide
 
 Click **Play** in the header, or press `p`. On phones (600px wide or
 less) and in the iOS app, the header button gives way to a floating play button in
-the bottom-right corner that starts the slides. There, a small ✕ button in the
-bottom-left corner leaves the presentation and reloads the page, since a touch
-screen has no `Esc`. While the slides play, the iOS app hides its navigation
+the bottom-right corner that starts the slides. While the slides play, the iOS app hides its navigation
 bar and the status bar so the deck gets the whole screen, and turns off its
 back/forward edge swipes so a swipe changes slides instead of leaving the page.
-The ✕ brings the bar back.
+
+### Leaving the slides
+
+Press `q`, or click the ✕ in the bottom-left corner, to leave the presentation
+and get the page back. The ✕ is almost invisible while you present, and shows
+up when you point at it or tab to it; on a touch screen, which cannot hover, it
+stays visible. In the iOS app the ✕ also brings the navigation bar back.
+
+### Reloading keeps you in the slides
+
+While the slides play, the address bar carries the slide you are on
+(`#/0` for the first slide, `#/3` for the fourth, and so on). Reloading the page,
+whether by hand or because mbr reloaded it after you saved the file, brings the
+presentation back on that same slide, so you can edit a slide and see the change
+straight away. A link to the page with a slide hash opens the presentation too.
+`q` and the ✕ drop the hash, so the page you return to is the ordinary page.
+
+### Fitting the slides
+
+Each slide is shown in a fixed 960×700 box that is scaled to the window. A slide
+whose content is taller than that box is fitted to it while it is on screen:
+images are first shrunk to the room the text leaves (never below about a third
+of the slide), and then, if the slide still does not fit, its text gets
+smaller, down to half size. A slide that still does not fit at half size
+scrolls. Text and an image together are centred like any other slide, and
+images are loaded before their slide appears, so a slide does not move when its
+picture arrives.
 
 A phone shows the same slides as a desktop, scaled down to fit the screen,
 so a deck's own CSS, backgrounds, images and diagrams look the way they do on
@@ -131,15 +155,23 @@ page's error panel, the same as a broken image.
 
 ## Keyboard Shortcuts
 
+While the slides play, the keyboard belongs to them: mbr's own page shortcuts
+(search, the file browser, `f` for links, `j`/`k` scrolling and the rest) are
+off until you leave, so they cannot open panels behind the slides. `r` still
+adds a [review note](../modes/review/) to text you select on a slide, and keys
+typed into the note form go to the form, not to the slides.
+
 | Key | Action |
 |-----|--------|
-| `->` / `Space` | Next slide |
-| `<-` | Previous slide |
+| `->` / `Space` / `n` | Next slide |
+| `<-` / `p` | Previous slide |
 | `Esc` / `O` | Overview mode |
 | `s` | Speaker notes |
-| `g` | Speaker notes |
+| `g` | Jump to a slide by number |
 | `f` | Fullscreen |
-| `?` | Help overlay |
+| `b` / `.` | Pause (black screen) |
+| `q` | Exit the slides |
+| `?` | Help: every slide shortcut, `q` included |
 
 ## Tips
 
@@ -147,6 +179,10 @@ page's error panel, the same as a broken image.
 - **Code blocks**: Syntax highlighting works automatically
 - **Math**: KaTeX equations render in slides, including ` ```latex ` / ` ```math ` / ` ```asciimath ` [math fences](index.md#multi-line-math-with-fenced-blocks)
 - **Mermaid**: Diagrams work in presentation mode
+- **Kanban boards**: a `--- {.kanban}` slide shows its board as columns of
+  cards side by side, one column per heading and its list, the same as on the
+  page (see [Kanban Display](kanban/)). A board too tall for the slide gets
+  smaller text, like any other slide.
 
 ## Example
 

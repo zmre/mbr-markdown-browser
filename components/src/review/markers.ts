@@ -19,6 +19,17 @@
  * (`theme.css`): a small glyph in the flow, with the note itself in a popover
  * on hover or focus.
  *
+ * # Hovering the passage
+ *
+ * The washed passage shows the same card on hover, although a highlight takes
+ * no events: one `pointermove` listener on the root (attached only while some
+ * quote is painted, so a page without notes pays nothing) checks, at most once
+ * per animation frame, whether the pointer is inside a painted range's client
+ * rects (`passageHitsAt`). Nothing is attached per note. Touch has no hover,
+ * so a tap on the passage (a touch `pointerup` that selected nothing) opens the
+ * card pinned, like a tap on the marker. That is the touch route while a slide
+ * deck plays, where `reveal-slides.css` hides the markers.
+ *
  * # Why the glyph is generated content
  *
  * `.mbr-review-marker` has **no text content**; its glyph comes from a
@@ -65,6 +76,58 @@ function highlightApi(): { registry: HighlightRegistry; Ctor: typeof Highlight }
   return registry && typeof Ctor === 'function' ? { registry, Ctor } : null
 }
 
+/** The smallest box `passageHitsAt` compares a pointer against. */
+export interface HitRect {
+  readonly left: number
+  readonly top: number
+  readonly right: number
+  readonly bottom: number
+}
+
+/** One painted quote: the boxes it occupies on screen, and what it stands for. */
+export interface PassageBoxes<T> {
+  readonly rects: ArrayLike<HitRect>
+  readonly value: T
+}
+
+/** What the pointer is over: every note whose quote is under it, and the line box hit. */
+export interface PassageHover {
+  readonly notes: ReviewNote[]
+  readonly rect: DOMRect
+}
+
+/**
+ * Every value whose boxes contain the point, in order, with the first box
+ * hit. `slop` widens each box a little so the gaps between a wrapped quote's
+ * lines do not flicker the card.
+ */
+export function passageHitsAt<T>(
+  x: number,
+  y: number,
+  passages: readonly PassageBoxes<T>[],
+  slop = 2
+): { values: T[]; rect: HitRect | null } {
+  const values: T[] = []
+  let first: HitRect | null = null
+  for (const passage of passages) {
+    for (let i = 0; i < passage.rects.length; i++) {
+      const box = passage.rects[i]!
+      if (x >= box.left - slop && x <= box.right + slop && y >= box.top - slop && y <= box.bottom + slop) {
+        values.push(passage.value)
+        first ??= box
+        break
+      }
+    }
+  }
+  return { values, rect: first }
+}
+
+/** A painted quote, kept so the pointer can be hit-tested against it. */
+interface Passage {
+  range: Range
+  note: ReviewNote
+}
+
 /** A group of notes sharing one anchor, and the element they hang from. */
 interface MarkerGroup {
   key: string
@@ -82,13 +145,93 @@ interface MarkerGroup {
 export class ReviewMarkerLayer {
   private readonly root: HTMLElement
   private onActivate: (notes: ReviewNote[], marker: HTMLElement, pinned: boolean) => void
+  private onPassageHover: ((hover: PassageHover | null) => void) | null
+  private onPassageTap: ((hover: PassageHover) => void) | null
+  private passages: Passage[] = []
+  private pointer: { x: number; y: number } | null = null
+  private hoverFrame = 0
+  /** Ids of the notes under the pointer at the last check, joined. */
+  private hoverKey = ''
 
   constructor(
     root: HTMLElement,
-    onActivate: (notes: ReviewNote[], marker: HTMLElement, pinned: boolean) => void
+    onActivate: (notes: ReviewNote[], marker: HTMLElement, pinned: boolean) => void,
+    onPassageHover: ((hover: PassageHover | null) => void) | null = null,
+    onPassageTap: ((hover: PassageHover) => void) | null = null
   ) {
     this.root = root
     this.onActivate = onActivate
+    this.onPassageHover = onPassageHover
+    this.onPassageTap = onPassageTap
+  }
+
+  /** The notes whose painted quote contains the viewport point, if any. */
+  notesAt(x: number, y: number): PassageHover | null {
+    const hit = passageHitsAt(
+      x,
+      y,
+      this.passages.map((passage) => ({ rects: passage.range.getClientRects(), value: passage.note }))
+    )
+    if (hit.values.length === 0 || hit.rect === null) return null
+    const { left, top, right, bottom } = hit.rect
+    return { notes: hit.values, rect: new DOMRect(left, top, right - left, bottom - top) }
+  }
+
+  private onPointerMove = (e: PointerEvent): void => {
+    if (e.pointerType === 'touch') return
+    this.pointer = { x: e.clientX, y: e.clientY }
+    if (this.hoverFrame === 0) {
+      this.hoverFrame = requestAnimationFrame(() => {
+        this.hoverFrame = 0
+        this.checkHover()
+      })
+    }
+  }
+
+  /** A finger lifted on a passage, without having selected text there. */
+  private onPointerUp = (e: PointerEvent): void => {
+    if (e.pointerType !== 'touch' || this.onPassageTap === null) return
+    const selection = window.getSelection()
+    if (selection && selection.rangeCount > 0 && !selection.isCollapsed) return
+    const hover = this.notesAt(e.clientX, e.clientY)
+    if (hover !== null) this.onPassageTap(hover)
+  }
+
+  private onPointerLeave = (): void => {
+    this.pointer = null
+    this.checkHover()
+  }
+
+  /** Report a change in which notes' passages are under the pointer. */
+  private checkHover(): void {
+    const hover = this.pointer ? this.notesAt(this.pointer.x, this.pointer.y) : null
+    const key = hover ? hover.notes.map((note) => note.id).join(' ') : ''
+    if (key === this.hoverKey) return
+    this.hoverKey = key
+    this.onPassageHover?.(hover)
+  }
+
+  private listenForHover(): void {
+    if (this.passages.length === 0) return
+    if (this.onPassageHover !== null) {
+      this.root.addEventListener('pointermove', this.onPointerMove, { passive: true })
+      this.root.addEventListener('pointerleave', this.onPointerLeave)
+    }
+    if (this.onPassageTap !== null) this.root.addEventListener('pointerup', this.onPointerUp)
+  }
+
+  private stopListeningForHover(): void {
+    this.root.removeEventListener('pointermove', this.onPointerMove)
+    this.root.removeEventListener('pointerleave', this.onPointerLeave)
+    this.root.removeEventListener('pointerup', this.onPointerUp)
+    if (this.hoverFrame !== 0) cancelAnimationFrame(this.hoverFrame)
+    this.hoverFrame = 0
+    this.pointer = null
+    this.passages = []
+    if (this.hoverKey !== '') {
+      this.hoverKey = ''
+      this.onPassageHover?.(null)
+    }
   }
 
   /**
@@ -108,10 +251,12 @@ export class ReviewMarkerLayer {
       this.inject(group)
     }
     this.paint(notes, index)
+    this.listenForHover()
   }
 
   /** Remove every marker and drop the highlights. */
   clear(): void {
+    this.stopListeningForHover()
     this.root.querySelectorAll(`.${MARKER_CLASS}`).forEach((marker) => marker.remove())
     const api = highlightApi()
     if (api) {
@@ -207,8 +352,9 @@ export class ReviewMarkerLayer {
    * registration of N ranges is very different from N registrations.
    */
   private paint(notes: readonly ReviewNote[], index: TextIndex): void {
+    // The ranges are located even without the Highlight API: they are also
+    // what a hover over the passage is tested against.
     const api = highlightApi()
-    if (!api) return
 
     const ranges: Range[] = []
     for (const note of notes) {
@@ -221,10 +367,13 @@ export class ReviewMarkerLayer {
       )
       if (best === null) continue
       const range = rangeForMatch(index, best.start, best.start + matches.length)
-      if (range) ranges.push(range)
+      if (range) {
+        ranges.push(range)
+        this.passages.push({ range, note })
+      }
     }
 
-    if (ranges.length > 0) {
+    if (api && ranges.length > 0) {
       api.registry.set(HIGHLIGHT_ALL, new api.Ctor(...ranges))
     }
   }

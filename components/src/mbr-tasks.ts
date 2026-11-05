@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { getTasksDefaultInclude, isEditEnabled, isTasksEnabled, resolveUrl } from './shared.js'
-import { isInputTarget, isModalOpen } from './mbr-keys.js'
+import { isInputTarget, isModalOpen, isPresentationPlaying } from './mbr-keys.js'
 import { getMbrAssetBase } from './dynamic-loader.js'
 import { currentDocumentPath, syncDocumentTask, toggleTask } from './task-toggle.js'
 import type { MbrOverlay } from './overlay.js'
@@ -150,7 +150,10 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
       !this._isOpen &&
       !this._loading &&
       !isInputTarget(e) &&
-      !isModalOpen()
+      !isModalOpen() &&
+      // A playing slide deck covers the page; the panel would open unseen
+      // behind it and keep the keyboard.
+      !isPresentationPlaying()
     ) {
       e.preventDefault()
       void this._open()

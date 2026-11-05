@@ -121,6 +121,15 @@ The board is CSS multi-column layout, so it takes no JavaScript and no new markd
 * A column whose cards are taller than the board continues at the top of the next column, and every column after it moves one place to the right. Keep each list short enough to fit, or split it under a second heading.
 * Each item of a top-level list in the section is a card. Nested bullets, checklists and text inside an item are that card's content, in normal weight under the card's bold first line.
 
+## In Slides
+
+A `--- {.kanban}` section in a [slide deck](slides/) is a slide of its own, and
+when the slides play the board is drawn inside the slide: the columns sit side
+by side and share the slide's width (they do not scroll sideways), each column
+holding its heading and its cards. A board taller than the slide is shrunk to
+fit, the same as any other slide. On the page itself, before you press Play, it
+is the ordinary board described above.
+
 ## Printing
 
 When printed, a board flattens to a single column: each heading is followed by its list of cards, so every card reaches the page instead of being cut off at the board height or the sheet width.

@@ -5,13 +5,22 @@
    * in both schemes (WCAG 1.4.11). Open panels (`aria-expanded="true"`) take
    * the active colour and the press fill. */
   --mbr-icon-stroke: 1.75;
-  --mbr-icon-color: color-mix(in srgb, var(--pico-color) 72%, var(--pico-background-color));
+  --mbr-icon-color: color-mix(
+    in srgb,
+    var(--pico-color) 72%,
+    var(--pico-background-color)
+  );
   --mbr-icon-color-hover: var(--pico-color);
   --mbr-icon-color-active: var(--pico-primary);
   --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 7%, transparent);
-  --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 12%, transparent);
+  --mbr-control-press-bg: color-mix(
+    in srgb,
+    var(--pico-color) 12%,
+    transparent
+  );
   --mbr-field-bg: color-mix(in srgb, var(--pico-color) 5%, transparent);
-  --mbr-focus-ring: 0 0 0 2px var(--pico-background-color), 0 0 0 4px var(--pico-primary);
+  --mbr-focus-ring:
+    0 0 0 2px var(--pico-background-color), 0 0 0 4px var(--pico-primary);
   --mbr-control-radius: 8px;
   --mbr-danger: var(--pico-del-color);
   /* Key caps (`<kbd>`): one quiet style everywhere — the page, the shortcut
@@ -189,7 +198,6 @@ main > section[data-theme="dark"] {
   background-color: rgba(0, 0, 0, 0.85);
   padding: var(--pico-block-spacing-vertical) 0;
 }
-
 
 body > header {
   background-color: var(--pico-background-color);
@@ -460,8 +468,16 @@ li::marker {
 @media only screen and (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     /* Icon buttons - Dark Mode: a touch more fill to read on a dark page. */
-    --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 10%, transparent);
-    --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 16%, transparent);
+    --mbr-control-hover-bg: color-mix(
+      in srgb,
+      var(--pico-color) 10%,
+      transparent
+    );
+    --mbr-control-press-bg: color-mix(
+      in srgb,
+      var(--pico-color) 16%,
+      transparent
+    );
     --mbr-field-bg: color-mix(in srgb, var(--pico-color) 8%, transparent);
 
     /* Marginalia - Dark Mode */
@@ -508,8 +524,16 @@ li::marker {
 
 [data-theme="dark"] {
   /* Icon buttons - Dark Mode: a touch more fill to read on a dark page. */
-  --mbr-control-hover-bg: color-mix(in srgb, var(--pico-color) 10%, transparent);
-  --mbr-control-press-bg: color-mix(in srgb, var(--pico-color) 16%, transparent);
+  --mbr-control-hover-bg: color-mix(
+    in srgb,
+    var(--pico-color) 10%,
+    transparent
+  );
+  --mbr-control-press-bg: color-mix(
+    in srgb,
+    var(--pico-color) 16%,
+    transparent
+  );
   --mbr-field-bg: color-mix(in srgb, var(--pico-color) 8%, transparent);
 
   /* Pull Quote - Dark Mode */
@@ -1833,6 +1857,21 @@ a.mbr-link-enhanced[data-tooltip]::after {
 
 .mbr-review-popover-body {
   white-space: pre-wrap;
+}
+
+/* A hover card (`.peek`: the marker or the washed passage under the pointer)
+ * clamps a long note to a few lines; a clicked, pinned card shows it all. */
+.mbr-review-popover.peek .mbr-review-popover-body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  overflow: hidden;
+}
+
+.mbr-review-popover.peek pre {
+  max-height: 6lh;
+  overflow: hidden;
 }
 
 .mbr-review-popover pre {
@@ -3412,4 +3451,16 @@ main .mbr-fc-pie-unreviewed {
 .outline main h5:before {
   content: counter(H2) "." counter(H3) "." counter(H4) "." counter(H5) ". ";
   counter-increment: H5;
+}
+
+/* Below are for slides or any section or doc */
+.image-float-right img {
+  float: right;
+  max-width: 50%;
+  padding-left: 2em;
+}
+.image-float-left img {
+  float: left;
+  max-width: 50%;
+  padding-right: 2em;
 }

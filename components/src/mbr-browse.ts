@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { subscribeSiteNav, resolveUrl, getCanonicalPath } from './shared.js'
-import { isInputTarget } from './mbr-keys.js'
+import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { DISCLOSURE_CSS, ICON_BUTTON_CSS } from './controls.ts'
 import { ICON_SM, icon, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
@@ -203,6 +203,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
     // Setup keyboard event listener
     this._keyboardHandler = (e: KeyboardEvent) => {
+      // A playing slide deck owns the keyboard (and closes this panel).
+      if (isPresentationPlaying()) return;
+
       // Open with '-' key (when not in input field)
       if (e.key === '-' && !e.ctrlKey && !e.metaKey && !isInputTarget(e)) {
         e.preventDefault();

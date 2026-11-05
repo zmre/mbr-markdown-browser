@@ -12,6 +12,7 @@ import { OVERLAY_TAGS } from './overlay.ts'
 import { STORAGE_KEY, serializeEnvelope } from './review/note-model.ts'
 import { resetStoreCache } from './review-store.ts'
 import { makeNote, resetNoteIds } from './review/test-fixtures.ts'
+import { SLIDES_STATE_EVENT } from './mbr-slides.ts'
 
 /** Let the chunk-load promise chain settle. */
 async function settle(element: MbrReviewElement): Promise<void> {
@@ -447,5 +448,132 @@ describe('the note card (regressions from first real use)', () => {
 
     const card = document.querySelector('.mbr-review-popover') as HTMLElement
     expect(card.style.display).toBe('block')
+  })
+})
+
+describe('the passage under the pointer', () => {
+  async function withNotes(...notes: ReturnType<typeof makeNote>[]): Promise<void> {
+    localStorage.setItem(STORAGE_KEY, serializeEnvelope(notes))
+    resetStoreCache()
+    element.remove()
+    element = mount()
+    await settle(element)
+  }
+
+  /** Lay the painted quote out at one box (happy-dom lays nothing out). */
+  function layOutQuote(): void {
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([
+      new DOMRect(10, 100, 200, 20),
+    ] as unknown as DOMRectList)
+  }
+
+  async function pointAt(x: number, y: number, pointerType = 'mouse'): Promise<void> {
+    document.querySelector('main')!.dispatchEvent(
+      new PointerEvent('pointermove', { clientX: x, clientY: y, pointerType, bubbles: true })
+    )
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+    await settle(element)
+  }
+
+  const card = () => document.querySelector('.mbr-review-popover') as HTMLElement | null
+
+  it("shows the note's type and text on hover, clamped as a peek", async () => {
+    layOutQuote()
+    await withNotes(makeNote({ file: 'doc.md', line: 4, quote: 'quick brown', type: 'suggestion', body: 'Say it faster.' }))
+    await pointAt(50, 110)
+    expect(card()?.style.display).toBe('block')
+    expect(card()!.classList.contains('peek')).toBe(true)
+    expect(card()!.querySelector('.mbr-review-popover-head')?.textContent).toBe('SUGGESTION')
+    expect(card()!.textContent).toContain('Say it faster.')
+  })
+
+  it('lists every note over the same passage', async () => {
+    layOutQuote()
+    await withNotes(
+      makeNote({ file: 'doc.md', line: 4, quote: 'quick brown', body: 'First.' }),
+      makeNote({ file: 'doc.md', line: 4, quote: 'quick brown', type: 'issue', body: 'Second.' })
+    )
+    await pointAt(50, 110)
+    expect(card()!.querySelectorAll('.mbr-review-popover-card')).toHaveLength(2)
+  })
+
+  it('hides again once the pointer leaves the passage', async () => {
+    layOutQuote()
+    await withNotes(makeNote({ file: 'doc.md', line: 4, quote: 'quick brown' }))
+    await pointAt(50, 110)
+    expect(card()?.style.display).toBe('block')
+    await pointAt(50, 400)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(card()?.style.display).toBe('none')
+  })
+
+  it('ignores touch, where a tap on the marker opens the card instead', async () => {
+    layOutQuote()
+    await withNotes(makeNote({ file: 'doc.md', line: 4, quote: 'quick brown' }))
+    await pointAt(50, 110, 'touch')
+    expect(card()?.style.display ?? 'none').toBe('none')
+  })
+
+  it('opens the card pinned on a tap on the passage (touch has no hover)', async () => {
+    layOutQuote()
+    await withNotes(makeNote({ file: 'doc.md', line: 4, quote: 'quick brown', body: 'Tapped.' }))
+    // An earlier test's selection would read as the reader selecting text.
+    window.getSelection()?.removeAllRanges()
+    document.querySelector('main')!.dispatchEvent(
+      new PointerEvent('pointerup', { clientX: 50, clientY: 110, pointerType: 'touch', bubbles: true })
+    )
+    await settle(element)
+    expect(card()?.style.display).toBe('block')
+    expect(card()!.classList.contains('peek')).toBe(false)
+    expect(card()!.textContent).toContain('Tapped.')
+    // Pinned: a pointer passing elsewhere does not hide it; a tap outside does.
+    await pointAt(50, 400)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(card()?.style.display).toBe('block')
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, composed: true }))
+    expect(card()?.style.display).toBe('none')
+  })
+
+  it('ignores a mouse click on the passage (hover already shows it)', async () => {
+    layOutQuote()
+    await withNotes(makeNote({ file: 'doc.md', line: 4, quote: 'quick brown' }))
+    document.querySelector('main')!.dispatchEvent(
+      new PointerEvent('pointerup', { clientX: 50, clientY: 110, pointerType: 'mouse', bubbles: true })
+    )
+    await settle(element)
+    expect(card()?.style.display ?? 'none').toBe('none')
+  })
+
+  it('listens for nothing on a page without notes', async () => {
+    const listen = vi.spyOn(HTMLElement.prototype, 'addEventListener')
+    await withNotes()
+    expect(listen.mock.calls.some(([type]) => type === 'pointermove' || type === 'pointerup')).toBe(false)
+  })
+})
+
+describe('while a slide deck plays', () => {
+  it('draws live markers again over the deck that replaced the page', async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      serializeEnvelope([makeNote({ file: 'doc.md', line: 4, quote: 'The quick brown fox.' })])
+    )
+    resetStoreCache()
+    element.remove()
+    element = mount()
+    await settle(element)
+
+    // What `<mbr-slides>` does: replace main's content with deep clones,
+    // which copy the marker but none of its listeners.
+    const main = document.querySelector('main')!
+    const clone = main.firstElementChild!.cloneNode(true)
+    main.replaceChildren(clone)
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: true } }))
+    await settle(element)
+
+    const markers = document.querySelectorAll('.mbr-review-marker')
+    expect(markers).toHaveLength(1)
+    markers[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle(element)
+    expect((document.querySelector('.mbr-review-popover') as HTMLElement).style.display).toBe('block')
   })
 })

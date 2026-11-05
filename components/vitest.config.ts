@@ -84,6 +84,9 @@ function readAsciiMath2Tex(): string {
 export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
+    // The slides' own sheet (loaded only while a deck plays): the exit button
+    // and the kanban slide rules live there.
+    __MBR_REVEAL_SLIDES_CSS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/reveal-slides.css')),
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
     // Pico itself, for the flashcard deck's guard against its [role=group] rules.
     __MBR_PICO_CSS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/pico-main/pico.min.css')),

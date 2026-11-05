@@ -23,7 +23,7 @@ import { fetchPageLinks } from './graph/links-cache.js';
 import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
 import { isCardKey } from './contact-meta.js';
-import { isMacPlatform } from './mbr-keys.js';
+import { isMacPlatform, isPresentationPlaying } from './mbr-keys.js';
 import { ICON_BUTTON_CSS } from './controls.ts';
 import { ICON_SM, icon, iconArrowLeft, iconArrowRight, iconArrowUpRight, iconChevronRight, iconInfo, iconX } from './icons.ts';
 
@@ -208,7 +208,8 @@ export class MbrInfoElement extends LitElement {
     // Ctrl+g to toggle. Deliberately NOT Cmd+g: that is Find Next everywhere —
     // `<mbr-find-bar>`'s Edit-menu accelerator in GUI mode, and the real
     // browser's find-next in server mode. Same guard `mbr-keys.ts` uses.
-    if (e.ctrlKey && !e.metaKey && e.key === 'g') {
+    // Not while a slide deck plays: the panel would open behind it.
+    if (e.ctrlKey && !e.metaKey && e.key === 'g' && !isPresentationPlaying()) {
       e.preventDefault();
       this._toggle();
     }

@@ -12,18 +12,25 @@
  * 2. Loads Reveal.js CSS, JS, and notes plugin
  * 3. Removes <hr> elements (slide separators in markdown become DOM sections)
  * 4. Transforms triple blockquotes (>>>) into speaker notes (<aside class="notes">)
- * 5. Wraps sections in .reveal > .slides structure
+ * 5. Wraps sections in .reveal > .slides structure, loads every image eagerly
+ *    and groups a `.kanban` section's lists into columns
  * 6. Initializes Reveal.js with notes plugin
+ *
+ * While the deck plays, the slide on screen is fitted into Reveal's box
+ * (`slide-fit.ts`), `q` and a corner ✕ leave (by reload), and the URL carries
+ * Reveal's `#/N` slide hash — `#/0` on the first slide too — so a page loaded
+ * with one (a live reload, a manual reload) goes straight back to that slide.
  */
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask, withTimeout } from './dynamic-loader.ts'
-import { isPlayKey } from './mbr-keys.js'
+import { isInputTarget, isModalOpen, isPlayKey } from './mbr-keys.js'
 import { FAB_CSS, PlayFabController } from './fab.ts'
 import { ICON_BUTTON_CSS } from './controls.ts'
 import { ICON_LG, ICON_SM, icon, iconElement, iconPlay, iconX } from './icons.ts'
 import { mermaidSettled } from './mbr-mermaid.ts'
 import { mathSettled } from './mbr-katex.ts'
+import { fitSlide } from './slide-fit.ts'
 
 /**
  * How long Play waits for the page's diagrams and math before cloning the slides
@@ -31,6 +38,29 @@ import { mathSettled } from './mbr-katex.ts'
  * but bounded so a stuck render never leaves the button spinning.
  */
 const DIAGRAM_WAIT_MS = 8000
+
+/** Reveal's slide height when the config does not say (its default). */
+const REVEAL_SLIDE_HEIGHT = 700
+
+/**
+ * Reveal writes the slide hash at most once a second, deferring a write that
+ * comes sooner; the first-slide hash is re-checked just after that window.
+ */
+const REVEAL_HASH_WRITE_WINDOW_MS = 1100
+
+/** `keyCode` of `q`: Reveal's key bindings are keyed by it. */
+const EXIT_KEY_CODE = 81
+
+/**
+ * True for the URL fragment Reveal.js writes for a slide with `hash: true`:
+ * `#/2`, `#/2/1`, `#/2/1/0` (with a fragment index) or `#/intro` (a slide with
+ * an id). Heading anchors (`#text-and-an-image`) never start with `/`, task and
+ * marker anchors are `#mbr-…`, so a page loaded with one of these was a
+ * presentation when it was (re)loaded.
+ */
+export function isSlideHash(hash: string): boolean {
+  return /^#\/[^\s/]*(\/[^\s/]*){0,2}$/.test(hash) && hash.length > 2
+}
 
 /**
  * Dispatched on `document` with `detail: { playing: boolean }`: `true` once
@@ -51,12 +81,22 @@ interface RevealPlugin {
   id: string
 }
 
+interface RevealKeyBinding {
+  keyCode: number
+  key: string
+  description: string
+}
+
 interface RevealApi {
   initialize: (config: Record<string, unknown>) => Promise<RevealApi>
   on: RevealOn;
   off: RevealOff;
   getCurrentSlide(): Element;
   isReady?(): boolean;
+  layout?(): void;
+  getConfig?(): { height?: number | string };
+  addKeyBinding?(binding: RevealKeyBinding, callback: () => void): void;
+  getIndices?(): { h: number; v?: number };
 }
 
 interface WindowWithReveal extends Window {
@@ -128,11 +168,27 @@ export class MbrSlidesElement extends LitElement {
   private _fab = new PlayFabController(this, () => this._showsPlayFab())
 
   /**
-   * The "Exit slides" button, while a presentation plays where the floating
-   * form applies. Lives on `<body>`, not in this shadow root: `_transformDom`
-   * hides the `<nav>` this element sits in.
+   * The "Exit slides" button, while a presentation plays. Lives on `<body>`,
+   * not in this shadow root: `_transformDom` hides the `<nav>` this element
+   * sits in. Styled by `reveal-slides.css`, which is loaded before it exists.
    */
   private _exitButton: HTMLButtonElement | null = null
+
+  /** The deferred first-slide hash check (`_keepFirstSlideHash`). */
+  private _hashTimer = 0
+
+  /** Set once leaving has begun: nothing may write a slide hash after it. */
+  private _exiting = false
+
+  /** Set while a fit runs: its `layout()` must not start another. */
+  private _fitting = false
+
+  /**
+   * The speaker-notes window and its multiplex receivers show this page too
+   * (auto-started); they get no exit button and no `q`, which would reload
+   * one pane of the speaker view out of the presentation.
+   */
+  private _isPresenterView = false
 
   static override styles = [ICON_BUTTON_CSS, css`
     :host {
@@ -175,10 +231,14 @@ export class MbrSlidesElement extends LitElement {
       // Auto-start presentation for speaker notes windows and multiplex receivers
       // - data-speaker-layout: Reveal.js speaker notes popup
       // - ?receiver: Reveal.js multiplex receiver window
+      // - a Reveal slide hash (`#/3`): the page was reloaded (live reload
+      //   after an edit, or by hand) while the deck was playing, so it comes
+      //   back playing, on the same slide. `_exitPresentation` strips the hash.
       const isSpeakerLayout = document.body.hasAttribute('data-speaker-layout')
       const isReceiver = window.location.search.includes('receiver')
-      if (this._isSlideDocument && (isSpeakerLayout || isReceiver)) {
-        this._startPresentation()
+      this._isPresenterView = isSpeakerLayout || isReceiver
+      if (this._isSlideDocument && (this._isPresenterView || isSlideHash(window.location.hash))) {
+        void this._startPresentation()
       }
 
       // Add keyboard shortcut for slides documents
@@ -191,6 +251,7 @@ export class MbrSlidesElement extends LitElement {
 
   override disconnectedCallback() {
     super.disconnectedCallback()
+    clearTimeout(this._hashTimer)
     this._exitButton?.remove()
     this._exitButton = null
     if (this._boundKeyHandler) {
@@ -208,17 +269,46 @@ export class MbrSlidesElement extends LitElement {
     }
   }
 
-  private _updateScrolling() {
-    const slide = this._deck?.getCurrentSlide();
-    if (slide) {
-      this._slidecontainer?.classList.remove('scrollable-slide')
+  /**
+   * Fit the slide on screen into Reveal's box (`slide-fit.ts`: cap images,
+   * then shrink text), then have Reveal lay out again so it centres the
+   * result: its `top` was computed from the unfitted height. A slide that
+   * cannot fit even at the smallest text scrolls instead.
+   */
+  private _fitCurrentSlide() {
+    const deck = this._deck
+    const slide = deck?.getCurrentSlide()
+    if (!deck || !(slide instanceof HTMLElement) || this._fitting) return
+    this._fitting = true
+    try {
+      const height = Number(deck.getConfig?.().height) || REVEAL_SLIDE_HEIGHT
+      const fits = fitSlide(slide, height)
+      deck.layout?.()
+      this._slidecontainer?.classList.toggle('scrollable-slide', !fits)
+    } finally {
+      this._fitting = false
+    }
+  }
 
-      // If content is taller than the slide, enable scrolling
-      // This is a backup since text should shrink, but in some cases that doesn't work right
-      if (slide.scrollHeight > (this._slidecontainer?.clientHeight ?? 0)) {
-        this._slidecontainer?.classList.add('scrollable-slide')
+  /**
+   * Keep `#/0` in the URL on the first slide. Reveal writes no hash there at
+   * all (only `#/1`, `#/2`… after it), so a reload on the title slide would
+   * come back as the page rather than the presentation. Reveal's URL writer
+   * is internal and its writes are debounced, so this runs after each slide
+   * change and once more after Reveal's deferred write could have landed;
+   * either way the hash is only added when Reveal left none.
+   */
+  private _keepFirstSlideHash() {
+    const write = () => {
+      if (this._exiting) return
+      const indices = this._deck?.getIndices?.()
+      if (indices && indices.h === 0 && !indices.v && !isSlideHash(location.hash)) {
+        history.replaceState(history.state, '', `${location.pathname}${location.search}#/0`)
       }
     }
+    write()
+    clearTimeout(this._hashTimer)
+    this._hashTimer = window.setTimeout(write, REVEAL_HASH_WRITE_WINDOW_MS)
   }
 
   /** Whether this page is a slide deck (`style: slides`). */
@@ -314,14 +404,39 @@ export class MbrSlidesElement extends LitElement {
             // checks the option when it is a number, so `null` keeps the
             // ordinary scaled 960x700 slides at every width.
             scrollActivationWidth: null,
+            // Reveal skips keys typed into a focused input by checking
+            // `document.activeElement`, which is only the *host* when the
+            // field is in a shadow root -- the review-note form's textarea,
+            // the search box. So `g` (jump to slide) stole focus mid-word,
+            // and space and the arrows changed slides under the reader.
+            // `isInputTarget` looks through shadow roots (composedPath); an
+            // open mbr overlay (review form or list, search, tasks) owns the
+            // keyboard outright, Escape and Enter included. `q` is one of
+            // Reveal's bindings, so this covers it too.
+            keyboardCondition: (e: KeyboardEvent) => !isInputTarget(e) && !isModalOpen(),
             plugins,
           })
-          this._deck = win.Reveal!
-          this._deck.on('ready', (_e) => this._updateScrolling());
-          this._deck.on('slidetransitionend', (_e) => this._updateScrolling());
-          this._deck.on('slidechanged', (_e) => this._updateScrolling());
-          this._deck.on('resize', () => this._updateScrolling());
-          this._updateScrolling();
+          const deck = win.Reveal!
+          this._deck = deck
+          const fit = () => this._fitCurrentSlide()
+          deck.on('ready', fit)
+          deck.on('slidechanged', fit)
+          deck.on('resize', fit)
+          // An image (or a video's first frame) that arrives after its slide
+          // was laid out changes the slide's height: re-fit and re-centre.
+          // `load` does not bubble, so listen in the capture phase.
+          this._slidecontainer?.addEventListener('load', fit, true)
+          this._slidecontainer?.addEventListener('loadedmetadata', fit, true)
+          if (!this._isPresenterView) {
+            deck.addKeyBinding?.(
+              { keyCode: EXIT_KEY_CODE, key: 'Q', description: 'Exit slides' },
+              () => this._exitPresentation()
+            )
+            const keepHash = () => this._keepFirstSlideHash()
+            deck.on('slidechanged', keepHash)
+            keepHash()
+          }
+          fit()
         } catch (initError) {
           console.error('[mbr-slides] Reveal.js initialization failed:', initError)
           // No deck to drive: give the app its bar back so the reader can
@@ -414,6 +529,14 @@ export class MbrSlidesElement extends LitElement {
       slidesDiv.appendChild(section.cloneNode(true))
     })
 
+    // mbr renders `loading="lazy"` images. A lazy image on a hidden slide
+    // is not fetched until the slide shows, by which time Reveal has
+    // centred the slide without it, so it lands low. A presentation wants
+    // every picture ready before its slide anyway.
+    slidesDiv.querySelectorAll('img[loading="lazy"]').forEach(img => img.removeAttribute('loading'))
+
+    slidesDiv.querySelectorAll('section.kanban').forEach(board => groupKanbanColumns(board))
+
     revealDiv.appendChild(slidesDiv)
     main.classList.remove('container')
     main.innerHTML = ''
@@ -434,28 +557,22 @@ export class MbrSlidesElement extends LitElement {
   }
 
   /**
-   * Reveal.js has no way out of a presentation on a touch screen (its `Esc`
-   * is the overview), and the transform has replaced the page's content, so
-   * where the floating play button applies, a playing deck gets a small exit
-   * button in the bottom-left corner — clear of Reveal's own controls at the
-   * bottom right, and above `.reveal` and the (hidden) header.
+   * Reveal.js has no way out of a presentation (its `Esc` is the overview,
+   * and a touch screen has no keys at all), and the transform has replaced
+   * the page's content, so a playing deck gets a small exit button in the
+   * bottom-left corner, clear of Reveal's own controls at the bottom right.
+   * `reveal-slides.css` keeps it nearly invisible until hovered or focused
+   * (and plainly visible on a touch screen, which cannot hover).
    */
   private _syncExitButton() {
-    const wanted = this._isPlaying && this._fab.visible
+    const wanted = this._isPlaying && !this._isPresenterView
     if (wanted && !this._exitButton) {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'mbr-slides-exit'
       button.append(iconElement(iconX))
       button.setAttribute('aria-label', 'Exit slides')
-      button.title = 'Exit slides'
-      // Light DOM, so the styles travel inline; theme.css is not ours to rely on.
-      button.style.cssText =
-        'position:fixed;z-index:1000;left:calc(0.75rem + env(safe-area-inset-left,0px));' +
-        'bottom:calc(0.75rem + env(safe-area-inset-bottom,0px));width:44px;height:44px;' +
-        'display:flex;align-items:center;justify-content:center;' +
-        'margin:0;padding:0;border:none;border-radius:50%;line-height:1;' +
-        'background:rgba(0,0,0,0.45);color:#fff;cursor:pointer;opacity:0.7'
+      button.title = 'Exit slides (Q)'
       button.addEventListener('click', () => this._exitPresentation())
       document.body.append(button)
       this._exitButton = button
@@ -467,14 +584,21 @@ export class MbrSlidesElement extends LitElement {
 
   /**
    * Leave the presentation by reloading the page: `_transformDom` replaced
-   * `main`'s content with clones, so there is nothing to put back. Reveal's
-   * `#/2` slide hash is dropped first, or the reload would land on it.
+   * `main`'s content with clones, so there is nothing to put back. The
+   * reload goes to the URL without Reveal's `#/2` slide hash, or it would
+   * land on it and start the presentation again (`isSlideHash`). A
+   * navigation, not `replaceState` + `reload()`: Reveal defers a hash write
+   * made within a second of the last one, and that timer could put the hash
+   * back between the two calls (it did, on `q` right after changing slides).
+   * A navigation's URL is fixed when it starts. To a URL without a fragment
+   * it is a full load, and `replace` keeps it out of the history.
    */
   protected _exitPresentation() {
+    this._exiting = true
+    clearTimeout(this._hashTimer)
     // The reload's fresh page message resets the app anyway; say so first.
     announceSlidesState(false)
-    history.replaceState(history.state, '', location.pathname + location.search)
-    location.reload()
+    location.replace(location.pathname + location.search)
   }
 
   override render() {
@@ -518,4 +642,33 @@ declare global {
   interface HTMLElementTagNameMap {
     'mbr-slides': MbrSlidesElement
   }
+}
+
+/**
+ * Group a `--- {.kanban}` slide's content into `.mbr-kanban-column`s inside one
+ * `.mbr-kanban-board`, which `reveal-slides.css` lays out as flex columns.
+ *
+ * On a page the board is CSS multi-column over the section's flat children,
+ * with a column break after each top-level list. Inside Reveal's scaled,
+ * fixed-size slide that layout overflows and stacks (and the section's own
+ * `display` is Reveal's), so the deck groups the same children explicitly: a
+ * column runs up to and including the next top-level list, which is where the
+ * page breaks it. Speaker notes stay where Reveal looks for them.
+ */
+export function groupKanbanColumns(section: Element): void {
+  const doc = section.ownerDocument
+  const board = doc.createElement('div')
+  board.className = 'mbr-kanban-board'
+  let column: HTMLElement | null = null
+  for (const child of Array.from(section.children)) {
+    if (child.matches('aside.notes')) continue
+    if (!column) {
+      column = doc.createElement('div')
+      column.className = 'mbr-kanban-column'
+      board.append(column)
+    }
+    column.append(child)
+    if (child.tagName === 'UL' || child.tagName === 'OL') column = null
+  }
+  if (board.childElementCount > 0) section.prepend(board)
 }

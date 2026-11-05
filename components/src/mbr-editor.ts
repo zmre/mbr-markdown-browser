@@ -1,7 +1,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { getTagSources, isEditEnabled } from './shared.js';
-import { isInputTarget, isModalOpen } from './mbr-keys.js';
+import { isInputTarget, isModalOpen, isPresentationPlaying } from './mbr-keys.js';
 import {
   getEditToken,
   isEditTokenRequired,
@@ -151,7 +151,10 @@ export class MbrEditorElement extends LitElement {
       !this._isOpen &&
       !this._loading &&
       !isInputTarget(e) &&
-      !isModalOpen()
+      !isModalOpen() &&
+      // A playing slide deck covers the page; the panel would open unseen
+      // behind it and keep the keyboard.
+      !isPresentationPlaying()
     ) {
       e.preventDefault();
       void this._open();
