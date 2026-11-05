@@ -3447,6 +3447,21 @@ fn process_event(
             state.in_metadata = false;
             (event.clone(), state)
         }
+        Event::Start(Tag::Link {
+            link_type: LinkType::Email,
+            dest_url,
+            ..
+        }) => {
+            // An email autolink (`<a@b.com>`) arrives as the bare address: the
+            // HTML writer adds `mailto:` for `LinkType::Email`. It is not a path,
+            // so it must not go through `transform_link` (which would prefix
+            // `../` on non-index pages); record it with its scheme so link
+            // tracking classifies it as external.
+            state.in_link = true;
+            state.current_link_dest = Some(format!("mailto:{dest_url}"));
+            state.current_link_text.clear();
+            (event.clone(), state)
+        }
         // Track when we're inside a link (including autolinks like <http://...>)
         // and transform the link URL for trailing-slash URL convention
         // Also detect and transform tag links like [text](Tags:rust) -> [text](/tags/rust/)
@@ -8177,6 +8192,38 @@ mod tests {
             "{:?}",
             result.outbound_links
         );
+    }
+
+    /// Regression: pulldown-cmark hands an email autolink (`<a@b.com>`) over
+    /// with no scheme (`LinkType::Email`, `dest_url` = the bare address; the
+    /// writer adds `mailto:`). Run through `transform_link` it was taken for a
+    /// relative file and got `../` on every non-index page, producing
+    /// `mailto:../someone@gmail.com`, and was recorded as an internal link.
+    #[tokio::test]
+    async fn email_autolink_is_not_rewritten_on_non_index_pages() {
+        // Server mode, non-index page; then a static build at depth 2.
+        for url_depth in [None, Some(2)] {
+            let result =
+                render_with_wikilinks("Mail <someone@gmail.com>.\n", "/sub/page/", url_depth, None)
+                    .await;
+            assert!(
+                result
+                    .html
+                    .contains(r#"<a href="mailto:someone@gmail.com">someone@gmail.com</a>"#),
+                "{url_depth:?}: {}",
+                result.html
+            );
+            assert!(
+                !result.html.contains("mailto:."),
+                "{url_depth:?}: {}",
+                result.html
+            );
+            let [link] = result.outbound_links.as_slice() else {
+                panic!("{url_depth:?}: {:?}", result.outbound_links);
+            };
+            assert_eq!(link.to, "mailto:someone@gmail.com", "{url_depth:?}");
+            assert!(!link.internal, "{url_depth:?}: {link:?}");
+        }
     }
 
     #[tokio::test]
