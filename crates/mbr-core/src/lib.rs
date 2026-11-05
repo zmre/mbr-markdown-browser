@@ -56,6 +56,7 @@ pub mod embedded_katex;
 pub mod embedded_pico;
 pub mod errors;
 pub mod flashcards;
+pub mod frontmatter;
 pub mod html;
 pub mod icons;
 pub mod link_index;

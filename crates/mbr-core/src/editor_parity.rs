@@ -65,7 +65,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TagEnd, TextMergeWithOffset,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, Tag, TagEnd, TextMergeWithOffset,
 };
 use serde::Serialize;
 
@@ -161,8 +161,10 @@ fn outline(source: &str) -> Vec<OutlineNode> {
     // a loose item's `Start(Paragraph)` — the renderer's `at_item_start`.
     let mut at_item_start = false;
 
-    let parser =
-        TextMergeWithOffset::new(Parser::new_ext(body, markdown_options()).into_offset_iter());
+    let parser = TextMergeWithOffset::new(crate::frontmatter::parse_with_offsets(
+        body,
+        markdown_options(),
+    ));
     for (event, range) in parser {
         let range = range.start + shift..range.end + shift;
         let depth = stack.iter().filter(|open| open.node.is_some()).count();
@@ -586,7 +588,7 @@ fn section_rule_spellings_the_editor_mirrors() {
 fn wikilink_edges_the_editor_mirrors() {
     use pulldown_cmark::LinkType;
     let links = |source: &str| -> Vec<(bool, String)> {
-        Parser::new_ext(source, markdown_options())
+        crate::frontmatter::parse(source, markdown_options())
             .filter_map(|event| match event {
                 Event::Start(Tag::Link {
                     link_type: LinkType::WikiLink { .. },

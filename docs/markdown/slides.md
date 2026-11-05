@@ -31,7 +31,9 @@ type: slides
 > suggested with `slides` among its values
 > ([Editing Properties](../modes/editing-frontmatter/#choosing-a-type)).
 
-Use horizontal rules (`---`) to separate slides:
+Use horizontal rules (`---`) to separate slides. Only the `---` block at the
+very top of the file is frontmatter; every later `---` is a slide break, even
+when a heading or a list follows it directly:
 
 ```markdown
 ---

@@ -1305,23 +1305,27 @@ fn parse_datetime(value: &str) -> Option<(NaiveDateTime, bool)> {
     ))
 }
 
-/// Number of leading lines occupied by YAML frontmatter, or `0` when there is
-/// none.
+/// Number of leading lines occupied by frontmatter, or `0` when there is none.
 ///
-/// Requires an opening `---` on line 1 at column 0 and a closing `---` or `...`.
-/// An *unclosed* opener is not treated as frontmatter: a lone `---` is a thematic
-/// break far more often than it is the start of a metadata block someone forgot
-/// to finish, and swallowing the rest of the file would hide every task in it.
+/// The renderer's own definition ([`crate::frontmatter::leading_metadata`] with
+/// the renderer's options), so a task the page shows is a task the scan finds:
+/// a block only at the very top (after a BOM), with a non-blank first line and
+/// a closing `---` or `...`. An *unclosed* opener is not frontmatter — a lone
+/// `---` is a thematic break far more often than it is the start of a
+/// metadata block someone forgot to finish, and swallowing the rest of the
+/// file would hide every task in it — and neither is a `---` further down.
 fn frontmatter_line_count(source: &str) -> usize {
-    let mut lines = source.lines();
-    if lines.next().map(str::trim_end) != Some("---") {
-        return 0;
-    }
-    lines
-        .position(|line| matches!(line.trim_end(), "---" | "..."))
-        // `position` is 0-based and relative to line 2, so +2 covers the opening
-        // delimiter and the closing one.
-        .map_or(0, |index| index + 2)
+    let source = crate::markdown::strip_bom(source);
+    crate::frontmatter::leading_metadata(source, crate::markdown::markdown_options())
+        // Lines up to the end of the closing delimiter: its own plus one per
+        // line terminator before it.
+        .map_or(0, |meta| {
+            source.as_bytes()[..meta.block.end]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1
+        })
 }
 
 #[cfg(test)]
@@ -2283,6 +2287,23 @@ mod tests {
         let tasks = scan_source_tasks(source);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].line, 3);
+    }
+
+    #[test]
+    fn frontmatter_rules_are_the_renderers() {
+        // A blank first line means no frontmatter (pulldown-cmark's rule), so
+        // the task between the rules is real, as on the page.
+        let tasks = scan_source_tasks("---\n\n- [ ] real\n---\n");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].line, 3);
+        // A BOM does not hide the frontmatter.
+        let tasks = scan_source_tasks("\u{feff}---\nfake: \"- [ ] no\"\n---\n- [ ] real\n");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].line, 4);
+        // A `---` block below the top is body, tasks and all.
+        let tasks = scan_source_tasks("# T\n\n---\n- [ ] in a slide\n---\n");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].line, 4);
     }
 
     #[test]

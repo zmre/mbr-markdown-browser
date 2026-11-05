@@ -52,6 +52,25 @@ custom_field: Any value
 # Content starts here
 ```
 
+Frontmatter must be at the very top of the file: the opening `---` is the
+first line (a UTF-8 byte-order mark before it is fine). The block needs a
+non-blank first line and a closing `---` or `...`. This is how GitHub,
+Obsidian and Jekyll read it. A `---` anywhere else is ordinary markdown: a
+horizontal rule (a section or slide break), or the underline of a setext
+heading when it sits directly under a line of text. So in a slides deck
+
+```markdown
+---
+## Quick navigation
+
+* In-links
+* Out-links
+
+---
+```
+
+is a slide with a heading and a list, never a second metadata block.
+
 ### Using Frontmatter
 
 Frontmatter powers:

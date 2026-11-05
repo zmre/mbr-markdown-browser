@@ -37,6 +37,12 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// This hybrid approach allows us to:
 /// - Support custom tag-source links (`[[Source:value]]`)
 /// - Preserve standard wikilink behavior for plain `[[page]]` links
+///
+/// The metadata-block options are in the set, but no caller may hand it to
+/// `Parser::new_ext` directly: pulldown-cmark would then read a metadata block
+/// at *any* `---` line. Parse through [`crate::frontmatter::parse`] /
+/// [`crate::frontmatter::parse_with_offsets`], which recognise frontmatter only
+/// at the start of the document.
 pub(crate) fn markdown_options() -> Options {
     Options::all()
 }
@@ -100,9 +106,8 @@ impl ParsedDocument {
     ///
     /// The events use the same parser options as mbr's HTML renderer,
     /// ensuring consistent parsing behavior.
-    pub fn events(&self) -> TextMergeStream<'_, MDParser<'_>> {
-        let parser = MDParser::new_ext(&self.source, markdown_options());
-        TextMergeStream::new(parser)
+    pub fn events(&self) -> TextMergeStream<'_, impl Iterator<Item = Event<'_>>> {
+        TextMergeStream::new(crate::frontmatter::parse(&self.source, markdown_options()))
     }
 }
 
@@ -357,10 +362,17 @@ fn count_sentence_terminators(text: &str) -> (usize, bool) {
 /// This is used to provide a title fallback when no frontmatter title exists.
 /// Only extracts the first H1 found; subsequent H1s are ignored.
 pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
-    // Use minimal parser options: only YAML metadata (to skip frontmatter blocks)
-    // ATX headings are parsed by default without any feature flags
-    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-    let parser = TextMergeStream::new(parser);
+    first_h1_in_body(crate::frontmatter::body_of(
+        markdown_input,
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    ))
+}
+
+/// [`extract_first_h1`] for text whose frontmatter is already gone: parsed with
+/// no options at all (ATX and setext headings need none), so a `---` at its
+/// start is a rule, never a metadata block.
+fn first_h1_in_body(body: &str) -> Option<String> {
+    let parser = TextMergeStream::new(MDParser::new_ext(body, Options::empty()));
 
     let mut in_h1 = false;
     let mut h1_text = String::new();
@@ -1153,8 +1165,10 @@ fn collect_events_and_headings<'a>(
     Vec<HeadingInfo>,
     HashMap<usize, ParsedAttrs>,
 ) {
-    let parser = MDParser::new_ext(markdown_input, markdown_options()).into_offset_iter();
-    let parser = TextMergeWithOffset::new(parser);
+    let parser = TextMergeWithOffset::new(crate::frontmatter::parse_with_offsets(
+        markdown_input,
+        markdown_options(),
+    ));
 
     let mut events = Vec::new();
     let mut headings = Vec::new();
@@ -3276,53 +3290,49 @@ pub fn extract_metadata_from_vault(
 pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
     let decoded = String::from_utf8_lossy(buffer);
     let markdown_input = strip_bom(&decoded);
-    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-    let parser = TextMergeStream::new(parser);
-    let mut in_metadata = false;
+    // No markdown parse for the frontmatter: the leading block is found by a
+    // byte scan of its own lines, and nothing after it is looked at unless the
+    // title has to come from the first H1.
+    let leading = crate::frontmatter::leading_metadata(
+        markdown_input,
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    );
     let mut hm = SimpleMetadata::new();
     let mut relationships = Vec::new();
-    for event in parser.take(4) {
-        match &event {
-            Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                in_metadata = true;
-            }
-            Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                break;
-            }
-            Event::Text(text) if in_metadata => {
-                // A parse failure discards the *entire* frontmatter: `type`,
-                // `aliases`, `relationships` and all. This is the scan path that
-                // feeds the relationship index, so a silent drop here shows up
-                // as a flood of "unresolved relationship endpoint" warnings from
-                // other notes that referenced this one by an alias that never
-                // made it into the index. Log it, naming the file, then fall
-                // back to empty metadata exactly as before so the scan continues.
-                let metadata_parsed = match YamlLoader::load_from_str(text) {
-                    Ok(docs) => docs.into_iter().next(),
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "Failed to parse YAML frontmatter: {e}; the whole \
-                             frontmatter block (including any `aliases` and \
-                             `relationships`) is ignored for this note"
-                        );
-                        None
-                    }
-                };
-
-                if let Some(ref yaml) = metadata_parsed {
-                    relationships = crate::relationships::parse_relationships(yaml);
+    if let Some(leading) = &leading {
+        // A parse failure discards the *entire* frontmatter: `type`,
+        // `aliases`, `relationships` and all. This is the scan path that
+        // feeds the relationship index, so a silent drop here shows up as a
+        // flood of "unresolved relationship endpoint" warnings from other
+        // notes that referenced this one by an alias that never made it into
+        // the index. Log it, naming the file, then fall back to empty
+        // metadata exactly as before so the scan continues.
+        let metadata_parsed =
+            match YamlLoader::load_from_str(&markdown_input[leading.content.clone()]) {
+                Ok(docs) => docs.into_iter().next(),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Failed to parse YAML frontmatter: {e}; the whole \
+                         frontmatter block (including any `aliases` and \
+                         `relationships`) is ignored for this note"
+                    );
+                    None
                 }
-                hm = yaml_frontmatter_simplified(&metadata_parsed);
-                break;
-            }
-            _ => {}
+            };
+
+        if let Some(ref yaml) = metadata_parsed {
+            relationships = crate::relationships::parse_relationships(yaml);
         }
+        hm = yaml_frontmatter_simplified(&metadata_parsed);
     }
 
     // If no frontmatter title, try to extract the first H1 from the content
+    let body = leading.map_or(markdown_input, |leading| {
+        &markdown_input[leading.body_start..]
+    });
     if !hm.contains_key("title")
-        && let Some(h1_text) = extract_first_h1(markdown_input)
+        && let Some(h1_text) = first_h1_in_body(body)
     {
         hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
@@ -7150,6 +7160,122 @@ mod tests {
         assert!(meta.relationships.is_empty());
     }
 
+    // ==================== Frontmatter only at the top ====================
+    use serde_json::json;
+    //
+    // pulldown-cmark reads a metadata block at any unindented `---` with a
+    // non-blank line after it and a closing `---` further down. In a slides
+    // deck that is every slide whose heading follows its rule directly, so the
+    // slide disappeared, its `*` list was a YAML alias error, and its YAML
+    // replaced the real frontmatter. Frontmatter is now only ever the block at
+    // the very start (`crate::frontmatter`).
+
+    const DECK: &str = "---\ntitle: Deck\nauthor: Ann\ntype: slides\n---\n\n# Deck\n\n\
+        ---\n## Quick navigation\n\n* In-links (backlinks)\n* Out-links\n\n\
+        ---\n## Flashcards\n---\n\nEnd.\n";
+
+    #[test]
+    fn mid_document_dashes_are_not_a_frontmatter_error() {
+        let result = render_str_with_mode(DECK, false);
+        assert_eq!(result.frontmatter_error, None);
+    }
+
+    #[test]
+    fn mid_document_dashes_render_as_slides() {
+        let html = render_str_with_mode(DECK, false).html;
+        for text in [
+            "Quick navigation",
+            "In-links (backlinks)",
+            "Out-links",
+            "Flashcards",
+            "End.",
+        ] {
+            assert!(html.contains(text), "{text:?} missing from {html}");
+        }
+        assert!(html.contains("<section"), "slides are sections: {html}");
+    }
+
+    #[test]
+    fn a_later_dash_block_never_replaces_the_frontmatter() {
+        let result = render_str_with_mode(DECK, false);
+        let get = |key: &str| result.frontmatter.get(key).and_then(|v| v.as_str());
+        assert_eq!(get("author"), Some("Ann"));
+        assert_eq!(get("type"), Some("slides"));
+        assert_eq!(get("title"), Some("Deck"));
+    }
+
+    #[test]
+    fn scan_metadata_ignores_later_dash_blocks() {
+        let meta = extract_metadata_from_bytes(Path::new("deck.md"), DECK.as_bytes());
+        assert_eq!(meta.metadata.get("author"), Some(&json!("Ann")));
+        assert_eq!(meta.metadata.get("type"), Some(&json!("slides")));
+
+        // The H1 title fallback reads past a `---` block that is not at the top
+        // (the old parse swallowed everything between the two rules).
+        let source = "---\nauthor: Ann\n---\n\n---\n# Inside a slide\n---\n";
+        let meta = extract_metadata_from_bytes(Path::new("deck.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Inside a slide")));
+        assert_eq!(meta.metadata.get("author"), Some(&json!("Ann")));
+
+        // A file starting with a rule and no frontmatter at all.
+        let source = "---\n\n# Plain\n\n---\nx: y\n---\n";
+        let meta = extract_metadata_from_bytes(Path::new("plain.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Plain")));
+        assert!(!meta.metadata.contains_key("x"));
+    }
+
+    #[test]
+    fn parse_ignores_later_dash_blocks() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(DECK.as_bytes()).unwrap();
+        let doc = parse(file.path()).unwrap();
+        assert_eq!(doc.frontmatter.get("author"), Some(&json!("Ann")));
+        assert!(doc.headings.iter().any(|h| h.text == "Quick navigation"));
+        assert_eq!(
+            doc.events()
+                .filter(|e| matches!(e, Event::Start(Tag::MetadataBlock(_))))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn source_lines_after_frontmatter_are_unchanged() {
+        // Line numbers count the frontmatter: the body is parsed on its own
+        // but its offsets are shifted back into the file.
+        let html = render_review(
+            "---\ntitle: T\n---\n\nPara one.\n\n---\n## Slide\n\n* item\n",
+            false,
+        )
+        .await;
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">Para one.</p>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<h2 data-mbr-line="8""#), "{html}");
+        assert!(html.contains(r#"<li data-mbr-line="10">"#), "{html}");
+    }
+
+    #[test]
+    fn leading_frontmatter_errors_are_still_reported() {
+        let result = render_str_with_mode("---\ntags:\n\t* a\n---\n# H\n", false);
+        assert!(result.frontmatter_error.is_some());
+        // ...but only the leading block's.
+        let result = render_str_with_mode("---\ntitle: T\n---\n\n---\n* a\n---\n", false);
+        assert_eq!(result.frontmatter_error, None);
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("T")));
+    }
+
+    #[test]
+    fn dots_closer_and_bom_with_later_dash_blocks() {
+        let source = "\u{feff}---\ntitle: Dots\n...\n\n---\n## X\n---\n";
+        let result = render_str_with_mode(source, false);
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("Dots")));
+        assert!(result.html.contains("X"), "{}", result.html);
+        let meta = extract_metadata_from_bytes(Path::new("d.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Dots")));
+    }
+
     // ==================== UTF-8 BOM handling ====================
 
     const BOM_DOC: &str = "\u{feff}---\ntitle: My Page\ntags:\n  - alpha\n---\n\nBody text.\n";
@@ -8537,6 +8663,45 @@ mod tests {
 mod proptests {
     use super::*;
     use proptest::prelude::*;
+
+    proptest! {
+        /// A `---`-delimited block anywhere below the top never changes the
+        /// frontmatter, never reports a frontmatter error, and never hides
+        /// its own lines — in the render and in the repository scan alike.
+        #[test]
+        fn a_mid_body_block_never_touches_the_frontmatter(
+            key in "[a-z]{1,6}",
+            value in "[a-z*&!|> ]{0,8}",
+            blank_before in any::<bool>(),
+        ) {
+            let base = "---\ntitle: T\nauthor: A\n---\n\n# H\n";
+            let gap = if blank_before { "\n" } else { "" };
+            let source = format!("{base}{gap}\n---\n{key}: {value}\n---\n");
+            let root = Path::new("/nonexistent-mbr-test-root");
+            let options = || RenderOptions {
+                root_path: root,
+                oembed_timeout_ms: 0,
+                link_transform_config: crate::link_transform::LinkTransformConfig::default(),
+                oembed_cache: None,
+                server_mode: false,
+                transcode_enabled: false,
+                valid_tag_sources: HashSet::new(),
+                review: ReviewLines::Omit,
+                mark_incomplete: false,
+                incomplete_markers: &[],
+                wikilink_index: None,
+                math_fences: true,
+            };
+            let file = root.join("note.md");
+            let before = render_str(base, &file, options()).unwrap();
+            let after = render_str(&source, &file, options()).unwrap();
+            prop_assert_eq!(&after.frontmatter, &before.frontmatter);
+            prop_assert_eq!(after.frontmatter_error, None);
+            prop_assert!(after.html.contains(key.as_str()), "{}", after.html);
+            let scanned = extract_metadata_from_bytes(&file, source.as_bytes());
+            prop_assert_eq!(scanned.metadata, extract_metadata_from_bytes(&file, base.as_bytes()).metadata);
+        }
+    }
 
     proptest! {
         /// Anchor ids must be unique for any sequence of heading texts —
