@@ -723,7 +723,7 @@ sections as usual.
 
 ### Use Cases
 
-**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds.
+**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds. For defaults that apply to a whole deck (or every deck in the repository), see [Deck Settings](slides/#deck-settings).
 
 **Styling:** Target specific sections with CSS using IDs or classes. Two
 classes ship with mbr: `.media-float-left` and `.media-float-right` float the

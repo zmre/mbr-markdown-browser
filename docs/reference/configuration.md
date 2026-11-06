@@ -29,6 +29,11 @@ variables override `.mbr/config.toml`: the config file ships inside the
 markdown repository, so anyone serving a repository they did not author can
 override its settings from the outside.
 
+An environment variable is the option's name in upper case with the `MBR_`
+prefix (`edit_enabled` → `MBR_EDIT_ENABLED`). A double underscore reaches into
+a table: `[slides] transition` is `MBR_SLIDES__TRANSITION`. Because of that, a
+`__` in an `MBR_*` name always means a nested key.
+
 ## Configuration File
 
 Create `.mbr/config.toml` in your markdown repository:
