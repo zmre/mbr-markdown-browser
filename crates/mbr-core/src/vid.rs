@@ -175,7 +175,7 @@ impl Vid {
         format!(
             r#"
             <figure>
-                <video controls preload="none" playsinline poster="{url_attr}.cover.jpg">
+                <video controls preload="none" playsinline poster="{url_attr}.cover.jpg" data-autoplay>
                     {sources}
                     <track kind="captions" label="English captions" src="{url_attr}.captions.en.vtt" srclang="en" language="en-US" default type="vtt" data-type="vtt" />
                     <track kind="chapters" language="en-US" label="Chapters" src="{url_attr}.chapters.en.vtt" srclang="en" default type="vtt" data-type="vtt" />

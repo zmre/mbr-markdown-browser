@@ -15,6 +15,7 @@ fn bench_render(c: &mut Criterion) {
         ("small", fixtures::small_markdown()),
         ("medium", fixtures::medium_markdown()),
         ("large", fixtures::large_markdown()),
+        ("deck", fixtures::deck_markdown()),
     ];
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -98,6 +99,7 @@ fn bench_extract_first_h1(c: &mut Criterion) {
         ("small", fixtures::small_markdown()),
         ("medium", fixtures::medium_markdown()),
         ("large", fixtures::large_markdown()),
+        ("deck", fixtures::deck_markdown()),
     ];
 
     for (name, content) in &cases {
@@ -117,6 +119,7 @@ fn bench_extract_metadata(c: &mut Criterion) {
         ("small", fixtures::small_markdown()),
         ("medium", fixtures::medium_markdown()),
         ("large", fixtures::large_markdown()),
+        ("deck", fixtures::deck_markdown()),
     ];
 
     for (name, content) in &cases {

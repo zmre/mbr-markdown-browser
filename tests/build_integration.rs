@@ -266,6 +266,50 @@ async fn test_build_head_includes_flashcard_options() {
     assert!(html.contains("flashcardsProgressIndicators: true,"));
 }
 
+/// Deck backgrounds in a static build are relative to the page, so a
+/// published site works under any path prefix: the note's own value is
+/// resolved against the note, the config's against the site root.
+#[tokio::test]
+async fn test_build_head_resolves_slide_backgrounds_relative_to_the_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "talks/2026/deck.md",
+        "---\ntype: slides\nslides:\n  background_image: img/bg.png\n---\n\n# One\n",
+    );
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        slides: mbr::slides::SlideSettings {
+            background_image: Some("/images/default.jpg".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let output = repo.path().join("build");
+    mbr::build::Builder::new(config, output.clone())
+        .expect("Failed to create builder")
+        .build()
+        .await
+        .expect("Build failed");
+
+    let html = fs::read_to_string(
+        output
+            .join("talks")
+            .join("2026")
+            .join("deck")
+            .join("index.html"),
+    )
+    .unwrap();
+    // `/talks/2026/deck/` is three levels deep.
+    assert!(
+        html.contains(r#"slides: {"background_image":"../../../images/default.jpg"},"#),
+        "config background not relativized"
+    );
+    assert!(
+        html.contains(r#"slidesPage: {"background_image":"../img/bg.png"},"#),
+        "note background not resolved against the note"
+    );
+}
+
 /// The task browser is server/GUI only: its index is built by reading live
 /// files, which a published static site does not have. Every page kind must
 /// therefore advertise `tasksEnabled: false`, no matter what the config says.

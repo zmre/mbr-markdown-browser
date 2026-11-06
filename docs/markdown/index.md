@@ -52,6 +52,25 @@ custom_field: Any value
 # Content starts here
 ```
 
+Frontmatter must be at the very top of the file: the opening `---` is the
+first line (a UTF-8 byte-order mark before it is fine). The block needs a
+non-blank first line and a closing `---` or `...`. This is how GitHub,
+Obsidian and Jekyll read it. A `---` anywhere else is ordinary markdown: a
+horizontal rule (a section or slide break), or the underline of a setext
+heading when it sits directly under a line of text. So in a slides deck
+
+```markdown
+---
+## Quick navigation
+
+* In-links
+* Out-links
+
+---
+```
+
+is a slide with a heading and a list, never a second metadata block.
+
 ### Using Frontmatter
 
 Frontmatter powers:
@@ -664,7 +683,7 @@ Plain section (no attributes).
 
 ### Attribute Syntax
 
-The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html):
+The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html), plus quoted values:
 
 | Syntax | Result | Example |
 |--------|--------|---------|
@@ -672,6 +691,9 @@ The attribute block follows [pulldown-cmark's heading attributes syntax](https:/
 | `.class` | CSS class | `{.highlight}` → `class="highlight"` |
 | `key=value` | Custom attribute | `{data-x=y}` → `data-x="y"` |
 | `key="value"` | Quoted value | `{title="Hello World"}` |
+| `key='value'` | Single-quoted value | `{data-q='say "hi"'}` → `data-q="say &quot;hi&quot;"` |
+
+Values are used exactly as written. Smart punctuation does not touch them, so `--`, `...` and quotes inside a value stay as typed: `--- {style="--pico-color: cyan;"}` sets the CSS custom property. A `#` or `.` inside a quoted value is part of the value (`style="color: #fff"` sets no id). Backslash escapes and HTML entities are not decoded inside the braces.
 
 Multiple attributes can be combined:
 
@@ -679,11 +701,34 @@ Multiple attributes can be combined:
 --- {#section-1 .slide .center data-transition="slide" data-background="#fff"}
 ```
 
+### The First Section
+
+Content before the first rule is section one, so an attribute rule at the very
+top of a note (only frontmatter and blank lines before it) applies to that
+first section rather than opening a new one. No empty section and no `<hr>` is
+produced:
+
+```markdown
+---
+title: Deck
+---
+
+--- {#cover .dark}
+
+This content is in the first section, with id="cover" and class="dark".
+```
+
+A plain `---` at the top, or an attribute rule anywhere after content, divides
+sections as usual.
+
 ### Use Cases
 
-**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds.
+**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds. For defaults that apply to a whole deck (or every deck in the repository), see [Deck Settings](slides/#deck-settings).
 
-**Styling:** Target specific sections with CSS using IDs or classes.
+**Styling:** Target specific sections with CSS using IDs or classes. Two
+classes ship with mbr: `.media-float-left` and `.media-float-right` float the
+section's image, video, audio, PDF or YouTube embed beside its text (see
+[Floating Media Beside Text](media/#floating-media-beside-text)).
 
 **JavaScript hooks:** Add data attributes for interactive behavior.
 

@@ -97,6 +97,18 @@ describe('MbrTasksElement', () => {
       expect(element.shadowRoot?.querySelector('mbr-tasks-panel')).not.toBeNull()
     })
 
+    it('is ignored while a slide deck plays (the panel would open unseen behind it)', async () => {
+      document.body.classList.add('slides-container')
+      try {
+        press('t')
+        await settle(element)
+        expect(element.isOpen).toBe(false)
+        expect(importer).not.toHaveBeenCalled()
+      } finally {
+        document.body.classList.remove('slides-container')
+      }
+    })
+
     it('is ignored when the task browser is disabled', async () => {
       window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: false }
       press('t')

@@ -6,11 +6,25 @@ body.slides-container mbr-nav {
   display: none !important;
 }
 
-/* Full viewport for Reveal.js */
+/* Full viewport for Reveal.js. The review-notes button (`<mbr-review>`, which
+ * stays available while a deck plays) shares the bottom-right corner with
+ * Reveal's arrows, so it moves up above them, through the same offset a play
+ * button uses to stack it (fab.ts). Reveal's controls are sized in px (10px
+ * font), not by the window: the up arrow's top edge is about 117px above the
+ * bottom at every width, so 1rem + 7.5rem puts the button's bottom edge 136px
+ * up, a clear gap above all four arrows. */
 body.slides-container {
   margin: 0;
   padding: 0;
   overflow: hidden;
+  --mbr-fab-stack-offset: 7.5rem;
+}
+
+/* Review-note markers (the coloured glyph after a reviewed block) would sit on
+ * the audience's slide. The washed passage stays, and hovering it (or, on a
+ * touch screen, tapping it) shows the note. */
+body.slides-container .mbr-review-marker {
+  display: none;
 }
 
 body.slides-container main#wrapper {
@@ -37,7 +51,7 @@ html.mbr-embedded body.slides-container .reveal {
  * Its chrome may not -- the controls and slide number sit in the bottom-right
  * corner (under the rounded corner and, in landscape, the notch side) and the
  * progress bar on the bottom edge (under the home indicator) -- so those move
- * inside the safe area. `.mbr-slides-exit` (bottom-left) is already inset. */
+ * inside the safe area. `.mbr-slides-exit` (bottom-left) is inset everywhere. */
 html.mbr-embedded body.slides-container .reveal .controls {
   right: calc(var(--r-controls-spacing, 12px) + env(safe-area-inset-right, 0px));
   bottom: calc(var(--r-controls-spacing, 12px) + env(safe-area-inset-bottom, 0px));
@@ -57,4 +71,141 @@ html.mbr-embedded body.slides-container .reveal .slide-number {
 
 .scrollable-slide {
   overflow-y: auto !important;
+}
+
+/* The exit button `<mbr-slides>` adds to <body> while a deck plays (`q` does
+ * the same). Bottom-left, mirroring Reveal's arrows at the bottom right, the
+ * same size and colour as them, and nearly invisible until it is hovered or
+ * keyboard-focused so it does not sit on the audience's slides. Above `.reveal`
+ * and the (hidden) header. The safe-area insets keep it clear of an iPhone's
+ * rounded corner and home indicator. */
+.mbr-slides-exit {
+  position: fixed;
+  z-index: 1000;
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  line-height: 1;
+  background: transparent;
+  color: var(--r-link-color, var(--pico-primary, #0172ad));
+  cursor: pointer;
+  opacity: 0.15;
+  transition: opacity 0.2s, background-color 0.2s;
+}
+
+.mbr-slides-exit:hover,
+.mbr-slides-exit:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.mbr-slides-exit:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* A touch screen cannot hover, so the button stays plainly visible there, at
+ * a finger's size (what the narrow-screen button always was). */
+@media (hover: none) {
+  .mbr-slides-exit {
+    width: 44px;
+    height: 44px;
+    opacity: 0.7;
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff;
+  }
+}
+
+@media print {
+  .mbr-slides-exit {
+    display: none;
+  }
+}
+
+/* Mixed slides: an image never wider than the slide, and never stretched.
+ * `<mbr-slides>` additionally caps an overflowing slide's images to the
+ * height its text leaves, then shrinks the text (`slide-fit.ts`). */
+.reveal .slides section img,
+.reveal .slides section video {
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+/* Kanban boards (`--- {.kanban}`). On a page the board is a multi-column
+ * section 85% of the window tall (theme.css, "Kanban Display"); in a 960x700
+ * slide that pours past the slide and Reveal's centring and scaling cut it
+ * off. `<mbr-slides>` groups each heading and its list into a
+ * `.mbr-kanban-column` inside one `.mbr-kanban-board`, laid out here as flex
+ * columns sharing the slide's width. The section keeps Reveal's own display. */
+.reveal .slides section.kanban {
+  columns: auto;
+  height: auto;
+  max-width: none;
+  overflow: visible;
+}
+
+.reveal .slides section.kanban .mbr-kanban-board {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75em;
+  width: 100%;
+  font-size: 0.55em;
+  text-align: left;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0 0 0.5em;
+  font-size: 1.3em;
+  text-align: left;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) {
+  display: block;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li {
+  margin: 0 0 0.5em;
+  padding: 0.5em 0.75em;
+  border-radius: var(--pico-border-radius, 0.25rem);
+  background: var(--pico-card-background-color, rgba(127, 127, 127, 0.12));
+  box-shadow: var(--pico-card-box-shadow, none);
+  font-weight: bold;
+  list-style: none;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li::marker {
+  content: none;
+}
+
+/* Card contents hang their bullets and checkboxes in theme.css's
+ * `--mbr-kanban-gutter` (the checkbox rule there applies here too), and the
+ * first level sits under a rule separating it from the card's title. */
+.reveal .slides section.kanban .mbr-kanban-column li :is(ul, ol) {
+  display: block;
+  margin: 0.2em 0 0;
+  padding: 0 0 0 var(--mbr-kanban-gutter, 1.7em);
+  font-weight: normal;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > :is(ul, ol) {
+  margin-top: 0.5em;
+  padding-top: 0.4em;
+  border-top: 1px solid var(--pico-muted-border-color, rgba(127, 127, 127, 0.3));
 }

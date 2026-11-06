@@ -57,6 +57,20 @@ export function isMacPlatform(): boolean {
 }
 
 /**
+ * True while a slide deck is presenting (or loading to present): `<mbr-slides>`
+ * swaps the page's `slides` body class for `slides-container` the moment it
+ * starts, and a failed start swaps it back. The presentation is Reveal.js's,
+ * and so is the keyboard: its own `?` help, `f` fullscreen, `s` speaker notes,
+ * `p`/`n` and the arrows. mbr's page shortcuts would open panels behind (or
+ * over) the deck, so the global handlers whose keys or panels would collide
+ * stand down while this is true. Review notes (`r`) stay available: selecting
+ * a slide's text and noting it is part of rehearsing a deck.
+ */
+export function isPresentationPlaying(): boolean {
+  return document.body.classList.contains('slides-container');
+}
+
+/**
  * Check if any modal/popup is currently open (excluding help overlay).
  *
  * Shared with mbr-editor so bare-letter shortcuts don't hijack keys while a
@@ -85,11 +99,17 @@ export function isModalOpen(): boolean {
 export function isPlayKey(e: KeyboardEvent): boolean {
   return (
     (e.key === 'p' || e.key === 'P') &&
+    // A held key's auto-repeat is not a second press: once the deck is up,
+    // `p` is Reveal's "previous slide", and once a flashcard deck is open it
+    // owns the keyboard.
+    !e.repeat &&
     !e.ctrlKey &&
     !e.metaKey &&
     !e.altKey &&
     !isInputTarget(e) &&
-    !isModalOpen()
+    !isModalOpen() &&
+    // A playing deck's `p` is Reveal's "previous slide", never a start.
+    !isPresentationPlaying()
   );
 }
 
@@ -337,6 +357,15 @@ export class MbrKeysElement extends LitElement {
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
+    // A playing slide deck owns the keyboard, `?` included: Reveal.js shows
+    // its own help (the slide keys, speaker notes, `q` to exit) on `?`, and
+    // mbr's page shortcuts (`f`, `/`, `j`/`k`, `H`/`L`, Ctrl+O/I…) would act
+    // on the page hidden behind the deck. Any help already open closes.
+    if (isPresentationPlaying()) {
+      this._helpOpen = false;
+      return;
+    }
+
     // Handle ? for help. Skipped while typing in an input/textarea/select/
     // contenteditable so a literal "?" can still be typed (editor, search box,
     // rename and picker fields all live behind this document-level listener).

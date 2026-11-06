@@ -13,6 +13,7 @@ import {
   hasUtcOffset,
   humanizeKey,
   isContactType,
+  isSlideDeck,
   kindOfValue,
   parseDateTime,
   parsePartialDate,
@@ -107,6 +108,40 @@ describe('builtinCatalog', () => {
     expect(fieldFor(['parameters', 0, 'required'], fm, catalog)?.kind).toBe('bool');
     expect(fieldFor(['executor', 'receipt', 0], fm, catalog)?.kind).toBe('text');
     expect(fieldFor(['attester', 'resource'], fm, catalog)?.kind).toBe('text');
+  });
+});
+
+describe('slide settings', () => {
+  it('apply to slide decks only, by type or style', () => {
+    expect(isSlideDeck({ type: 'slides' })).toBe(true);
+    expect(isSlideDeck({ type: ' slides ' })).toBe(true);
+    expect(isSlideDeck({ style: 'outline slides' })).toBe(true);
+    expect(isSlideDeck({ style: ['slides'] })).toBe(true);
+    expect(isSlideDeck({ type: 'note' })).toBe(false);
+    expect(isSlideDeck({ style: 'slideshow' })).toBe(false);
+    expect(fieldFor(['slides', 'transition'], {}, catalog)).toBeUndefined();
+  });
+
+  it('describes every deck setting with its widget', () => {
+    const fm = { type: 'slides' };
+    expect(fieldFor(['slides'], fm, catalog)?.kind).toBe('map');
+    const transition = fieldFor(['slides', 'transition'], fm, catalog);
+    expect(transition?.kind).toBe('enum');
+    expect(transition?.enumValues?.map((o) => o.value)).toEqual(['none', 'fade', 'slide', 'convex', 'concave', 'zoom']);
+    expect(fieldFor(['slides', 'transition_speed'], fm, catalog)?.enumValues?.map((o) => o.value)).toEqual(['default', 'fast', 'slow']);
+    expect(fieldFor(['slides', 'background_transition'], fm, catalog)?.kind).toBe('enum');
+    expect(fieldFor(['slides', 'slide_number'], fm, catalog)?.enumValues?.map((o) => o.value)).toEqual(['true', 'false', 'h.v', 'h/v', 'c', 'c/t']);
+    expect(fieldFor(['slides', 'controls'], fm, catalog)?.kind).toBe('bool');
+    expect(fieldFor(['slides', 'progress'], fm, catalog)?.kind).toBe('bool');
+    expect(fieldFor(['slides', 'background_image'], fm, catalog)?.kind).toBe('text');
+    expect(fieldFor(['slides', 'background_size'], fm, catalog)?.kind).toBe('text');
+    expect(fieldFor(['slides', 'background_opacity'], fm, catalog)?.kind).toBe('number');
+  });
+
+  it('hints at a value mbr ignores, not at a known one', () => {
+    const hints = validate({ type: 'slides', slides: { transition: 'spin', slide_number: true, controls: false } }, catalog);
+    expect(hints.map((h) => h.path)).toEqual([['slides', 'transition']]);
+    expect(hints[0].message).toContain('spin');
   });
 });
 

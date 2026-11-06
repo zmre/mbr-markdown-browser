@@ -1115,6 +1115,7 @@ impl Builder {
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
         let contact = render_result.contact;
+        let slides = render_result.slides;
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -1179,6 +1180,7 @@ impl Builder {
                 modified_secs,
                 current_url: &info.url_path,
                 siblings,
+                slides: slides.as_ref().map(|s| &s.settings),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &self.config.tag_sources,
@@ -1201,6 +1203,7 @@ impl Builder {
                 title_suffix: &self.config.title_suffix,
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
+                slides: &self.config.slides,
             },
             &page_context::UrlMode::RelativeToDepth(depth),
         );

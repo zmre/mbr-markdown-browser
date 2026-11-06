@@ -119,7 +119,17 @@ The board is CSS multi-column layout, so it takes no JavaScript and no new markd
 * The board is 85% of the window tall, and each column is about 18rem wide, with as many columns as the headings need.
 * Columns that do not fit the width of the page scroll sideways inside the board.
 * A column whose cards are taller than the board continues at the top of the next column, and every column after it moves one place to the right. Keep each list short enough to fit, or split it under a second heading.
-* Each item of a top-level list in the section is a card. Nested bullets, checklists and text inside an item are that card's content, in normal weight under the card's bold first line.
+* Each item of a top-level list in the section is a card, as wide as its column. Nested bullets, checklists and text inside an item are that card's content, in normal weight under the card's bold first line, with a thin line between the title and the content (a card with no nested list has no line).
+* In a card's content, bullets and checkboxes hang at the card's left edge and the text of every line starts at the same place, so a task lines up with the bullets around it. Deeper levels indent one step each. This holds in slides too.
+
+## In Slides
+
+A `--- {.kanban}` section in a [slide deck](slides/) is a slide of its own, and
+when the slides play the board is drawn inside the slide: the columns sit side
+by side and share the slide's width (they do not scroll sideways), each column
+holding its heading and its cards. A board taller than the slide is shrunk to
+fit, the same as any other slide. On the page itself, before you press Play, it
+is the ordinary board described above.
 
 ## Printing
 

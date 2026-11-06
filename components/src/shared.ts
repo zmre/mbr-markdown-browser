@@ -34,6 +34,13 @@ declare global {
       graphDepth?: number;
       flashcardsConcentricThreshold?: number;
       flashcardsProgressIndicators?: boolean;
+      /**
+       * Deck settings: the repository's `[slides]` table and the note's own
+       * `slides:` frontmatter map. `unknown` until `slide-settings.ts`'s
+       * `deckSettings` has validated them.
+       */
+      slides?: unknown;
+      slidesPage?: unknown;
       repoId?: string;
     };
   }
@@ -73,6 +80,19 @@ export function getFlashcardsConcentricThreshold(): number {
 /** Whether flashcard notes draw reading-view progress indicators (default on). */
 export function isFlashcardsProgressEnabled(): boolean {
   return window.__MBR_CONFIG__?.flashcardsProgressIndicators !== false;
+}
+
+/**
+ * The raw deck settings this page carries: the repository's `[slides]`
+ * defaults and the note's `slides:` frontmatter, both already validated and
+ * URL-resolved by the server. Merge them with `slide-settings.ts`'s
+ * `deckSettings`; absent (a custom `_head.html` predating them) is `{}`.
+ */
+export function getSlideSettingSources(): { config: unknown; page: unknown } {
+  return {
+    config: window.__MBR_CONFIG__?.slides ?? {},
+    page: window.__MBR_CONFIG__?.slidesPage ?? {},
+  };
 }
 
 /**

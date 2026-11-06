@@ -281,6 +281,33 @@ oembed_timeout_ms = 0
 
 With oembed disabled, bare URLs render as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
+## Floating Media Beside Text
+
+To put an embed beside the text that goes with it, start a section with the
+`media-float-right` or `media-float-left` class (see
+[Section Attributes](index.md#section-attributes)):
+
+```markdown
+--- {.media-float-left}
+
+## Interview
+
+![](audio/interview.mp3)
+
+Recorded at the harbour office, March 2024.
+```
+
+The section's media floats to that side at up to half the section's width, and
+its lists and paragraphs wrap beside it. Covered: images (`![](photo.jpg)`),
+video, audio, PDF, YouTube and Giphy embeds. Video, audio, PDF and YouTube take
+the full half (videos and YouTube at 16:9 until a video's own size is known, a
+PDF square); images and GIFs keep their own size up to half. The section ends
+below its floated media, so nothing spills into the next one. OpenGraph link
+cards and GitHub gists are not floated: they are wide cards meant to sit on a
+line of their own.
+
+In [slides](slides/#media-beside-text) the same classes go on a slide.
+
 ## File Organization
 
 ### Relative Paths

@@ -40,11 +40,12 @@ import {
 } from './review-store.js'
 import { anchorFromSelection, lineOfOffset, reviewRoot } from './review/anchor.js'
 import { indexFileOf, knownUrlPaths, resolveFileUrlPath } from './review/file-url.js'
-import { ReviewMarkerLayer, markerAnchorFromHash, markerId } from './review/markers.js'
+import { ReviewMarkerLayer, markerAnchorFromHash, markerId, type PassageHover } from './review/markers.js'
 import { displayQuote } from './review/note-model.js'
 import { nextAnchorState } from './review/reanchor.js'
 import { buildTextIndex } from './find-in-page.js'
-import { DEFAULT_NOTE_TYPE, type NoteAnchor, type NoteType, type ReviewNote } from './review/types.js'
+import { DEFAULT_NOTE_TYPE, typeDef, type NoteAnchor, type NoteType, type ReviewNote } from './review/types.js'
+import { SLIDES_STATE_EVENT } from './mbr-slides.js'
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -125,6 +126,10 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   private _suppressActivate = false
   private _popover: HTMLDivElement | null = null
   private _hideTimer: number | undefined
+  /** True while the card on screen is a hover over a washed passage. */
+  private _passageCard = false
+  /** True while the card on screen was pinned by a tap on a washed passage. */
+  private _pinnedPassage = false
 
   // ========================================
   // Lifecycle
@@ -140,6 +145,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     window.addEventListener('resize', this._onViewportChange)
     window.addEventListener('hashchange', this._revealFromHash)
     document.addEventListener('pointerdown', this._onDocumentPointerDown)
+    document.addEventListener(SLIDES_STATE_EVENT, this._onSlidesState)
 
     this._unsubscribeStore = subscribe(() => this._onStoreChanged())
     this._unsubscribeNav = subscribeSiteNav((navState) => {
@@ -163,6 +169,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     window.removeEventListener('resize', this._onViewportChange)
     window.removeEventListener('hashchange', this._revealFromHash)
     document.removeEventListener('pointerdown', this._onDocumentPointerDown)
+    document.removeEventListener(SLIDES_STATE_EVENT, this._onSlidesState)
     this._unsubscribeStore?.()
     this._unsubscribeNav?.()
     this._markers?.clear()
@@ -184,8 +191,11 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     if (!this.isConnected) return
     const root = reviewRoot()
     if (root === null) return
-    this._markers = new ReviewMarkerLayer(root, (notes, marker, pinned) =>
-      this._showPopover(notes, marker, pinned)
+    this._markers = new ReviewMarkerLayer(
+      root,
+      (notes, marker, pinned) => this._showPopover(notes, marker, pinned),
+      (hover) => this._onPassageHover(hover),
+      (hover) => this._onPassageTap(hover)
     )
     this._reanchor()
     this._redraw()
@@ -244,6 +254,11 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   private _handleKeydown = (e: KeyboardEvent): void => {
     // Esc closes a pinned note card. Checked before every other guard: the
     // card can be open while a marker holds focus, and Esc must reach it.
+    if (e.key === 'Escape' && this._pinnedPassage) {
+      e.preventDefault()
+      this._hidePopover()
+      return
+    }
     if (e.key === 'Escape' && this._pinnedMarker !== null) {
       e.preventDefault()
       const marker = this._pinnedMarker
@@ -324,6 +339,18 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
 
   private _file(): string | null {
     return currentDocumentPath()
+  }
+
+  /**
+   * A slide deck replaced the page with clones of it: the markers in there
+   * are copies without their listeners, and the wash's ranges point into the
+   * detached original. Draw both again over the deck (the clones keep their
+   * `data-mbr-line`s, so every note finds its slide).
+   */
+  private _onSlidesState = (e: Event): void => {
+    if ((e as CustomEvent<{ playing: boolean }>).detail?.playing !== true) return
+    this._hidePopover()
+    this._redraw()
   }
 
   private _onStoreChanged(): void {
@@ -560,11 +587,11 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     }
 
     this._cancelHide()
-    const popover = this._getPopover()
-    popover.replaceChildren(...notes.map((note) => this._popoverCard(note)))
-    popover.style.display = 'block'
+    const popover = this._fillPopover(notes, pinned)
     positionAnchored(marker, popover)
 
+    this._passageCard = false
+    this._pinnedPassage = false
     this._pinnedMarker = pinned ? marker : null
     if (!pinned) {
       marker.addEventListener('mouseleave', () => this._scheduleHide(), { once: true })
@@ -572,11 +599,55 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     }
   }
 
+  /**
+   * The pointer moved onto (or off) a washed passage: show its notes the way
+   * hovering their marker does, over the line under the pointer. A pinned
+   * card stays put, and leaving a passage only hides a card the passage put
+   * up (not one the marker's own hover did).
+   */
+  private _onPassageHover(hover: PassageHover | null): void {
+    if (this._pinnedMarker !== null || this._pinnedPassage) return
+    if (hover === null) {
+      if (this._passageCard) this._scheduleHide()
+      return
+    }
+    this._cancelHide()
+    const popover = this._fillPopover(hover.notes, false)
+    positionAt(hover.rect, popover)
+    this._passageCard = true
+  }
+
+  /**
+   * A tap on a washed passage (touch only): the card, pinned, the way a tap
+   * on the marker opens it. While a slide deck plays this is the only touch
+   * route to a note on the slide, since the markers are hidden there.
+   */
+  private _onPassageTap(hover: PassageHover): void {
+    this._cancelHide()
+    const popover = this._fillPopover(hover.notes, true)
+    positionAt(hover.rect, popover)
+    this._pinnedMarker = null
+    this._passageCard = false
+    this._pinnedPassage = true
+  }
+
+  /**
+   * Put `notes`' cards in the popover and show it. A hover card clamps long
+   * text (`peek`); a pinned one shows it all, since it can be scrolled.
+   */
+  private _fillPopover(notes: ReviewNote[], pinned: boolean): HTMLDivElement {
+    const popover = this._getPopover()
+    popover.replaceChildren(...notes.map((note) => this._popoverCard(note)))
+    popover.classList.toggle('peek', !pinned)
+    popover.style.display = 'block'
+    return popover
+  }
+
   /** Dismiss a pinned card on a click anywhere outside it. */
   private _onDocumentPointerDown = (e: MouseEvent): void => {
-    if (this._pinnedMarker === null) return
+    if (this._pinnedMarker === null && !this._pinnedPassage) return
     const path = e.composedPath()
-    if (path.includes(this._pinnedMarker)) return
+    if (this._pinnedMarker !== null && path.includes(this._pinnedMarker)) return
     if (this._popover && path.includes(this._popover)) return
     this._hidePopover()
   }
@@ -588,7 +659,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
 
     const head = document.createElement('div')
     head.className = 'mbr-review-popover-head'
-    head.textContent = note.type.toUpperCase()
+    head.textContent = (typeDef(note.type)?.label ?? note.type).toUpperCase()
     if (note.anchorState === 'lost') head.textContent += ' · text not found'
     card.appendChild(head)
 
@@ -630,7 +701,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   }
 
   private _scheduleHide(): void {
-    if (this._pinnedMarker !== null) return
+    if (this._pinnedMarker !== null || this._pinnedPassage) return
     this._cancelHide()
     this._hideTimer = window.setTimeout(() => this._hidePopover(), 150)
   }
@@ -645,6 +716,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   private _hidePopover(): void {
     this._cancelHide()
     this._pinnedMarker = null
+    this._passageCard = false
+    this._pinnedPassage = false
     if (this._popover) this._popover.style.display = 'none'
   }
 

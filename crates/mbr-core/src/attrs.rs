@@ -1,8 +1,9 @@
 //! Attribute Parser Module
 //!
-//! Parses attribute blocks like `{#id .class key=value}` following the
-//! pulldown-cmark heading attributes spec. Reusable for horizontal rules,
-//! images, and other elements.
+//! Parses attribute blocks like `{#id .class key=value}` in the shape of
+//! pulldown-cmark's heading attributes, plus quoted values (which
+//! pulldown-cmark's heading attributes do not have). Reusable for horizontal
+//! rules, images, and other elements.
 //!
 //! # Syntax
 //!
@@ -13,28 +14,18 @@
 //! - `#id` - ID attribute (last one wins if multiple)
 //! - `.class` - CSS class (multiple allowed, no deduplication)
 //! - `key=value` - Custom attribute
-//! - `key="quoted value"` - Custom attribute with spaces
-
-use regex::Regex;
-use std::sync::LazyLock;
-
-/// Regex patterns for attribute parsing
-/// ID pattern: match #id at start or after whitespace (avoid matching #fff in "color=#fff")
-static ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\s)#([\w-]+)").expect("literal ID regex is valid and cannot fail to compile")
-});
-/// Class pattern: match .class at start or after whitespace (avoid matching .5 in "opacity=0.5")
-static CLASS_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\s)\.([\w-]+)")
-        .expect("literal class regex is valid and cannot fail to compile")
-});
-/// Attr pattern: match key=value or key="value" (supports both straight " and curly "" quotes)
-static ATTR_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Match: key="value" or key="value" (curly quotes U+201C/U+201D) or key=unquoted
-    // Using explicit Unicode escape sequences for curly quotes
-    Regex::new(r#"([\w-]+)=(?:"([^"]*)"|[\u{201C}]([^\u{201D}]*)[\u{201D}]|(\S+))"#)
-        .expect("literal attr regex is valid and cannot fail to compile")
-});
+//! - `key="quoted value"` / `key='quoted value'` - Custom attribute whose
+//!   value may contain spaces (curly `“…”` / `‘…’` quotes are accepted too)
+//!
+//! The block is split into whitespace-separated tokens, except that a quoted
+//! value runs to its closing quote. So `style="color: #fff"` is one attribute:
+//! the `#fff` inside the value is not an id, nor `.b` in `title="a .b"` a class.
+//! Tokens that are none of the three forms are ignored.
+//!
+//! Values are taken verbatim: no backslash escapes, entities or smart
+//! punctuation, which is why the renderer slices the block from the markdown
+//! *source* rather than from rendered text (where `--` would already be a
+//! dash and `'` a curly quote).
 
 /// Parsed attributes from `{#id .class key=value}` syntax.
 /// Reusable for horizontal rules, images, and other elements.
@@ -64,43 +55,45 @@ impl ParsedAttrs {
     /// assert_eq!(attrs.classes, vec!["highlight"]);
     /// ```
     pub fn parse(input: &str) -> Option<Self> {
-        let trimmed = input.trim();
-
-        // Must start with { and end with }
-        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-            return None;
-        }
-
-        // Extract content between braces
-        let content = &trimmed[1..trimmed.len() - 1];
+        let content = input
+            .trim()
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))?;
 
         let mut result = ParsedAttrs::default();
-
-        // Parse IDs (last one wins)
-        for cap in ID_PATTERN.captures_iter(content) {
-            result.id = Some(cap[1].to_string());
+        let mut rest = content;
+        loop {
+            rest = rest.trim_start();
+            let Some(first) = rest.chars().next() else {
+                break;
+            };
+            rest = match first {
+                '#' | '.' => {
+                    let (name, after) = split_name(&rest[1..]);
+                    if !name.is_empty() {
+                        if first == '#' {
+                            result.id = Some(name.to_string());
+                        } else {
+                            result.classes.push(name.to_string());
+                        }
+                    }
+                    skip_token(after)
+                }
+                _ => {
+                    let (key, after) = split_name(rest);
+                    match after.strip_prefix('=') {
+                        Some(value_start) if !key.is_empty() => {
+                            let (value, after) = split_value(value_start);
+                            result
+                                .attrs
+                                .push((key.to_string(), Some(value.to_string())));
+                            after
+                        }
+                        _ => skip_token(after),
+                    }
+                }
+            };
         }
-
-        // Parse classes
-        result.classes = CLASS_PATTERN
-            .captures_iter(content)
-            .map(|cap| cap[1].to_string())
-            .collect();
-
-        // Parse key=value attributes
-        result.attrs = ATTR_PATTERN
-            .captures_iter(content)
-            .map(|cap| {
-                let key = cap[1].to_string();
-                // Group 2: straight quoted, Group 3: curly quoted, Group 4: unquoted
-                let value = cap
-                    .get(2)
-                    .or_else(|| cap.get(3))
-                    .or_else(|| cap.get(4))
-                    .map(|m| m.as_str().to_string());
-                (key, value)
-            })
-            .collect();
 
         Some(result)
     }
@@ -160,6 +153,49 @@ impl ParsedAttrs {
     pub fn is_empty(&self) -> bool {
         self.id.is_none() && self.classes.is_empty() && self.attrs.is_empty()
     }
+}
+
+/// Quote pairs a value may be wrapped in: straight, and the curly forms
+/// smart punctuation produces (accepted for text typed with them).
+const QUOTES: [(char, char); 4] = [
+    ('"', '"'),
+    ('\'', '\''),
+    ('\u{201C}', '\u{201D}'),
+    ('\u{2018}', '\u{2019}'),
+];
+
+/// A name character: a word character or `-`, as in `[\w-]`.
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Splits the leading run of name characters off `s`.
+fn split_name(s: &str) -> (&str, &str) {
+    let end = s.find(|c| !is_name_char(c)).unwrap_or(s.len());
+    s.split_at(end)
+}
+
+/// Drops everything up to the next whitespace.
+fn skip_token(s: &str) -> &str {
+    s.find(char::is_whitespace).map_or("", |i| &s[i..])
+}
+
+/// Splits an attribute value off `s` (the text right after `=`), returning
+/// the value without its quotes and the text after it.
+///
+/// A quoted value runs to its closing quote. One that is never closed is read
+/// like an unquoted value — up to the next whitespace, opening quote included —
+/// which is what the attribute meant before quotes were tokenized.
+fn split_value(s: &str) -> (&str, &str) {
+    let quoted = QUOTES.iter().find_map(|&(open, close)| {
+        let inner = s.strip_prefix(open)?;
+        let end = inner.find(close)?;
+        Some((&inner[..end], &inner[end + close.len_utf8()..]))
+    });
+    quoted.unwrap_or_else(|| {
+        let end = s.find(char::is_whitespace).unwrap_or(s.len());
+        s.split_at(end)
+    })
 }
 
 /// Simple HTML attribute value escaping.
@@ -317,5 +353,98 @@ mod tests {
         let input = "{data-bg=\u{201C}blue\u{201D}}";
         let attrs = ParsedAttrs::parse(input).unwrap();
         assert_eq!(attrs.to_html_attr_string(), r#" data-bg="blue""#);
+    }
+
+    #[test]
+    fn single_quoted_value() {
+        let attrs = ParsedAttrs::parse("{data-x='a b' .c}").unwrap();
+        assert_eq!(attrs.attrs, vec![("data-x".into(), Some("a b".into()))]);
+        assert_eq!(attrs.classes, vec!["c"]);
+    }
+
+    #[test]
+    fn curly_single_quoted_value() {
+        let attrs = ParsedAttrs::parse("{data-x=\u{2018}a b\u{2019}}").unwrap();
+        assert_eq!(attrs.attrs, vec![("data-x".into(), Some("a b".into()))]);
+    }
+
+    #[test]
+    fn mixed_quotes_nest_the_other_kind() {
+        let attrs = ParsedAttrs::parse(r#"{a="it's" b='say "hi"'}"#).unwrap();
+        assert_eq!(
+            attrs.attrs,
+            vec![
+                ("a".into(), Some("it's".into())),
+                ("b".into(), Some(r#"say "hi""#.into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn dashes_and_ellipses_are_verbatim() {
+        let attrs = ParsedAttrs::parse(r#"{style="--pico-color:cyan;" t=a--b...}"#).unwrap();
+        assert_eq!(
+            attrs.attrs,
+            vec![
+                ("style".into(), Some("--pico-color:cyan;".into())),
+                ("t".into(), Some("a--b...".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn id_and_class_markers_inside_a_quoted_value_are_value() {
+        let attrs = ParsedAttrs::parse(r#"{#real style="color: #fff" title="a .b"}"#).unwrap();
+        assert_eq!(attrs.id, Some("real".into()));
+        assert!(attrs.classes.is_empty(), "{attrs:?}");
+        assert_eq!(
+            attrs.attrs,
+            vec![
+                ("style".into(), Some("color: #fff".into())),
+                ("title".into(), Some("a .b".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn unterminated_quote_reads_as_unquoted() {
+        let attrs = ParsedAttrs::parse(r#"{a="x b=y}"#).unwrap();
+        assert_eq!(
+            attrs.attrs,
+            vec![
+                ("a".into(), Some("\"x".into())),
+                ("b".into(), Some("y".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_tokens_are_ignored() {
+        let attrs = ParsedAttrs::parse("{bare # . =v #ok}").unwrap();
+        assert_eq!(attrs.id, Some("ok".into()));
+        assert!(
+            attrs.classes.is_empty() && attrs.attrs.is_empty(),
+            "{attrs:?}"
+        );
+    }
+
+    proptest::proptest! {
+        /// Any value without its own quote character comes back verbatim,
+        /// whichever quote wraps it and whatever surrounds it.
+        #[test]
+        fn quoted_values_round_trip(
+            value in "[^\"]{0,40}",
+            single in "[^']{0,40}",
+            id in "[A-Za-z0-9_-]{1,12}",
+        ) {
+            let input = format!("{{#{id} k=\"{value}\" j='{single}' .tail}}");
+            let attrs = ParsedAttrs::parse(&input).unwrap();
+            proptest::prop_assert_eq!(attrs.id, Some(id));
+            proptest::prop_assert_eq!(attrs.classes, vec!["tail".to_string()]);
+            proptest::prop_assert_eq!(
+                attrs.attrs,
+                vec![("k".to_string(), Some(value)), ("j".to_string(), Some(single))]
+            );
+        }
     }
 }

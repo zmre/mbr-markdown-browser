@@ -48,7 +48,7 @@
 use std::ops::Range;
 
 use chrono::NaiveDateTime;
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{FlashcardPatchError, ReviewTimeError};
@@ -540,7 +540,7 @@ fn scan_terms(source: &str) -> Vec<Term> {
     let mut term: Option<Term> = None;
     let mut definition: Option<DefinitionScan> = None;
 
-    for (event, range) in Parser::new_ext(body, markdown_options()).into_offset_iter() {
+    for (event, range) in crate::frontmatter::parse_with_offsets(body, markdown_options()) {
         let range = range.start + shift..range.end + shift;
         match event {
             Event::Start(tag) => {
@@ -1106,6 +1106,19 @@ mod tests {
     }
 
     #[test]
+    fn a_card_after_a_mid_document_rule_is_a_card() {
+        // `---` directly followed by text below the top is a section break,
+        // not a metadata block (which used to swallow the card on both the
+        // page and here, so neither could see it).
+        let source = "---\ntype: flashcard\n---\n\n---\nQ?\n: A.\n---\n";
+        let patched = appended(source, 6);
+        assert!(
+            patched.contains("Q?\n: A.\n: ___Review History___\n  * 2026-10-06 13:45 - Good\n"),
+            "{patched}"
+        );
+    }
+
+    #[test]
     fn bom_does_not_shift_anything() {
         let source = "\u{feff}---\ntype: flashcard\n---\nQ?\n: A.\n";
         let patched = appended(source, 4);
@@ -1262,7 +1275,10 @@ mod tests {
     /// [`scan_terms`] agreeing with itself.
     fn rendered_terms(source: &str) -> Vec<String> {
         let mut html = String::new();
-        pulldown_cmark::html::push_html(&mut html, Parser::new_ext(source, markdown_options()));
+        pulldown_cmark::html::push_html(
+            &mut html,
+            crate::frontmatter::parse(source, markdown_options()),
+        );
         html.split("<dt>")
             .skip(1)
             .map(|rest| rest[..rest.find("</dt>").expect("closed dt")].to_string())
@@ -1353,7 +1369,10 @@ mod tests {
         // `Q2`'s card renders exactly as it did before the write.
         let q2_card = |source: &str| {
             let mut html = String::new();
-            pulldown_cmark::html::push_html(&mut html, Parser::new_ext(source, markdown_options()));
+            pulldown_cmark::html::push_html(
+                &mut html,
+                crate::frontmatter::parse(source, markdown_options()),
+            );
             html[html.find("<dt>Q2</dt>").expect("Q2 is a term")..].to_string()
         };
         assert_eq!(q2_card(&patched), q2_card(source));

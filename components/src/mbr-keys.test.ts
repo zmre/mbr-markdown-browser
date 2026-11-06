@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { LitElement } from 'lit'
-import { isInputTarget, isMacPlatform, isModalOpen, isPlayKey } from './mbr-keys.js'
+import { isInputTarget, isMacPlatform, isModalOpen, isPlayKey, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrKeysElement } from './mbr-keys.js'
 import { isAnyOverlayOpen, findOverlay, OVERLAY_TAGS } from './overlay.js'
 import type { MbrOverlay, OverlayTag } from './overlay.js'
@@ -76,6 +76,21 @@ describe('isPlayKey', () => {
     const input = document.body.appendChild(document.createElement('input'))
     expect(press({ key: 'p' }, input)).toBe(false)
     expect(press({ key: 'o' })).toBe(false)
+  })
+
+  it("ignores a held key's auto-repeat", () => {
+    expect(press({ key: 'p', repeat: true })).toBe(false)
+  })
+
+  it("is never a start while a slide deck plays: there `p` is Reveal's previous slide", () => {
+    document.body.classList.add('slides-container')
+    try {
+      expect(isPresentationPlaying()).toBe(true)
+      expect(press({ key: 'p' })).toBe(false)
+    } finally {
+      document.body.classList.remove('slides-container')
+    }
+    expect(isPresentationPlaying()).toBe(false)
   })
 })
 
@@ -522,6 +537,33 @@ describe('MbrKeysElement help overlay', () => {
     const event = await press('?', input)
     expect(helpIsOpen()).toBe(false)
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('leaves ? (and every other key) to Reveal while a slide deck plays', async () => {
+    document.body.classList.add('slides-container')
+    try {
+      const help = await press('?', document.body)
+      expect(helpIsOpen()).toBe(false)
+      expect(help.defaultPrevented).toBe(false)
+      for (const key of ['f', 'j', '/', 'G']) {
+        const event = await press(key, document.body)
+        expect(event.defaultPrevented, key).toBe(false)
+      }
+    } finally {
+      document.body.classList.remove('slides-container')
+    }
+  })
+
+  it('closes its own help when a deck starts playing under it', async () => {
+    await press('?', document.body)
+    expect(helpIsOpen()).toBe(true)
+    document.body.classList.add('slides-container')
+    try {
+      await press('?', document.body)
+      expect(helpIsOpen()).toBe(false)
+    } finally {
+      document.body.classList.remove('slides-container')
+    }
   })
 
   it('still closes help with Escape pressed from inside an input', async () => {

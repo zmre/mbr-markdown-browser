@@ -29,6 +29,11 @@ variables override `.mbr/config.toml`: the config file ships inside the
 markdown repository, so anyone serving a repository they did not author can
 override its settings from the outside.
 
+An environment variable is the option's name in upper case with the `MBR_`
+prefix (`edit_enabled` → `MBR_EDIT_ENABLED`). A double underscore reaches into
+a table: `[slides] transition` is `MBR_SLIDES__TRANSITION`. Because of that, a
+`__` in an `MBR_*` name always means a nested key.
+
 ## Configuration File
 
 Create `.mbr/config.toml` in your markdown repository:
@@ -709,6 +714,68 @@ flashcards_progress_indicators = true
 
 There are no CLI flags for either.
 
+### Slide Settings
+
+The `[slides]` table sets the Reveal.js options of every
+[slide deck](../markdown/slides.md) in the repository (`type: slides` or
+`style: slides`). Every key is optional; an unset key keeps the deck mbr has
+always played, so a repository without the table sees no change. A note's
+[`slides:` frontmatter map](../markdown/slides.md#deck-settings) overrides
+these key by key, and a slide's own `--- {data-transition=…}` /
+`data-background-*` attributes beat both. Applies in every mode, static builds
+included.
+
+| Option | Values | Default | Reveal.js option |
+|--------|--------|---------|------------------|
+| `transition` | `none`, `fade`, `slide`, `convex`, `concave`, `zoom` | `slide` | `transition` |
+| `transition_speed` | `default`, `fast`, `slow` | `default` | `transitionSpeed` |
+| `background_transition` | same as `transition` | `fade` | `backgroundTransition` |
+| `slide_number` | `false`, `true` (= `h.v`), `"h.v"`, `"h/v"`, `"c"`, `"c/t"` | `false` | `slideNumber` |
+| `controls` | bool | `true` | `controls` |
+| `progress` | bool | `true` | `progress` |
+| `background_image` | URL | none | each bare slide's `data-background-image` |
+| `background_size` | CSS `background-size` | `cover` | each bare slide's `data-background-size` |
+| `background_opacity` | number, 0–1 | `1` | each bare slide's `data-background-opacity` |
+
+```toml
+# .mbr/config.toml
+[slides]
+transition = "fade"
+slide_number = "c/t"
+background_image = "images/deck-bg.jpg"
+background_opacity = 0.3
+```
+
+The values are checked at startup: an unknown key (`transiton`), a value
+outside its set (`transition = "spin"`) or an opacity outside 0–1 stops mbr
+with a configuration error, like any other option.
+
+**`background_image`** is a default background for every top-level slide that
+has no background of its own (`data-background`, `-image`, `-color`,
+`-gradient`, `-video` or `-iframe`); such a slide keeps its own, and the
+default is not layered under it. `background_size` and `background_opacity`
+go with the default image only. In `config.toml` the URL is relative to the
+**repository root**: `images/bg.jpg` and `/images/bg.jpg` both mean the file
+served at `/images/bg.jpg` (the [static folder](#static-folder) overlay
+applies, as for any URL). A static build rewrites it relative to each page, so
+the published site works under any path prefix. `http(s)://` and `data:` URLs
+are used as written.
+
+**Environment variables:** one key at a time with a double underscore,
+`MBR_SLIDES__TRANSITION=fade`, `MBR_SLIDES__SLIDE_NUMBER=true`,
+`MBR_SLIDES__BACKGROUND_IMAGE=/images/bg.jpg`; or the whole table at once,
+`MBR_SLIDES='{transition="fade", controls=false}'`. An environment key
+overrides that key of the file's table and leaves the others. There are no CLI
+flags.
+
+mbr's own Reveal.js settings (`hash`, `history`, `center`,
+`scrollActivationWidth`, the keyboard handling, the notes plugin and the `q`
+exit key) are fixed and cannot be changed here.
+
+The settings reach the page as `window.__MBR_CONFIG__.slides` (this table) and
+`window.__MBR_CONFIG__.slidesPage` (the note's map); `<mbr-slides>` merges
+them when the deck starts.
+
 ### Review Settings
 
 Every block-level element on a served page carries
@@ -858,6 +925,7 @@ The endpoint detects these issue types:
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
+| `slide_setting_problem` | An entry of the note's [`slides:` frontmatter map](../markdown/slides.md#deck-settings) that the deck ignores — an unknown key or a value outside its set. The rest of the map still applies; the ignored key keeps the repository's setting. Carries `field` (e.g. `slides.transition`) and `message`. A `slides.background_image` that does not resolve is reported as `broken_media_reference`. |
 | `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../markdown/contacts/). |
 | `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
@@ -1272,6 +1340,10 @@ MBR_GRAPH_DEPTH=3
 # Flashcards
 MBR_FLASHCARDS_CONCENTRIC_THRESHOLD=0.8
 MBR_FLASHCARDS_PROGRESS_INDICATORS=false
+
+# Slide decks: a nested key is two underscores (`[slides] transition`)
+MBR_SLIDES__TRANSITION=fade
+MBR_SLIDES__SLIDE_NUMBER=c/t
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true

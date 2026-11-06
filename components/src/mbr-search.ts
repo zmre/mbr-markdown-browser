@@ -6,7 +6,7 @@ import { getMbrAssetBase } from './dynamic-loader.js'
 import type { MbrOverlay } from './overlay.js'
 import { trackVisualViewport } from './visual-viewport.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
-import { isMacPlatform } from './mbr-keys.js'
+import { isMacPlatform, isPresentationPlaying } from './mbr-keys.js'
 import { ICON_BUTTON_CSS, KBD_CSS } from './controls.ts'
 import { ICON_SM, icon, iconImage, iconSearch, iconX } from './icons.ts'
 
@@ -429,7 +429,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _handleGlobalKeydown = (e: KeyboardEvent) => {
     // Ctrl+K or Cmd+K to open search
-    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    // (Not while a slide deck plays: the modal would open behind it.)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k' && !isPresentationPlaying()) {
       e.preventDefault();
       this._openSearch();
     }

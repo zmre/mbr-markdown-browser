@@ -23,7 +23,7 @@
 //! A golden file regenerated from a broken renderer enshrines the break.
 
 use mbr::html::push_html_mbr;
-use pulldown_cmark::{Options, Parser};
+use pulldown_cmark::Options;
 use std::path::{Path, PathBuf};
 
 /// Environment variable that rewrites every `*.expected.html` from the current
@@ -35,9 +35,10 @@ fn fixture_dir() -> PathBuf {
 }
 
 /// Renders exactly the way the application does: every pulldown-cmark option on
-/// (`markdown::markdown_options()` is `Options::all()`) plus the MBR defaults.
+/// (`markdown::markdown_options()` is `Options::all()`, frontmatter recognised
+/// only at the top through `frontmatter::parse`) plus the MBR defaults.
 fn render(markdown: &str) -> String {
-    let parser = Parser::new_ext(markdown, Options::all());
+    let parser = mbr::frontmatter::parse(markdown, Options::all());
     let mut html = String::new();
     push_html_mbr(&mut html, parser);
     html

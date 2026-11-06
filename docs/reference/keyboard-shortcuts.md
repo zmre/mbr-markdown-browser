@@ -44,6 +44,11 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../markdown/flashcards/) (on a `type: flashcard` page) |
 | `Esc` | Close current panel |
 
+While a slide deck plays, the keyboard belongs to the slides: `?` shows the
+slide shortcuts (including `q` to exit), and mbr's own page shortcuts are
+turned off until you leave. `r` still adds a [review note](../modes/review/) to
+the selected text. See [Presentation Slides](../markdown/slides/#keyboard-shortcuts).
+
 ## Quick Navigation (Fuzzy Nav)
 
 | Key | Action |

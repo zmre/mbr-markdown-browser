@@ -60,6 +60,16 @@ interface ContactDataProblem {
 }
 
 /**
+ * An entry of the note's `slides:` frontmatter map the deck ignores (unknown
+ * key, value outside its set); the repository's setting applies instead.
+ */
+interface SlideSettingProblem {
+  type: 'slide_setting_problem';
+  field: string;
+  message: string;
+}
+
+/**
  * A parent/child (or other inverse-pair) loop in the typed relationships. The
  * genealogy chart cannot lay out a cyclic hierarchy, so one of the closing
  * edges is discarded — see `breakHierarchicalCycles` in
@@ -108,6 +118,7 @@ type ServerPageError =
   | UnresolvedWikilinkError
   | FrontmatterParseError
   | ContactDataProblem
+  | SlideSettingProblem
   | UnplayableMediaError
   | RelationshipCycleError
   | AmbiguousNameError;
@@ -153,6 +164,7 @@ const ERROR_LABELS: ReadonlyArray<
     'frontmatter parse errors',
   ],
   ['contact_data_problem', 'unreadable contact field', 'unreadable contact fields'],
+  ['slide_setting_problem', 'ignored slide setting', 'ignored slide settings'],
   ['unplayable_media', 'unplayable media file', 'unplayable media files'],
   [
     'runtime_media_error',
@@ -439,6 +451,27 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderSlideSettingGroup(): TemplateResult | typeof nothing {
+    const items = this._errors.filter(
+      (e): e is SlideSettingProblem => e.type === 'slide_setting_problem'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Ignored slide settings (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`<li>
+              <code class="target">${e.field}</code>
+              <span class="text"> — ${e.message}</span>
+            </li>`
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderContactGroup(): TemplateResult | typeof nothing {
     const items = this._errors.filter(
       (e): e is ContactDataProblem => e.type === 'contact_data_problem'
@@ -652,6 +685,7 @@ export class MbrPageErrorsElement extends LitElement {
           ${this._renderWikilinkGroup()}
           ${this._renderFrontmatterGroup()}
           ${this._renderContactGroup()}
+          ${this._renderSlideSettingGroup()}
           ${this._renderRelationshipCycleGroup()}
           ${this._renderAmbiguousEndpointGroup()}
           ${this._renderAmbiguousWikilinkGroup()}

@@ -37,6 +37,12 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// This hybrid approach allows us to:
 /// - Support custom tag-source links (`[[Source:value]]`)
 /// - Preserve standard wikilink behavior for plain `[[page]]` links
+///
+/// The metadata-block options are in the set, but no caller may hand it to
+/// `Parser::new_ext` directly: pulldown-cmark would then read a metadata block
+/// at *any* `---` line. Parse through [`crate::frontmatter::parse`] /
+/// [`crate::frontmatter::parse_with_offsets`], which recognise frontmatter only
+/// at the start of the document.
 pub(crate) fn markdown_options() -> Options {
     Options::all()
 }
@@ -100,9 +106,8 @@ impl ParsedDocument {
     ///
     /// The events use the same parser options as mbr's HTML renderer,
     /// ensuring consistent parsing behavior.
-    pub fn events(&self) -> TextMergeStream<'_, MDParser<'_>> {
-        let parser = MDParser::new_ext(&self.source, markdown_options());
-        TextMergeStream::new(parser)
+    pub fn events(&self) -> TextMergeStream<'_, impl Iterator<Item = Event<'_>>> {
+        TextMergeStream::new(crate::frontmatter::parse(&self.source, markdown_options()))
     }
 }
 
@@ -237,6 +242,14 @@ pub struct MarkdownRenderResult {
     /// is rewritten with the same link transform the body's images get, so a
     /// relative portrait resolves from the page's trailing-slash URL.
     pub contact: Option<crate::contact::Contact>,
+    /// The note's `slides:` frontmatter map (deck settings), when it has one:
+    /// the settings that parsed and the entries that did not.
+    ///
+    /// Read from the raw YAML, like `contact`, because the simplified
+    /// `frontmatter` flattens the map and stringifies a float. A
+    /// `background_image` is rewritten with the image transform, so it
+    /// resolves relative to the note exactly like `![](…)` on the same page.
+    pub slides: Option<crate::slides::SlideFrontmatter>,
 }
 
 struct EventState {
@@ -357,10 +370,17 @@ fn count_sentence_terminators(text: &str) -> (usize, bool) {
 /// This is used to provide a title fallback when no frontmatter title exists.
 /// Only extracts the first H1 found; subsequent H1s are ignored.
 pub fn extract_first_h1(markdown_input: &str) -> Option<String> {
-    // Use minimal parser options: only YAML metadata (to skip frontmatter blocks)
-    // ATX headings are parsed by default without any feature flags
-    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-    let parser = TextMergeStream::new(parser);
+    first_h1_in_body(crate::frontmatter::body_of(
+        markdown_input,
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    ))
+}
+
+/// [`extract_first_h1`] for text whose frontmatter is already gone: parsed with
+/// no options at all (ATX and setext headings need none), so a `---` at its
+/// start is a rule, never a metadata block.
+fn first_h1_in_body(body: &str) -> Option<String> {
+    let parser = TextMergeStream::new(MDParser::new_ext(body, Options::empty()));
 
     let mut in_h1 = false;
     let mut h1_text = String::new();
@@ -406,6 +426,36 @@ pub(crate) fn section_rule_attrs(text: &str) -> Option<&str> {
     text.strip_prefix(EM_DASH)
         .filter(|rest| rest.starts_with(" {") && rest.ends_with('}'))
         .map(str::trim)
+}
+
+/// The `{…}` block of a `--- {attrs}` section rule exactly as written, given
+/// the source of the paragraph [`section_rule_attrs`] matched.
+///
+/// The paragraph is one line, `---`/`—`/an entity, a space, then the block, so
+/// the block runs from its first `{` to its last `}` (a trailing newline may be
+/// in the range). Nothing before the block can contain a brace. `None` only
+/// when the braces are spelled as entities, where the caller keeps the text.
+fn section_rule_source_attrs(paragraph_source: &str) -> Option<&str> {
+    let open = paragraph_source.find('{')?;
+    let close = paragraph_source.rfind('}')?;
+    paragraph_source.get(open..=close).filter(|_| open < close)
+}
+
+/// Whether `events` holds nothing but the note's frontmatter (or nothing at
+/// all): what precedes a `--- {attrs}` rule that styles the first section.
+///
+/// Blank lines produce no events, so "only frontmatter and whitespace" is
+/// exactly this. Anything else — text, a heading, an HTML comment, a plain
+/// `---` — is content, and an attributed rule after it opens a new section.
+fn only_frontmatter(events: &[Event<'_>]) -> bool {
+    matches!(
+        events,
+        [] | [
+            Event::Start(Tag::MetadataBlock(_)),
+            Event::Text(_),
+            Event::End(TagEnd::MetadataBlock(_)),
+        ]
+    )
 }
 
 /// Maps a non-standard [remark-hint](https://github.com/sergioramos/remark-hint)
@@ -1140,8 +1190,10 @@ fn collect_events_and_headings<'a>(
     Vec<HeadingInfo>,
     HashMap<usize, ParsedAttrs>,
 ) {
-    let parser = MDParser::new_ext(markdown_input, markdown_options()).into_offset_iter();
-    let parser = TextMergeWithOffset::new(parser);
+    let parser = TextMergeWithOffset::new(crate::frontmatter::parse_with_offsets(
+        markdown_input,
+        markdown_options(),
+    ));
 
     let mut events = Vec::new();
     let mut headings = Vec::new();
@@ -1425,14 +1477,38 @@ fn collect_events_and_headings<'a>(
                     };
 
                     if let Some(attrs) = rule_attrs {
-                        // Extract and parse attrs from the text event
-                        let parsed = ParsedAttrs::parse(attrs);
+                        // Detected on the rendered text, but parsed from the
+                        // source: smart punctuation has rewritten the text
+                        // (`--` → en dash, `'` → curly quote), which breaks
+                        // `style="--pico-color:cyan"` and `key='v'`.
+                        let parsed = ParsedAttrs::parse(
+                            markdown_input
+                                .get(range.clone())
+                                .and_then(section_rule_source_attrs)
+                                .unwrap_or(attrs),
+                        );
 
                         // Remove the Start(Paragraph) and Text events. The Text
                         // is recorded, and the `Rule` pushed below reuses its
                         // slot, so the table has to shrink with the vector.
                         pop_event(&mut events, text_lines, block_lines); // Text
                         pop_event(&mut events, text_lines, block_lines); // Start(Paragraph)
+
+                        // A leading attributed rule styles the first section
+                        // rather than opening a second one: emitting a `Rule`
+                        // here would leave section 0 empty (an empty first
+                        // slide) and put the attributes on section 1. No
+                        // `Rule` means the writer's count never advances, so
+                        // index 0 is the one it opens with.
+                        if let Some(attrs) = parsed
+                            .as_ref()
+                            .filter(|_| only_frontmatter(&events))
+                            .filter(|_| !section_attrs.contains_key(&0))
+                        {
+                            debug_assert_eq!(section_index, 0);
+                            section_attrs.insert(0, attrs.clone());
+                            continue;
+                        }
 
                         // Emit a Rule event instead
                         push_event(
@@ -2478,6 +2554,49 @@ fn push_marked_text<'a>(
     }
 }
 
+/// A block-level event that can open *inside* a pass-3 frame (a list item, a
+/// table cell): a block-wide wash, an inline `<span>`, must close before it.
+/// `Rule` has no `Start`, so it stands in for its own.
+fn is_nested_block_start(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Start(
+            Tag::Paragraph
+                | Tag::Heading { .. }
+                | Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::List(_)
+                | Tag::Table(_)
+                | Tag::FootnoteDefinition(_)
+                | Tag::DefinitionList
+                | Tag::MetadataBlock(_)
+        ) | Event::Rule
+    )
+}
+
+/// The closing counterpart of [`is_nested_block_start`]: the event that ends a
+/// nested block, after which a frame's inline content may resume.
+fn is_nested_block_end(event: Option<&Event<'_>>) -> bool {
+    matches!(
+        event,
+        Some(
+            Event::End(
+                TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::BlockQuote(_)
+                    | TagEnd::CodeBlock
+                    | TagEnd::HtmlBlock
+                    | TagEnd::List(_)
+                    | TagEnd::Table
+                    | TagEnd::FootnoteDefinition
+                    | TagEnd::DefinitionList
+                    | TagEnd::MetadataBlock(_)
+            ) | Event::Rule
+        )
+    )
+}
+
 /// Highlights markers (TK/TODO/FIXME/XXX, or whatever `incomplete_markers`
 /// configures) in `<span class="mbr-incomplete">…</span>`, and gives the first
 /// highlight on each source line a `#mbr-marker-{line}` anchor.
@@ -2489,7 +2608,12 @@ fn push_marked_text<'a>(
 ///   Eligible (innermost) blocks: `Paragraph`, `Heading{..}`, `Item`,
 ///   `TableCell`. Other container tags (`BlockQuote`, `List`, `Table`, code
 ///   blocks, …) are skipped — their inner `Paragraph`, or its absence, is what
-///   gets evaluated.
+///   gets evaluated. The wash is an inline `<span>`, so it covers only the
+///   frame's **own inline run**: it opens after any nested block that precedes
+///   the text and closes before the first nested block that follows it
+///   ([`is_nested_block_start`]). `- TODO: title` over a nested list washes the
+///   title and leaves the `<ul>` outside the span, where it is valid HTML; a
+///   marker in the nested item gets that item's own wash.
 /// * Every **other** occurrence has just the marker word wrapped, so
 ///   `The market fell 10% (source: TK).` highlights the `TK` and nothing else.
 ///
@@ -2516,29 +2640,28 @@ fn push_marked_text<'a>(
 /// This is the **only** place in the codebase where an index table has to cross
 /// to the *output* side of a pass that is not 1:1, and the reason is one line of
 /// code: everything here is `output.push`, except the single
-/// `output.insert(top.start_idx + 1, …)` that puts a block-wide wash span behind
-/// an already-emitted `Start`. That insert shifts every output index recorded
-/// after `top.start_idx`, and it fires in the **default** configuration:
+/// `output.insert(top.inline_start, …)` that puts a block-wide wash span behind
+/// already-emitted events. That insert shifts every output index recorded at or
+/// after `top.inline_start`.
 ///
-/// ```markdown
-/// - - inner
-///   TODO outer text
-/// ```
-///
-/// The inner `<li>` opens *and closes* before the outer item sees any text, so
-/// the span lands at `outer.start_idx + 1` — behind the inner item's already
-/// recorded output index — and that record, plus every block after it, needs a
-/// `+1`.
+/// `inline_start` is the slot after the frame's `Start`, moved past each nested
+/// block that ends inside the frame, so the events between it and the text are
+/// inline (`Start(Strong)` of `**TODO**`, a task checkbox) and carry no record:
+/// in every shape known today the shift moves nothing. It used to be
+/// `start_idx + 1`, which for a fenced code block in a tight list item put the
+/// span — and a `+1` — in front of the `<pre>`'s record (and the `<pre>` inside
+/// the span). The repair stays, because nothing but this argument keeps an
+/// insert from landing behind a record.
 ///
 /// [`BlockLines`] therefore cannot simply be carried through. It is **rebuilt**:
 /// `block_cursor` reads the incoming (pass-1-keyed) table, `remapped` is written
 /// with `output.len()` as the key, and `remapped.shift_from` repairs it at the
 /// insert. `output.len()` is exactly the slot the event is about to occupy —
-/// every block `Start` reaches an arm that ends in `output.push`, and the frame
-/// arms already compute `let start_idx = output.len();` immediately before
-/// pushing. The recording sits at the very top of the loop body, ahead of every
-/// `continue`; a block start is never an `Event::Text`, so the early text path
-/// can never reach it.
+/// every block `Start` reaches an arm that ends in `output.push`. The recording
+/// sits near the top of the loop body, ahead of every `continue`; a block start
+/// is never an `Event::Text`, so the early text path can never reach it. The
+/// one push allowed ahead of it is the wash close a nested block start forces,
+/// which is why that close is emitted *before* the record is taken.
 ///
 /// [`TextLines`] needs none of this: it is read on the *input* side, by the
 /// `enumerate()` counter.
@@ -2549,7 +2672,11 @@ fn mark_incomplete_blocks<'a>(
     block_lines: &mut BlockLines,
 ) -> Vec<Event<'a>> {
     struct Frame {
-        start_idx: usize,
+        /// Where a block-wide wash opens: just after the frame's `Start`, or
+        /// just after the last nested block that closed inside it, so the wash
+        /// never takes in a nested list, code block or quote that precedes the
+        /// frame's own first text.
+        inline_start: usize,
         has_seen_text: bool,
         marker_open: bool,
     }
@@ -2572,10 +2699,22 @@ fn mark_incomplete_blocks<'a>(
     // The index is the *input* position, which is what `TextLines` recorded;
     // `output` drifts from it as spans are inserted.
     for (index, event) in events.into_iter().enumerate() {
+        // A block-wide wash is an inline `<span>`, so it closes before the
+        // first nested block of its frame (`- TODO title` + a nested list):
+        // left open, it would wrap the `<ul>`. This push must come *before*
+        // the event's record below, which keys off `output.len()`.
+        if is_nested_block_start(&event)
+            && let Some(top) = stack.last_mut()
+            && top.marker_open
+        {
+            output.push(Event::Html(CowStr::Borrowed(INCOMPLETE_SPAN_CLOSE)));
+            top.marker_open = false;
+        }
+
         // Re-key this event's `data-mbr-line` record onto the slot it is about
-        // to occupy in `output`. Must stay at the very top of the body: every
-        // path below either pushes the event or `continue`s past it, and the
-        // text path continues. See `# Index alignment`.
+        // to occupy in `output`. Every path below either pushes the event or
+        // `continue`s past it, and the text path continues; nothing but the
+        // close above may push ahead of it. See `# Index alignment`.
         if block_lines.enabled
             && let Some(line) = block_cursor.line_at(index)
         {
@@ -2603,16 +2742,18 @@ fn mark_incomplete_blocks<'a>(
                     top.has_seen_text = true;
                     let indent = text.len() - text.trim_start().len();
                     if let Some(end) = rule.block_initial_match(text.trim_start()) {
-                        // Immediately after this frame's Start event.
+                        // After the frame's Start, or after its last nested
+                        // block: ahead of any inline events (`**TODO**`) that
+                        // precede this text.
                         output.insert(
-                            top.start_idx + 1,
+                            top.inline_start,
                             open_incomplete_span(line, &mut highest_anchored_line),
                         );
                         // The one non-`push` in this function, and therefore the
                         // one place the output keying has to be repaired. See
                         // `# Index alignment`.
                         if block_lines.enabled {
-                            remapped.shift_from(top.start_idx + 1);
+                            remapped.shift_from(top.inline_start);
                         }
                         top.marker_open = true;
                         // The block-wide span already covers this occurrence.
@@ -2657,10 +2798,9 @@ fn mark_incomplete_blocks<'a>(
             | Event::Start(Tag::Heading { .. })
             | Event::Start(Tag::Item)
             | Event::Start(Tag::TableCell) => {
-                let start_idx = output.len();
                 output.push(event);
                 stack.push(Frame {
-                    start_idx,
+                    inline_start: output.len(),
                     has_seen_text: false,
                     marker_open: false,
                 });
@@ -2679,6 +2819,14 @@ fn mark_incomplete_blocks<'a>(
             _ => {
                 output.push(event);
             }
+        }
+
+        // A nested block just closed inside the innermost frame: a wash for
+        // text that follows it starts here, not in front of the block.
+        if let Some(top) = stack.last_mut()
+            && is_nested_block_end(output.last())
+        {
+            top.inline_start = output.len();
         }
     }
 
@@ -2744,6 +2892,18 @@ fn finalize_render(
             contact
         });
 
+    let slides = state
+        .metadata_parsed
+        .as_ref()
+        .and_then(crate::slides::SlideSettings::from_frontmatter)
+        .map(|mut slides| {
+            slides.settings.background_image = slides
+                .settings
+                .background_image
+                .map(|src| transform_link(&src, &state.link_transform_config));
+            slides
+        });
+
     Ok(MarkdownRenderResult {
         frontmatter,
         frontmatter_error: state.frontmatter_error,
@@ -2756,6 +2916,7 @@ fn finalize_render(
         syllable_count: state.syllable_count,
         ambiguous_wikilinks: state.ambiguous_wikilinks,
         contact,
+        slides,
     })
 }
 
@@ -3255,53 +3416,49 @@ pub fn extract_metadata_from_vault(
 pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
     let decoded = String::from_utf8_lossy(buffer);
     let markdown_input = strip_bom(&decoded);
-    let parser = MDParser::new_ext(markdown_input, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-    let parser = TextMergeStream::new(parser);
-    let mut in_metadata = false;
+    // No markdown parse for the frontmatter: the leading block is found by a
+    // byte scan of its own lines, and nothing after it is looked at unless the
+    // title has to come from the first H1.
+    let leading = crate::frontmatter::leading_metadata(
+        markdown_input,
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    );
     let mut hm = SimpleMetadata::new();
     let mut relationships = Vec::new();
-    for event in parser.take(4) {
-        match &event {
-            Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                in_metadata = true;
-            }
-            Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
-                break;
-            }
-            Event::Text(text) if in_metadata => {
-                // A parse failure discards the *entire* frontmatter: `type`,
-                // `aliases`, `relationships` and all. This is the scan path that
-                // feeds the relationship index, so a silent drop here shows up
-                // as a flood of "unresolved relationship endpoint" warnings from
-                // other notes that referenced this one by an alias that never
-                // made it into the index. Log it, naming the file, then fall
-                // back to empty metadata exactly as before so the scan continues.
-                let metadata_parsed = match YamlLoader::load_from_str(text) {
-                    Ok(docs) => docs.into_iter().next(),
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "Failed to parse YAML frontmatter: {e}; the whole \
-                             frontmatter block (including any `aliases` and \
-                             `relationships`) is ignored for this note"
-                        );
-                        None
-                    }
-                };
-
-                if let Some(ref yaml) = metadata_parsed {
-                    relationships = crate::relationships::parse_relationships(yaml);
+    if let Some(leading) = &leading {
+        // A parse failure discards the *entire* frontmatter: `type`,
+        // `aliases`, `relationships` and all. This is the scan path that
+        // feeds the relationship index, so a silent drop here shows up as a
+        // flood of "unresolved relationship endpoint" warnings from other
+        // notes that referenced this one by an alias that never made it into
+        // the index. Log it, naming the file, then fall back to empty
+        // metadata exactly as before so the scan continues.
+        let metadata_parsed =
+            match YamlLoader::load_from_str(&markdown_input[leading.content.clone()]) {
+                Ok(docs) => docs.into_iter().next(),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Failed to parse YAML frontmatter: {e}; the whole \
+                         frontmatter block (including any `aliases` and \
+                         `relationships`) is ignored for this note"
+                    );
+                    None
                 }
-                hm = yaml_frontmatter_simplified(&metadata_parsed);
-                break;
-            }
-            _ => {}
+            };
+
+        if let Some(ref yaml) = metadata_parsed {
+            relationships = crate::relationships::parse_relationships(yaml);
         }
+        hm = yaml_frontmatter_simplified(&metadata_parsed);
     }
 
     // If no frontmatter title, try to extract the first H1 from the content
+    let body = leading.map_or(markdown_input, |leading| {
+        &markdown_input[leading.body_start..]
+    });
     if !hm.contains_key("title")
-        && let Some(h1_text) = extract_first_h1(markdown_input)
+        && let Some(h1_text) = first_h1_in_body(body)
     {
         hm.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
@@ -5406,6 +5563,258 @@ mod tests {
         );
     }
 
+    // Section attributes are parsed from the source, not from the
+    // smart-punctuated paragraph text (`--` → en dash, `'` → curly quote).
+
+    #[tokio::test]
+    async fn section_attrs_keep_double_dashes() {
+        let md = "First\n\n--- {style=\"--pico-color:cyan;\"}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section style="--pico-color:cyan;">"#),
+            "`--` in a value must survive smart punctuation. Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_accept_single_quotes() {
+        let md = "First\n\n--- {data-x='a b'}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(r#"<section data-x="a b">"#),
+            "single-quoted value with a space. Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_mixed_quotes_dashes_and_ellipses() {
+        let md = "First\n\n--- {#s .c title=\"it's -- fine...\" data-q='say \"hi\"' data-n=a--b...}\n\nSecond";
+        let html = render_markdown(md).await;
+        assert!(
+            html.contains(
+                r#"<section id="s" class="c" title="it's -- fine..." data-q="say &quot;hi&quot;" data-n="a--b...">"#
+            ),
+            "values must be the source text, escaped once. Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_attrs_from_source_in_render_str() {
+        // The synchronous pipeline (QuickLook, render_sync) shares pass 1.
+        let html = render_str_with_mode("A\n\n--- {style='--a:b'}\n\nB", false).html;
+        assert!(html.contains(r#"<section style="--a:b">"#), "Got: {html}");
+    }
+
+    #[tokio::test]
+    async fn section_attrs_from_source_after_nested_rule() {
+        // A `--- {…}` inside a blockquote or list item is a plain `<hr />` (a
+        // nested rule cannot close a section), but it still counts, so the next
+        // top-level rule's attributes are the ones from *its* source line.
+        let md = "A\n\n> --- {style=\"--q:1\"}\n\n- --- {style=\"--l:2\"}\n\n--- {style=\"--top:3\"}\n\nB";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<section style="--top:3">"#), "Got: {html}");
+        assert!(
+            !html.contains("--q:1") && !html.contains("--l:2"),
+            "Got: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_attrs_literal_em_dash_marker() {
+        // `—` typed directly is the same rule; its attributes come from source too.
+        let md = "A\n\n\u{2014} {style=\"--x:y\"}\n\nB";
+        let html = render_markdown(md).await;
+        assert!(html.contains(r#"<section style="--x:y">"#), "Got: {html}");
+    }
+
+    #[test]
+    fn section_attrs_background_url_with_double_dash() {
+        // The Reveal background rewrite sees the source value, so a file name
+        // with `--` resolves instead of pointing at an en-dash name.
+        let html = render_with_depth(
+            "A\n\n--- {data-background-image=\"img--wide.png\"}\n\nB",
+            Some(1),
+        );
+        assert!(
+            html.contains(r#"data-background-image="../img--wide.png""#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_attrs_keep_block_lines() {
+        // The rule replaces the paragraph in place; later blocks keep their lines.
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let opts = RenderOptions {
+            review: ReviewLines::Emit,
+            ..plain_options(root, true)
+        };
+        let html = render_str(
+            "A\n\n--- {style=\"--x:y\" title='a...b'}\n\nB",
+            &root.join("deck.md"),
+            opts,
+        )
+        .unwrap()
+        .html;
+        assert!(
+            html.contains(r#"<section style="--x:y" title="a...b">"#),
+            "Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">B</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    /// A render with `data-mbr-line` on, for the leading-rule tests.
+    fn render_with_lines(content: &str) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let opts = RenderOptions {
+            review: ReviewLines::Emit,
+            ..plain_options(root, true)
+        };
+        render_str(content, &root.join("deck.md"), opts)
+            .unwrap()
+            .html
+    }
+
+    #[test]
+    fn leading_section_rule_styles_the_first_section() {
+        let html = render_with_lines("--- {#title .dark}\n\n# Deck\n\nIntro\n");
+        assert!(
+            html.starts_with("<section id=\"title\" class=\"dark\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+        assert!(!html.contains("<hr"), "Got: {html}");
+        assert!(!html.contains('\u{2014}'), "Got: {html}");
+        // The dropped paragraph leaves later lines where they were.
+        assert!(
+            html.contains(r#"<h1 data-mbr-line="3" id="deck">"#),
+            "Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">Intro</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_after_frontmatter_and_blank_lines() {
+        let html = render_with_lines(
+            "---\ntitle: Deck\nstyle: slides\n---\n\n\n\n--- {.cover}\n\nIntro\n",
+        );
+        assert!(
+            html.starts_with("<section class=\"cover\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+        assert!(!html.contains("<hr"), "Got: {html}");
+        assert!(
+            html.contains(r#"<p data-mbr-line="10">Intro</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_keeps_later_sections_numbered() {
+        let html = render_str_with_mode(
+            "--- {#one}\n\nA\n\n--- {#two}\n\nB\n\n---\n\nC\n\n--- {#four}\n\nD\n",
+            false,
+        )
+        .html;
+        let sections: Vec<&str> = html
+            .split("<section")
+            .skip(1)
+            .map(|s| s.split('>').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            sections,
+            [r#" id="one""#, r#" id="two""#, "", r#" id="four""#],
+            "Got: {html}"
+        );
+        assert!(
+            html.starts_with("<section id=\"one\">\n<p>A</p>"),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_background_is_rewritten() {
+        let html = render_with_depth(
+            "--- {data-background-image=\"bg--wide.jpg\"}\n\n# Title\n",
+            Some(1),
+        );
+        assert!(
+            html.starts_with("<section data-background-image=\"../bg--wide.jpg\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+    }
+
+    #[tokio::test]
+    async fn leading_section_rule_keeps_incomplete_markers_aligned() {
+        let html = render_markdown_marked("--- {.cover}\n\nTODO: write it\n", &["TODO"]).await;
+        assert!(html.starts_with("<section class=\"cover\">"), "Got: {html}");
+        assert!(html.contains(r#"id="mbr-marker-3""#), "Got: {html}");
+    }
+
+    #[test]
+    fn plain_leading_rule_is_unchanged() {
+        let html = render_str_with_mode("---\n\nA\n", false).html;
+        assert_eq!(
+            html,
+            "<section>\n</section>\n<hr />\n<section>\n<p>A</p>\n</section>\n"
+        );
+    }
+
+    #[test]
+    fn second_leading_section_rule_opens_a_section() {
+        // The first section is styled once; another rule before any content is
+        // the author asking for a new (empty) section.
+        let html = render_str_with_mode("--- {#a}\n\n--- {#b}\n\nB\n", false).html;
+        assert_eq!(
+            html,
+            "<section id=\"a\">\n</section>\n<hr />\n<section id=\"b\">\n<p>B</p>\n</section>\n"
+        );
+    }
+
+    #[test]
+    fn section_rule_after_content_is_unchanged() {
+        for content in [
+            "A\n\n--- {#x}\n\nB\n",
+            "<!-- note -->\n\n--- {#x}\n\nB\n",
+            "---\ntitle: T\n---\n\nA\n\n--- {#x}\n\nB\n",
+        ] {
+            let html = render_str_with_mode(content, false).html;
+            assert!(html.starts_with("<section>\n"), "{content:?} → {html}");
+            assert!(
+                html.contains("</section>\n<hr />\n<section id=\"x\">\n<p>B</p>"),
+                "{content:?} → {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn heading_attrs_are_not_smart_punctuated() {
+        // pulldown-cmark parses heading attributes from the source itself.
+        let html = render_str_with_mode("# Title {style=--x:y data-n=a...b}", false).html;
+        assert!(
+            html.contains(r#"style="--x:y""#) && html.contains(r#"data-n="a...b""#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn section_rule_source_attrs_slices_the_block() {
+        assert_eq!(
+            section_rule_source_attrs("--- {style=\"--a\"}\n"),
+            Some("{style=\"--a\"}")
+        );
+        assert_eq!(section_rule_source_attrs("&mdash; {a=b}"), Some("{a=b}"));
+        assert_eq!(section_rule_source_attrs("--- &#123;a&#125;"), None);
+    }
+
     // ============ Raw HTML URL tests ============
 
     /// The `href` a markdown link to `path` gets on a non-index page.
@@ -5756,6 +6165,95 @@ mod tests {
             html.contains(r#"data-background-image="../../../static/bg.png""#),
             "{html}"
         );
+    }
+
+    /// The deck's default background from `slides.background_image`, as the
+    /// render resolves it for a page with the given build-mode depth.
+    fn deck_background(value: &str, url_depth: Option<usize>) -> Option<String> {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let base = plain_options(root, url_depth.is_none());
+        let opts = RenderOptions {
+            link_transform_config: LinkTransformConfig {
+                url_depth,
+                ..base.link_transform_config.clone()
+            },
+            ..base
+        };
+        let content =
+            format!("---\ntype: slides\nslides:\n  background_image: \"{value}\"\n---\n\nA\n");
+        render_str(&content, &root.join("deck.md"), opts)
+            .unwrap()
+            .slides
+            .expect("a slides map")
+            .settings
+            .background_image
+    }
+
+    /// `slides.background_image` resolves against the note exactly like
+    /// `![](…)` on the same page: server mode, a static build at any depth (a
+    /// note three folders down), root-relative, and external URLs untouched.
+    #[test]
+    fn deck_background_frontmatter_is_rewritten_like_an_image_src() {
+        for depth in [None, Some(0), Some(3)] {
+            for path in [
+                "images/x.png",
+                "../shared/bg.jpg",
+                "/images/x.png",
+                "https://example.com/bg.png",
+            ] {
+                assert_eq!(
+                    deck_background(path, depth),
+                    Some(image_src(path, depth)),
+                    "depth {depth:?}, {path}"
+                );
+            }
+        }
+        // Spelled out once, so the comparison above cannot pass vacuously.
+        assert_eq!(
+            deck_background("images/x.png", None).as_deref(),
+            Some("../images/x.png")
+        );
+        assert_eq!(
+            deck_background("/static/bg.png", Some(3)).as_deref(),
+            Some("../../../static/bg.png")
+        );
+        assert_eq!(
+            deck_background("https://example.com/bg.png", Some(3)).as_deref(),
+            Some("https://example.com/bg.png")
+        );
+    }
+
+    #[test]
+    fn deck_settings_frontmatter_reports_bad_entries_and_keeps_good_ones() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let result = render_str(
+            "---\ntype: slides\nslides:\n  transition: spin\n  slide_number: c/t\n---\n\nA\n",
+            &root.join("deck.md"),
+            plain_options(root, true),
+        )
+        .unwrap();
+        let slides = result.slides.expect("a slides map");
+        assert_eq!(
+            slides.settings.slide_number,
+            Some(crate::slides::SlideNumber::CurrentOfTotal)
+        );
+        assert_eq!(slides.settings.transition, None);
+        assert_eq!(slides.problems.len(), 1);
+        assert_eq!(slides.problems[0].field, "slides.transition");
+        // The page itself renders as always.
+        assert!(result.html.contains("A"));
+    }
+
+    #[test]
+    fn deck_settings_absent_without_a_slides_map() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let result = render_str(
+            "---\ntype: slides\n---\n\nA\n",
+            &root.join("deck.md"),
+            plain_options(root, true),
+        )
+        .unwrap();
+        assert_eq!(result.slides, None);
     }
 
     #[test]
@@ -7006,6 +7504,122 @@ mod tests {
         assert!(meta.relationships.is_empty());
     }
 
+    // ==================== Frontmatter only at the top ====================
+    use serde_json::json;
+    //
+    // pulldown-cmark reads a metadata block at any unindented `---` with a
+    // non-blank line after it and a closing `---` further down. In a slides
+    // deck that is every slide whose heading follows its rule directly, so the
+    // slide disappeared, its `*` list was a YAML alias error, and its YAML
+    // replaced the real frontmatter. Frontmatter is now only ever the block at
+    // the very start (`crate::frontmatter`).
+
+    const DECK: &str = "---\ntitle: Deck\nauthor: Ann\ntype: slides\n---\n\n# Deck\n\n\
+        ---\n## Quick navigation\n\n* In-links (backlinks)\n* Out-links\n\n\
+        ---\n## Flashcards\n---\n\nEnd.\n";
+
+    #[test]
+    fn mid_document_dashes_are_not_a_frontmatter_error() {
+        let result = render_str_with_mode(DECK, false);
+        assert_eq!(result.frontmatter_error, None);
+    }
+
+    #[test]
+    fn mid_document_dashes_render_as_slides() {
+        let html = render_str_with_mode(DECK, false).html;
+        for text in [
+            "Quick navigation",
+            "In-links (backlinks)",
+            "Out-links",
+            "Flashcards",
+            "End.",
+        ] {
+            assert!(html.contains(text), "{text:?} missing from {html}");
+        }
+        assert!(html.contains("<section"), "slides are sections: {html}");
+    }
+
+    #[test]
+    fn a_later_dash_block_never_replaces_the_frontmatter() {
+        let result = render_str_with_mode(DECK, false);
+        let get = |key: &str| result.frontmatter.get(key).and_then(|v| v.as_str());
+        assert_eq!(get("author"), Some("Ann"));
+        assert_eq!(get("type"), Some("slides"));
+        assert_eq!(get("title"), Some("Deck"));
+    }
+
+    #[test]
+    fn scan_metadata_ignores_later_dash_blocks() {
+        let meta = extract_metadata_from_bytes(Path::new("deck.md"), DECK.as_bytes());
+        assert_eq!(meta.metadata.get("author"), Some(&json!("Ann")));
+        assert_eq!(meta.metadata.get("type"), Some(&json!("slides")));
+
+        // The H1 title fallback reads past a `---` block that is not at the top
+        // (the old parse swallowed everything between the two rules).
+        let source = "---\nauthor: Ann\n---\n\n---\n# Inside a slide\n---\n";
+        let meta = extract_metadata_from_bytes(Path::new("deck.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Inside a slide")));
+        assert_eq!(meta.metadata.get("author"), Some(&json!("Ann")));
+
+        // A file starting with a rule and no frontmatter at all.
+        let source = "---\n\n# Plain\n\n---\nx: y\n---\n";
+        let meta = extract_metadata_from_bytes(Path::new("plain.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Plain")));
+        assert!(!meta.metadata.contains_key("x"));
+    }
+
+    #[test]
+    fn parse_ignores_later_dash_blocks() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(DECK.as_bytes()).unwrap();
+        let doc = parse(file.path()).unwrap();
+        assert_eq!(doc.frontmatter.get("author"), Some(&json!("Ann")));
+        assert!(doc.headings.iter().any(|h| h.text == "Quick navigation"));
+        assert_eq!(
+            doc.events()
+                .filter(|e| matches!(e, Event::Start(Tag::MetadataBlock(_))))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn source_lines_after_frontmatter_are_unchanged() {
+        // Line numbers count the frontmatter: the body is parsed on its own
+        // but its offsets are shifted back into the file.
+        let html = render_review(
+            "---\ntitle: T\n---\n\nPara one.\n\n---\n## Slide\n\n* item\n",
+            false,
+        )
+        .await;
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">Para one.</p>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<h2 data-mbr-line="8""#), "{html}");
+        assert!(html.contains(r#"<li data-mbr-line="10">"#), "{html}");
+    }
+
+    #[test]
+    fn leading_frontmatter_errors_are_still_reported() {
+        let result = render_str_with_mode("---\ntags:\n\t* a\n---\n# H\n", false);
+        assert!(result.frontmatter_error.is_some());
+        // ...but only the leading block's.
+        let result = render_str_with_mode("---\ntitle: T\n---\n\n---\n* a\n---\n", false);
+        assert_eq!(result.frontmatter_error, None);
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("T")));
+    }
+
+    #[test]
+    fn dots_closer_and_bom_with_later_dash_blocks() {
+        let source = "\u{feff}---\ntitle: Dots\n...\n\n---\n## X\n---\n";
+        let result = render_str_with_mode(source, false);
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("Dots")));
+        assert!(result.html.contains("X"), "{}", result.html);
+        let meta = extract_metadata_from_bytes(Path::new("d.md"), source.as_bytes());
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Dots")));
+    }
+
     // ==================== UTF-8 BOM handling ====================
 
     const BOM_DOC: &str = "\u{feff}---\ntitle: My Page\ntags:\n  - alpha\n---\n\nBody text.\n";
@@ -7681,23 +8295,21 @@ mod tests {
         }
     }
 
-    /// The gotcha this whole remap exists for. `mark_incomplete_blocks` inserts
-    /// a wash span behind an *already emitted* `Start`, which shifts every
-    /// output index recorded after it. Removing the `shift_from` call in
-    /// `mark_incomplete_blocks` makes this test fail.
+    /// The shape the remap was built for. `mark_incomplete_blocks` inserts a
+    /// wash span behind already-emitted events, which shifts every output index
+    /// recorded after the insert point.
     ///
     /// # Why this fixture
     ///
-    /// The insert lands at `frame.start_idx + 1`, so it only shifts anything
-    /// when the frame's start is *not* the last thing in `output` — i.e. when a
+    /// A fenced code block in a **tight** list item is the one shape where a
     /// complete nested block sits between the frame's `Start` and its own first
-    /// text. A nested **list** does not produce that: `- - inner` followed by an
-    /// indented line makes the second line a lazy continuation of the *inner*
-    /// item, and separating them with a blank line wraps the outer text in its
-    /// own `Paragraph` frame, whose insert is an append. A fenced code block in
-    /// a **tight** list item is the shape that does it: the item's first text
-    /// arrives after `End(CodeBlock)`, with the item frame still text-less, so
-    /// the span is inserted behind the code block's already-recorded slot.
+    /// text: the item's first text arrives after `End(CodeBlock)`, with the item
+    /// frame still text-less. The insert used to land at `start_idx + 1`, in
+    /// front of the `<pre>` (wrapping it, and needing `shift_from` to keep the
+    /// `<pre>`'s record). It now lands after `</pre>`, so the span covers only
+    /// the item's own text and the `<pre>` keeps its line with nothing to shift.
+    /// (A nested **list** cannot produce the shape: `- - inner` + an indented
+    /// line makes the second line a lazy continuation of the inner item.)
     #[tokio::test]
     async fn block_lines_survive_pass_three_insertion() {
         let md = concat!(
@@ -7713,10 +8325,15 @@ mod tests {
             html.contains(INCOMPLETE_SPAN_PREFIX),
             "the insertion really did happen: {html}"
         );
-        // Recorded before the insert, and therefore the record that needs the
-        // `+1`. Without `shift_from` it addresses the inserted span instead —
-        // an `Event::Html`, which no writer arm asks for a line — so the `<pre>`
-        // silently loses its attribute.
+        let pre_end = html.find("</pre>").expect("code block rendered");
+        assert!(
+            html.find(INCOMPLETE_SPAN_PREFIX)
+                .is_some_and(|at| at > pre_end),
+            "the wash opens after the code block, not around it: {html}"
+        );
+        // Recorded before the insert. Had the span gone in front of it, the
+        // record would need the `+1` or it would address the span — an
+        // `Event::Html`, which no writer arm asks for a line.
         assert_eq!(
             block_line_of_tag(&html, "<pre"),
             Some(1),
@@ -7733,6 +8350,195 @@ mod tests {
             block_line_of(&html, "Later paragraph"),
             Some(6),
             "the later paragraph is on line 6: {html}"
+        );
+    }
+
+    /// The inner HTML of every incomplete-marker wash in `html`, outermost
+    /// first, matching each opening `<span` to its `</span>` by depth.
+    pub(super) fn wash_bodies(html: &str) -> Vec<&str> {
+        html.match_indices(INCOMPLETE_SPAN_PREFIX)
+            .map(|(at, _)| {
+                let body_at = at + html[at..].find('>').expect("a closed tag") + 1;
+                let mut depth = 1usize;
+                let mut cursor = body_at;
+                loop {
+                    let rest = &html[cursor..];
+                    let open = rest.find("<span");
+                    let close = rest.find("</span>").expect("an unclosed wash span");
+                    match open {
+                        Some(o) if o < close => {
+                            depth += 1;
+                            cursor += o + "<span".len();
+                        }
+                        _ => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return &html[body_at..cursor + close];
+                            }
+                            cursor += close + "</span>".len();
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Block-level tags a `<span>` may not contain.
+    const BLOCK_TAGS: &[&str] = &[
+        "<ul",
+        "<ol",
+        "<li",
+        "<pre",
+        "<blockquote",
+        "<table",
+        "<p>",
+        "<p ",
+        "<div",
+        "<hr",
+        "<h1",
+        "<h2",
+        "<h3",
+        "<h4",
+        "<h5",
+        "<h6",
+        "<dl",
+        "<section",
+    ];
+
+    /// Whether `html`'s elements nest properly: every close tag closes the most
+    /// recently opened element. Void elements are skipped.
+    pub(super) fn is_well_nested(html: &str) -> bool {
+        const VOID: &[&str] = &["input", "br", "hr", "img", "meta", "source", "wbr", "col"];
+        let mut stack: Vec<&str> = Vec::new();
+        let mut rest = html;
+        while let Some(at) = rest.find('<') {
+            let tag_end = match rest[at..].find('>') {
+                Some(end) => at + end,
+                None => return false,
+            };
+            let tag = &rest[at + 1..tag_end];
+            rest = &rest[tag_end + 1..];
+            if tag.starts_with('!') || tag.ends_with('/') {
+                continue;
+            }
+            if let Some(name) = tag.strip_prefix('/') {
+                if stack.pop() != Some(name.trim()) {
+                    return false;
+                }
+                continue;
+            }
+            let name = tag.split([' ', '\n', '\t']).next().unwrap_or_default();
+            if !VOID.contains(&name) {
+                stack.push(name);
+            }
+        }
+        stack.is_empty()
+    }
+
+    /// The wash on a list item covers only the item's own inline content and
+    /// closes before any nested block (#bug: `<ul>` inside an inline `<span>`
+    /// painted a stray wash around the nested list). Also checks that every
+    /// `data-mbr-line` is what the render without highlighting gives, and that
+    /// each anchor still names its marker's line.
+    #[tokio::test]
+    async fn wash_closes_before_a_nested_block() {
+        struct Case {
+            name: &'static str,
+            md: &'static str,
+            /// Each wash's inner HTML, in document order (anchors stripped).
+            washes: &'static [&'static str],
+            anchors: &'static [u32],
+        }
+        let cases = [
+            Case {
+                name: "tight item over a nested list (the kanban card)",
+                md: concat!(
+                    "* TODO: card title marker\n",
+                    "  * first content line\n",
+                    "  * [ ] a task\n",
+                    "* Normal card\n",
+                    "  * TODO: content marker\n",
+                ),
+                washes: &["TODO: card title marker", "TODO: content marker"],
+                anchors: &[1, 5],
+            },
+            Case {
+                name: "tight item over a fenced code block",
+                md: "- TODO: fix\n  ```\n  TODO in code\n  ```\n",
+                washes: &["TODO: fix"],
+                anchors: &[1],
+            },
+            Case {
+                name: "tight item over a blockquote",
+                md: "- TODO: quote\n  > quoted\n",
+                washes: &["TODO: quote"],
+                anchors: &[1],
+            },
+            Case {
+                name: "loose item",
+                md: "- TODO: loose\n\n  - nested\n",
+                washes: &["TODO: loose"],
+                anchors: &[1],
+            },
+            Case {
+                name: "marker only in the nested item",
+                md: "- parent\n  - TODO: child\n",
+                washes: &["TODO: child"],
+                anchors: &[2],
+            },
+            Case {
+                name: "marker at two levels",
+                md: "- TODO: one\n  - TODO: two\n    - three\n",
+                washes: &["TODO: one", "TODO: two"],
+                anchors: &[1, 2],
+            },
+            Case {
+                name: "inline markup before the marker",
+                md: "- **TODO** bold\n  - child\n",
+                washes: &["<strong>TODO</strong> bold"],
+                anchors: &[1],
+            },
+        ];
+        for case in cases {
+            let html = render_review(case.md, true).await;
+            let bodies: Vec<String> = wash_bodies(&html)
+                .into_iter()
+                .map(without_marker_ids)
+                .collect();
+            assert_eq!(bodies, case.washes, "{}: {html}", case.name);
+            assert!(is_well_nested(&html), "{}: badly nested: {html}", case.name);
+            assert_eq!(
+                marker_anchor_lines(&html),
+                case.anchors,
+                "{}: {html}",
+                case.name
+            );
+            assert_eq!(
+                emitted_block_lines(&html),
+                emitted_block_lines(&render_review(case.md, false).await),
+                "{}: data-mbr-line must not move: {html}",
+                case.name
+            );
+        }
+    }
+
+    /// A task item's wash keeps its checkbox (the historical whole-item wash)
+    /// and still stops at the nested list.
+    #[tokio::test]
+    async fn task_item_wash_stops_at_its_children() {
+        let md = "* [ ] TODO: x\n  * child\n";
+        let html = render_review(md, true).await;
+        let bodies = wash_bodies(&html);
+        assert_eq!(bodies.len(), 1, "{html}");
+        assert!(bodies[0].contains("TODO: x"), "{html}");
+        assert!(
+            !BLOCK_TAGS.iter().any(|tag| bodies[0].contains(tag)),
+            "{html}"
+        );
+        assert!(is_well_nested(&html), "{html}");
+        assert!(
+            html.contains("<li data-mbr-line=\"2\">child</li>"),
+            "{html}"
         );
     }
 
@@ -8394,6 +9200,137 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
+    /// One generated list line: nesting depth (clamped to one more than the
+    /// previous line's), whether it starts with a marker, and what follows it.
+    fn nested_list_source(lines: &[(usize, bool, u8)], loose: bool) -> String {
+        let mut md = String::new();
+        let mut previous_depth = 0usize;
+        for (n, &(depth, marked, child)) in lines.iter().enumerate() {
+            let depth = if n == 0 {
+                0
+            } else {
+                depth.min(previous_depth + 1)
+            };
+            previous_depth = depth;
+            let indent = "  ".repeat(depth);
+            let text = if marked { "TODO: item" } else { "item" };
+            let task = if child == 4 { "[ ] " } else { "" };
+            md.push_str(&format!("{indent}- {task}{text} {n}\n"));
+            let inner = format!("{indent}  ");
+            match child {
+                1 => md.push_str(&format!("{inner}```\n{inner}TODO code\n{inner}```\n")),
+                2 => md.push_str(&format!("{inner}> TK quoted\n")),
+                3 => md.push_str(&format!("{inner}| A |\n{inner}|---|\n{inner}| TK |\n")),
+                _ => {}
+            }
+            if loose {
+                md.push('\n');
+            }
+        }
+        md
+    }
+
+    fn render_marked(md: &str, mark_incomplete: bool) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let markers: Vec<String> = ["TK", "TODO", "FIXME", "XXX"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        let options = RenderOptions {
+            root_path: root,
+            oembed_timeout_ms: 0,
+            link_transform_config: crate::link_transform::LinkTransformConfig::default(),
+            oembed_cache: None,
+            server_mode: true,
+            transcode_enabled: false,
+            valid_tag_sources: HashSet::new(),
+            review: ReviewLines::Emit,
+            mark_incomplete,
+            incomplete_markers: &markers,
+            wikilink_index: None,
+            math_fences: true,
+        };
+        render_str(md, &root.join("note.md"), options).unwrap().html
+    }
+
+    fn block_line_values(html: &str) -> Vec<&str> {
+        const ATTR: &str = "data-mbr-line=\"";
+        html.match_indices(ATTR)
+            .map(|(at, _)| {
+                let rest = &html[at + ATTR.len()..];
+                &rest[..rest.find('"').expect("unterminated")]
+            })
+            .collect()
+    }
+
+    proptest! {
+        /// For any nested list with markers at any level and block children
+        /// (fences, quotes, tables) under any item: no wash wraps a block
+        /// element, the page stays well nested, every `data-mbr-line` is what
+        /// the render without highlighting gives, and no anchor id repeats.
+        #[test]
+        fn a_wash_never_wraps_a_block(
+            lines in proptest::collection::vec((0usize..4, any::<bool>(), 0u8..5), 1..10),
+            loose in any::<bool>(),
+        ) {
+            let md = nested_list_source(&lines, loose);
+            let html = render_marked(&md, true);
+            prop_assert!(super::tests::is_well_nested(&html), "badly nested:\n{}\n{}", md, html);
+            for body in super::tests::wash_bodies(&html) {
+                for tag in ["<ul", "<ol", "<li", "<pre", "<blockquote", "<table", "<p>", "<p ", "<div"] {
+                    prop_assert!(!body.contains(tag), "{} in a wash:\n{}\n{}", tag, md, html);
+                }
+            }
+            let plain = render_marked(&md, false);
+            prop_assert_eq!(block_line_values(&html), block_line_values(&plain), "{}", md);
+            let ids: Vec<&str> = html.match_indices("id=\"mbr-marker-").map(|(at, _)| {
+                let rest = &html[at..];
+                &rest[..rest[4..].find('"').expect("unterminated") + 5]
+            }).collect();
+            let unique: HashSet<&&str> = ids.iter().collect();
+            prop_assert_eq!(unique.len(), ids.len(), "{}", html);
+        }
+    }
+
+    proptest! {
+        /// A `---`-delimited block anywhere below the top never changes the
+        /// frontmatter, never reports a frontmatter error, and never hides
+        /// its own lines — in the render and in the repository scan alike.
+        #[test]
+        fn a_mid_body_block_never_touches_the_frontmatter(
+            key in "[a-z]{1,6}",
+            value in "[a-z*&!|> ]{0,8}",
+            blank_before in any::<bool>(),
+        ) {
+            let base = "---\ntitle: T\nauthor: A\n---\n\n# H\n";
+            let gap = if blank_before { "\n" } else { "" };
+            let source = format!("{base}{gap}\n---\n{key}: {value}\n---\n");
+            let root = Path::new("/nonexistent-mbr-test-root");
+            let options = || RenderOptions {
+                root_path: root,
+                oembed_timeout_ms: 0,
+                link_transform_config: crate::link_transform::LinkTransformConfig::default(),
+                oembed_cache: None,
+                server_mode: false,
+                transcode_enabled: false,
+                valid_tag_sources: HashSet::new(),
+                review: ReviewLines::Omit,
+                mark_incomplete: false,
+                incomplete_markers: &[],
+                wikilink_index: None,
+                math_fences: true,
+            };
+            let file = root.join("note.md");
+            let before = render_str(base, &file, options()).unwrap();
+            let after = render_str(&source, &file, options()).unwrap();
+            prop_assert_eq!(&after.frontmatter, &before.frontmatter);
+            prop_assert_eq!(after.frontmatter_error, None);
+            prop_assert!(after.html.contains(key.as_str()), "{}", after.html);
+            let scanned = extract_metadata_from_bytes(&file, source.as_bytes());
+            prop_assert_eq!(scanned.metadata, extract_metadata_from_bytes(&file, base.as_bytes()).metadata);
+        }
+    }
+
     proptest! {
         /// Anchor ids must be unique for any sequence of heading texts —
         /// duplicates silently break in-page TOC links and permalinks.
@@ -8408,6 +9345,52 @@ mod proptests {
                 .collect();
             let unique: HashSet<&String> = ids.iter().collect();
             prop_assert_eq!(unique.len(), ids.len());
+        }
+    }
+
+    proptest! {
+        /// A section attribute value made of characters that form no inline
+        /// markdown reaches the HTML exactly as written — in particular `--`,
+        /// `...` and quotes, which smart punctuation would otherwise rewrite.
+        #[test]
+        fn section_attr_values_reach_html_verbatim(
+            double in "[A-Za-z0-9 .,:;#()/%+'-]{0,30}",
+            single in "[A-Za-z0-9 .,:;#()/%+\"-]{0,30}",
+        ) {
+            let md = format!("A\n\n--- {{data-d=\"{double}\" data-s='{single}'}}\n\nB");
+            let html = render_str(
+                &md,
+                Path::new("/nonexistent/deck.md"),
+                RenderOptions {
+                    root_path: Path::new("/nonexistent"),
+                    oembed_timeout_ms: 0,
+                    link_transform_config: LinkTransformConfig {
+                        markdown_extensions: vec!["md".to_string()],
+                        index_file: "index.md".to_string(),
+                        is_index_file: false,
+                        url_depth: None,
+                        current_page_url: String::new(),
+                        markdown_page_probe: None,
+                    },
+                    oembed_cache: None,
+                    server_mode: true,
+                    transcode_enabled: false,
+                    valid_tag_sources: HashSet::new(),
+                    review: ReviewLines::Omit,
+                    mark_incomplete: false,
+                    incomplete_markers: &[],
+                    wikilink_index: None,
+                    math_fences: true,
+                },
+            )
+            .unwrap()
+            .html;
+            let expected = format!(
+                "<section data-d=\"{}\" data-s=\"{}\">",
+                double,
+                single.replace('"', "&quot;")
+            );
+            prop_assert!(html.contains(&expected), "expected {expected} in {html}");
         }
     }
 

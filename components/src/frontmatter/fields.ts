@@ -19,6 +19,8 @@
  *   `docs/markdown/relationships.md`.
  * - Tags: `crates/mbr-core/src/config.rs` (`TagSource`, `default_tag_sources`).
  * - `order`/`pinned`: `crates/mbr-core/src/sorting.rs` (sort fields).
+ * - `slides` (deck settings): `crates/mbr-core/src/slides.rs`
+ *   (`SlideSettings`), whose value sets `../slide-settings.ts` mirrors.
  * - OKF v0.2: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
  *   (§5.1 provenance, §5.2–5.3 trust, §5.4–5.5 lifecycle, §7 actors, §10.2
  *   Attested Computation). OKF consumers must keep unknown keys, which the
@@ -26,6 +28,7 @@
  */
 
 import type { RelationTypeConfig } from '../graph/relationship-graph.js';
+import { SLIDE_NUMBER_VALUES, TRANSITIONS, TRANSITION_SPEEDS } from '../slide-settings.js';
 
 // ============================================================================
 // Types
@@ -88,6 +91,11 @@ export interface FieldDef {
   readonly singleOrList?: boolean;
   /** Superseded spelling; still read, not offered for new notes. */
   readonly deprecated?: string;
+  /**
+   * For `enum`: `enumValues` are the only values mbr reads (deck settings),
+   * so another one gets a hint. Free text stays allowed, as for every enum.
+   */
+  readonly closed?: boolean;
 }
 
 /** A tag source as `window.__MBR_CONFIG__.tagSources` carries it. */
@@ -122,6 +130,28 @@ export function isContactType(fm: Frontmatter): boolean {
 }
 
 const isPerson = (fm: Frontmatter): boolean => typeOf(fm) === 'person';
+
+/**
+ * A slide deck: `type: slides`, or `slides` among the `style` classes (a
+ * string, space-separated, or a list), as `templates.rs::body_class_list`.
+ */
+export function isSlideDeck(fm: Frontmatter): boolean {
+  if (typeOf(fm) === 'slides') return true;
+  const style = fm.style;
+  const classes = Array.isArray(style) ? style : typeof style === 'string' ? style.split(/\s+/) : [];
+  return classes.some((c) => typeof c === 'string' && c.trim() === 'slides');
+}
+
+/** A closed `enum` deck setting. */
+const slideEnum = (key: string, label: string, values: readonly string[], help: string): FieldDef => ({
+  key,
+  kind: 'enum',
+  label,
+  group: 'mbr',
+  help,
+  closed: true,
+  enumValues: values.map((value) => ({ value })),
+});
 
 /** OKF §10.2: the Attested Computation fields apply to that type only. */
 export const ATTESTED_COMPUTATION_TYPE = 'Attested Computation';
@@ -296,6 +326,27 @@ export function builtinCatalog(opts: CatalogOptions = {}): FieldCatalog {
     { key: 'order', kind: 'number', label: 'Order', group: 'mbr', help: 'Sort position when the listing sorts by `order`.' },
     { key: 'pinned', kind: 'bool', label: 'Pinned', group: 'mbr', help: 'Sorts first when the listing sorts by `pinned`.' },
     relationshipsField(relationshipTypes),
+    {
+      key: 'slides',
+      kind: 'map',
+      label: 'Slide settings',
+      group: 'mbr',
+      when: isSlideDeck,
+      help: 'Deck-wide settings; each overrides the repository’s [slides] config. A slide’s own --- {data-…} attributes still win.',
+      children: [
+        slideEnum('transition', 'Transition', TRANSITIONS, 'How slides change (default slide).'),
+        slideEnum('transition_speed', 'Transition speed', TRANSITION_SPEEDS, 'Default default.'),
+        slideEnum('background_transition', 'Background transition', TRANSITIONS, 'How backgrounds change (default fade).'),
+        slideEnum('slide_number', 'Slide number', SLIDE_NUMBER_VALUES, 'true shows h.v; c/t is “3/12”. Default hidden.'),
+        { key: 'controls', kind: 'bool', label: 'Controls', group: 'mbr', help: 'The arrow controls (default shown).' },
+        { key: 'progress', kind: 'bool', label: 'Progress bar', group: 'mbr', help: 'Default shown.' },
+        text('background_image', 'Background image', 'mbr', {
+          help: 'For every slide without a background of its own; a relative path resolves from the note, like an image.',
+        }),
+        text('background_size', 'Background size', 'mbr', { help: 'CSS background-size (default cover).' }),
+        { key: 'background_opacity', kind: 'number', label: 'Background opacity', group: 'mbr', help: '0 to 1 (default 1).' },
+      ],
+    },
 
     // --- contacts (contact.rs `Contact::from_map`) ---------------------------
     text('prefix', 'Prefix', 'contact', { when: isPerson }),
@@ -616,6 +667,10 @@ export function validate(frontmatter: Frontmatter, catalog: FieldCatalog): Field
     if (value === undefined) return;
     if (def.key === 'status' && def.group === 'okf' && typeof value === 'string' && !OKF_STATUSES.some((s) => s.value === value)) {
       hints.push({ path, message: `OKF status is one of draft, stable or deprecated; “${value}” is not.` });
+    }
+    if (def.kind === 'enum' && def.closed && !def.enumValues?.some((o) => o.value === String(value))) {
+      const known = (def.enumValues ?? []).map((o) => o.value).join(', ');
+      hints.push({ path, message: `mbr ignores “${String(value)}” here; expected one of ${known}.` });
     }
     if (def.kind === 'datetime' && typeof value === 'string' && value.trim() !== '' && !hasUtcOffset(value)) {
       hints.push({ path, message: 'Timestamps should carry a UTC offset (Z or ±HH:MM).' });

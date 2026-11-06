@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use pulldown_cmark::{Event, Parser};
+use pulldown_cmark::Event;
 use serde::Deserialize;
 
 use crate::markdown::markdown_options;
@@ -29,7 +29,7 @@ struct Case {
 }
 
 fn renderer_math(source: &str) -> Vec<MathSpan> {
-    Parser::new_ext(source, markdown_options())
+    crate::frontmatter::parse(source, markdown_options())
         .filter_map(|event| match event {
             Event::InlineMath(tex) => Some(MathSpan {
                 display: false,

@@ -27,6 +27,7 @@ use crate::link_transform::make_relative_url;
 use crate::markdown::HeadingInfo;
 use crate::readability::ReadabilityScores;
 use crate::repo::MarkdownInfo;
+use crate::slides::SlideSettings;
 use crate::tag_index::{TagInfo, TaggedPage};
 use crate::task_query::IncludeFilter;
 use crate::url_helpers::{
@@ -352,6 +353,9 @@ pub struct MarkdownPageParams<'a> {
     pub current_url: &'a str,
     /// Sorted sibling pages (JSON objects with `url_path`/`title`).
     pub siblings: &'a [Value],
+    /// The note's own `slides:` frontmatter settings (already validated, its
+    /// `background_image` already resolved against the note), if any.
+    pub slides: Option<&'a SlideSettings>,
 }
 
 /// Repository-level configuration for the markdown-page context builder.
@@ -380,6 +384,8 @@ pub struct MarkdownContextOptions<'a> {
     pub title_suffix: &'a str,
     /// Sibling of [`PageChrome::root_dir`] for markdown pages.
     pub root_dir: Option<&'a Path>,
+    /// The repository's `[slides]` defaults (`config.slides`).
+    pub slides: &'a SlideSettings,
 }
 
 /// Builds the `extra_context` map shared by server-mode and static-build
@@ -468,6 +474,7 @@ pub fn markdown_extra_context(
     ctx.insert("title_prefix".to_string(), json!(opts.title_prefix));
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
     insert_repo_id(&mut ctx, opts.root_dir);
+    insert_slide_settings(&mut ctx, opts.slides, params.slides, url_mode);
 
     // Modified date from file metadata
     if let Some(secs) = params.modified_secs {
@@ -509,6 +516,51 @@ pub fn markdown_extra_context(
     }
 
     ctx
+}
+
+/// Inserts the deck settings as script-safe JSON for `_head.html`:
+/// `slides_config` (the repository's `[slides]` table, page-independent) and
+/// `slides_page` (the note's `slides:` frontmatter). `mbr-slides.ts` merges
+/// them, frontmatter over config, key by key.
+///
+/// A config `background_image` is a site URL — relative to the repository
+/// root, `images/bg.jpg` and `/images/bg.jpg` alike — so it is made
+/// root-absolute here and, in a static build, relative to the page's depth,
+/// which keeps a published site working under any path prefix. External
+/// (`https:`, `data:`, `//host`) values are left alone. The note's own value
+/// was already resolved against the note by the render.
+pub fn insert_slide_settings(
+    ctx: &mut HashMap<String, Value>,
+    config: &SlideSettings,
+    page: Option<&SlideSettings>,
+    url_mode: &UrlMode,
+) {
+    let config = SlideSettings {
+        background_image: config
+            .background_image
+            .as_deref()
+            .map(|url| site_url_for_page(url, url_mode)),
+        ..config.clone()
+    };
+    let script_json = |settings: &SlideSettings| {
+        crate::templates::escape_json_for_script(
+            &serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_string()),
+        )
+    };
+    ctx.insert("slides_config".to_string(), json!(script_json(&config)));
+    ctx.insert(
+        "slides_page".to_string(),
+        json!(script_json(page.unwrap_or(&SlideSettings::UNSET))),
+    );
+}
+
+/// A URL relative to the site root, as `url_mode` emits site URLs; anything
+/// with a scheme or a host, and the empty string, unchanged.
+fn site_url_for_page(url: &str, url_mode: &UrlMode) -> String {
+    if url.is_empty() || crate::url_path::is_external_url(url) {
+        return url.to_string();
+    }
+    url_mode.rewrite(&format!("/{}", url.trim_start_matches('/')))
 }
 
 /// Transforms markdown file info into a JSON value for template rendering.
@@ -934,6 +986,7 @@ mod tests {
             title_prefix: "",
             title_suffix: "",
             root_dir,
+            slides: &SlideSettings::UNSET,
         }
     }
 
@@ -963,6 +1016,7 @@ mod tests {
             modified_secs: Some(1700000000),
             current_url: "/docs/b/",
             siblings: &siblings,
+            slides: None,
         };
         let root_dir = Path::new("/repo/root");
         let ctx = markdown_extra_context(
@@ -1022,6 +1076,7 @@ mod tests {
             modified_secs: None,
             current_url: "/docs/b/",
             siblings: &siblings,
+            slides: None,
         };
         // Static builds never have a live repo to scope storage against.
         let ctx = markdown_extra_context(
@@ -1045,6 +1100,136 @@ mod tests {
         assert!(!ctx.contains_key("next_page"));
     }
 
+    fn slides_ctx(
+        config: &SlideSettings,
+        page: Option<&SlideSettings>,
+        url_mode: &UrlMode,
+    ) -> (Value, Value) {
+        let mut ctx = HashMap::new();
+        insert_slide_settings(&mut ctx, config, page, url_mode);
+        let parse = |key: &str| {
+            serde_json::from_str(ctx[key].as_str().expect("a JSON string")).expect("valid JSON")
+        };
+        (parse("slides_config"), parse("slides_page"))
+    }
+
+    #[test]
+    fn test_slide_settings_default_to_empty_objects() {
+        let (config, page) = slides_ctx(&SlideSettings::UNSET, None, &UrlMode::Absolute);
+        assert_eq!(config, json!({}));
+        assert_eq!(page, json!({}));
+    }
+
+    #[test]
+    fn test_slide_settings_carry_config_and_page_values() {
+        use crate::slides::{SlideNumber, Transition};
+        let config = SlideSettings {
+            transition: Some(Transition::Fade),
+            controls: Some(false),
+            ..SlideSettings::default()
+        };
+        let page = SlideSettings {
+            transition: Some(Transition::Zoom),
+            slide_number: Some(SlideNumber::On),
+            background_image: Some("../bg.png".to_string()),
+            ..SlideSettings::default()
+        };
+        let (config, page) = slides_ctx(&config, Some(&page), &UrlMode::Absolute);
+        assert_eq!(config, json!({"transition": "fade", "controls": false}));
+        // The page's URL was resolved by the render; it is passed through.
+        assert_eq!(
+            page,
+            json!({"transition": "zoom", "slide_number": true, "background_image": "../bg.png"})
+        );
+    }
+
+    /// A config background is a site URL: root-absolute in server mode,
+    /// relative to the page's depth in a static build, external untouched.
+    #[test]
+    fn test_slide_settings_config_background_is_a_site_url() {
+        let with_bg = |url: &str| SlideSettings {
+            background_image: Some(url.to_string()),
+            ..SlideSettings::default()
+        };
+        let cases = [
+            ("images/bg.jpg", UrlMode::Absolute, "/images/bg.jpg"),
+            ("/images/bg.jpg", UrlMode::Absolute, "/images/bg.jpg"),
+            (
+                "images/bg.jpg",
+                UrlMode::RelativeToDepth(2),
+                "../../images/bg.jpg",
+            ),
+            (
+                "/images/bg.jpg",
+                UrlMode::RelativeToDepth(1),
+                "../images/bg.jpg",
+            ),
+            (
+                "/images/bg.jpg",
+                UrlMode::RelativeToDepth(0),
+                "images/bg.jpg",
+            ),
+            (
+                "https://example.com/bg.jpg",
+                UrlMode::RelativeToDepth(2),
+                "https://example.com/bg.jpg",
+            ),
+            (
+                "//cdn.example.com/bg.jpg",
+                UrlMode::Absolute,
+                "//cdn.example.com/bg.jpg",
+            ),
+        ];
+        for (written, mode, expected) in cases {
+            let (config, _) = slides_ctx(&with_bg(written), None, &mode);
+            assert_eq!(config["background_image"], json!(expected), "{written}");
+        }
+    }
+
+    #[test]
+    fn test_slide_settings_json_cannot_break_out_of_script_block() {
+        let page = SlideSettings {
+            background_image: Some("</script><script>alert(1)</script>".to_string()),
+            ..SlideSettings::default()
+        };
+        let mut ctx = HashMap::new();
+        insert_slide_settings(
+            &mut ctx,
+            &SlideSettings::UNSET,
+            Some(&page),
+            &UrlMode::Absolute,
+        );
+        let raw = ctx["slides_page"].as_str().unwrap();
+        assert!(!raw.contains('<'), "{raw}");
+    }
+
+    #[test]
+    fn test_markdown_extra_context_inserts_slide_settings() {
+        let scores = crate::readability::ReadabilityScores {
+            flesch_reading_ease: None,
+            flesch_kincaid_grade: None,
+        };
+        let page = SlideSettings {
+            progress: Some(false),
+            ..SlideSettings::default()
+        };
+        let params = MarkdownPageParams {
+            breadcrumb_path: Path::new("deck"),
+            headings: &[],
+            has_h1: false,
+            word_count: 10,
+            readability: &scores,
+            file_path: "deck.md",
+            modified_secs: None,
+            current_url: "/deck/",
+            siblings: &[],
+            slides: Some(&page),
+        };
+        let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
+        assert_eq!(ctx.get("slides_config"), Some(&json!("{}")));
+        assert_eq!(ctx.get("slides_page"), Some(&json!("{\"progress\":false}")));
+    }
+
     #[test]
     fn test_markdown_extra_context_no_siblings_match() {
         let scores = crate::readability::ReadabilityScores {
@@ -1061,6 +1246,7 @@ mod tests {
             modified_secs: None,
             current_url: "/not-in-list/",
             siblings: &[],
+            slides: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert!(!ctx.contains_key("prev_page"));

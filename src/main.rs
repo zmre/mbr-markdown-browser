@@ -463,6 +463,7 @@ async fn run() -> Result<(), MbrError> {
                 modified_secs,
                 current_url: "",
                 siblings: &[],
+                slides: render_result.slides.as_ref().map(|s| &s.settings),
             },
             &mbr::page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -479,6 +480,7 @@ async fn run() -> Result<(), MbrError> {
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
                 root_dir: None,
+                slides: &config.slides,
             },
             &mbr::page_context::UrlMode::Absolute,
         );

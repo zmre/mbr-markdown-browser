@@ -36,6 +36,22 @@ and subsequent navigation must feel instantaneous to the user.
     .to_string()
 }
 
+/// A slides deck: frontmatter, then 120 slides each opening with `---` directly
+/// followed by a `## Heading` (the pattern pulldown-cmark's metadata-block
+/// option used to read as a YAML block at every slide), a `*` list and prose.
+pub fn deck_markdown() -> String {
+    let mut md = String::with_capacity(48_000);
+    md.push_str(
+        "---\ntitle: Deck\ntype: slides\nauthor: Someone\n---\n\n# Deck\n\nIntro slide.\n\n",
+    );
+    for i in 0..120 {
+        md.push_str(&format!(
+            "---\n## Slide {i}\n\n* First point about topic {i}\n* Second point, with a [link](/docs/{i}/)\n\nSome prose for slide {i} that runs a little longer than one line.\n\n"
+        ));
+    }
+    md
+}
+
 /// Medium markdown (~2,000 words): YAML frontmatter, 8 headings, 3 code blocks,
 /// 5 internal links, 2 external links, 1 wikilink, section attrs. Typical document.
 pub fn medium_markdown() -> String {
