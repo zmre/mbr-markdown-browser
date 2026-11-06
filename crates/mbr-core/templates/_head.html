@@ -23,6 +23,9 @@
       // - flashcardsConcentricThreshold / flashcardsProgressIndicators: the
       //   flashcard deck's Concentric growth threshold and the reading-view
       //   progress indicators (markdown pages only; defaults elsewhere)
+      // - slides / slidesPage: deck settings from config.toml's [slides] and
+      //   from the note's `slides:` frontmatter (markdown pages only; `{}`
+      //   elsewhere). mbr-slides.ts merges them over its built-in defaults
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
         guiMode: {% if gui_mode %}true{% else %}false{% endif %},
@@ -36,6 +39,8 @@
         graphDepth: {{ graph_depth | default(value=2) }},
         flashcardsConcentricThreshold: {{ flashcards_concentric_threshold | default(value=0.7) }},
         flashcardsProgressIndicators: {{ flashcards_progress_indicators | default(value=true) }},
+        slides: {{ slides_config | default(value="{}") | safe }},
+        slidesPage: {{ slides_page | default(value="{}") | safe }},
         repoId: "{{ repo_id | default(value='') | safe }}"
       };
     </script>

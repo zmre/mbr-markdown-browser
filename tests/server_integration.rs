@@ -45,6 +45,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         graph_depth: 2,
         flashcards_concentric_threshold: 0.7,
         flashcards_progress_indicators: true,
+        slides: mbr::slides::SlideSettings::default(),
         title_prefix: String::new(),
         title_suffix: String::new(),
         mark_incomplete: true,
@@ -305,6 +306,81 @@ async fn test_head_config_includes_flashcard_options() {
     let html = server.get_text("/deck/").await;
     assert_html_contains(&html, "flashcardsConcentricThreshold: 0.85,");
     assert_html_contains(&html, "flashcardsProgressIndicators: false,");
+}
+
+/// Deck settings reach `<mbr-slides>` only through `__MBR_CONFIG__`: the
+/// repository's `[slides]` table as `slides`, the note's own `slides:` map as
+/// `slidesPage`, its background already resolved against the note.
+#[tokio::test]
+async fn test_head_config_includes_slide_settings() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "talks/deck.md",
+        "---\ntype: slides\nslides:\n  transition: zoom\n  slide_number: true\n  \
+         background_image: img/bg.png\n---\n\n# One\n\n---\n\n# Two\n",
+    );
+    repo.create_markdown("plain.md", "# Plain\n");
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/plain/").await;
+    assert_html_contains(&html, "slides: {},");
+    assert_html_contains(&html, "slidesPage: {},");
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.slides.transition = Some(mbr::slides::Transition::Fade);
+        c.slides.background_image = Some("images/default.jpg".to_string());
+    })
+    .await;
+    let html = server.get_text("/talks/deck/").await;
+    assert_html_contains(
+        &html,
+        r#"slides: {"transition":"fade","background_image":"/images/default.jpg"},"#,
+    );
+    // `/talks/deck/` is one level below `talks/`, so the note-relative
+    // `img/bg.png` (= `/talks/img/bg.png`) becomes `../img/bg.png`.
+    assert_html_contains(
+        &html,
+        r#"slidesPage: {"transition":"zoom","slide_number":true,"background_image":"../img/bg.png"},"#,
+    );
+}
+
+/// An ignored `slides:` entry and a missing default background are page
+/// problems, listed in `errors.json`; the page itself still renders.
+#[tokio::test]
+async fn test_errors_json_reports_slide_setting_problems_and_missing_background() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "talks/deck.md",
+        "---\ntype: slides\nslides:\n  transition: spin\n  background_image: img/gone.png\n---\n\n# One\n",
+    );
+    repo.create_markdown(
+        "talks/ok.md",
+        "---\ntype: slides\nslides:\n  background_image: img/bg.png\n---\n\n# One\n",
+    );
+    repo.create_static_file("talks/img/bg.png", b"png");
+
+    let server = TestServer::start(&repo).await;
+    assert_eq!(server.get("/talks/deck/").await.status(), 200);
+    let json = get_json(&server, "/talks/deck/errors.json").await;
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["type"] == "slide_setting_problem"
+            && e["field"] == "slides.transition"
+            && e["message"].as_str().unwrap().contains("spin")),
+        "expected slide_setting_problem in {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e["type"] == "broken_media_reference"
+            && e["kind"] == "image"
+            && e["src"] == "../img/gone.png"),
+        "expected the missing background in {errors:?}"
+    );
+
+    let json = get_json(&server, "/talks/ok/errors.json").await;
+    assert!(
+        json["errors"].as_array().unwrap().is_empty(),
+        "an existing background is not a problem: {json}"
+    );
 }
 
 /// The task panel's Show default is a per-repo config option, and the only way

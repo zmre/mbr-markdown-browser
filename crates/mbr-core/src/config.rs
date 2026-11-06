@@ -11,6 +11,7 @@ use figment::{
 };
 
 use crate::errors::ConfigError;
+use crate::slides::SlideSettings;
 use crate::task_query::IncludeFilter;
 
 const DEFAULT_PORT: u16 = 5200;
@@ -767,6 +768,21 @@ pub struct Config {
     /// Default: `"tasks"`.
     #[serde(default = "default_tasks_default_include")]
     pub tasks_default_include: IncludeFilter,
+    /// Deck-wide Reveal.js settings for slide notes: the `[slides]` table
+    /// (`transition`, `transition_speed`, `background_transition`,
+    /// `slide_number`, `controls`, `progress`, `background_image`,
+    /// `background_size`, `background_opacity`). Every key is optional; an
+    /// unset key keeps mbr's built-in deck (transition `slide`, controls and
+    /// progress shown, Reveal's own defaults for the rest). A note's `slides:`
+    /// frontmatter map overrides it key by key, and a slide's own
+    /// `data-*` attributes beat both. Typed, so a typo fails at startup.
+    ///
+    /// Environment: `MBR_SLIDES__TRANSITION=fade` (figment splits on `__`), or
+    /// the whole table as `MBR_SLIDES='{transition="fade"}'`.
+    /// `background_image` here is a site URL, relative to the repository
+    /// root (see `page_context::insert_slide_settings`).
+    #[serde(default)]
+    pub slides: SlideSettings,
     /// Glob patterns whose matching files are left out of the **task index**.
     ///
     /// Each pattern is matched against a markdown file's repository-relative
@@ -914,6 +930,7 @@ impl Default for Config {
             review_enabled: true, // `data-mbr-line` emitted by default (server/GUI only)
             tasks_stamp_done: true, // Stamp @done(...) when a task is completed
             tasks_default_include: default_tasks_default_include(),
+            slides: SlideSettings::default(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
@@ -1207,7 +1224,8 @@ impl Config {
         // so a default can be told from an explicit value (`edit_enabled`).
         let explicit = Figment::new()
             .merge(Toml::file(root_dir.join(".mbr/config.toml")))
-            .merge(Env::prefixed("MBR_"));
+            // `__` nests: `MBR_SLIDES__TRANSITION` is `[slides] transition`.
+            .merge(Env::prefixed("MBR_").split("__"));
         let edit_enabled_is_explicit = explicit.find_value("edit_enabled").is_ok();
         // Kept rather than discarded: figment is the only thing that knows which
         // layer supplied each key, and `static_folder` is trusted differently
@@ -3484,6 +3502,91 @@ mod tests {
         let config = Config::read(repo.path()).expect("env must load");
 
         assert_eq!(config.tasks_default_include, IncludeFilter::Markers);
+    }
+
+    #[test]
+    fn test_default_slides_sets_nothing() {
+        assert!(Config::default().slides.is_empty());
+    }
+
+    #[test]
+    fn test_config_read_slides_table() {
+        use crate::slides::{SlideNumber, Transition, TransitionSpeed};
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "[slides]\ntransition = \"fade\"\ntransition_speed = \"slow\"\n\
+             slide_number = \"c/t\"\ncontrols = false\nbackground_image = \"/images/bg.jpg\"\n\
+             background_opacity = 0.5\n",
+        ));
+
+        let config = Config::read(repo.path()).expect("a [slides] table must load");
+
+        assert_eq!(config.slides.transition, Some(Transition::Fade));
+        assert_eq!(config.slides.transition_speed, Some(TransitionSpeed::Slow));
+        assert_eq!(
+            config.slides.slide_number,
+            Some(SlideNumber::CurrentOfTotal)
+        );
+        assert_eq!(config.slides.controls, Some(false));
+        assert_eq!(config.slides.progress, None);
+        assert_eq!(
+            config.slides.background_image.as_deref(),
+            Some("/images/bg.jpg")
+        );
+    }
+
+    #[test]
+    fn test_config_read_rejects_an_unknown_slides_transition() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[slides]\ntransition = \"spin\"\n"));
+        let err = Config::read(repo.path()).expect_err("an unknown transition must fail");
+        assert!(matches!(
+            err,
+            crate::MbrError::Config(ConfigError::ParseFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_config_read_rejects_an_unknown_slides_key() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[slides]\ntransiton = \"fade\"\n"));
+        assert!(Config::read(repo.path()).is_err());
+    }
+
+    #[test]
+    fn test_config_read_rejects_an_out_of_range_background_opacity() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[slides]\nbackground_opacity = 2\n"));
+        assert!(Config::read(repo.path()).is_err());
+    }
+
+    /// `MBR_SLIDES__TRANSITION` nests into `[slides]`, overrides the file's
+    /// value for that key and leaves the file's other keys alone.
+    #[test]
+    fn test_config_read_slides_env_overrides_one_key() {
+        use crate::slides::{SlideNumber, Transition};
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "[slides]\ntransition = \"fade\"\nslide_number = true\n",
+        ));
+        let _env = EnvVars::set(&[
+            ("MBR_SLIDES__TRANSITION", "zoom"),
+            ("MBR_SLIDES__CONTROLS", "false"),
+        ]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert_eq!(config.slides.transition, Some(Transition::Zoom));
+        assert_eq!(config.slides.controls, Some(false));
+        assert_eq!(config.slides.slide_number, Some(SlideNumber::On));
+    }
+
+    #[test]
+    fn test_config_read_slides_env_rejects_a_bad_value() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+        let _env = EnvVars::set(&[("MBR_SLIDES__TRANSITION", "spin")]);
+        assert!(Config::read(repo.path()).is_err());
     }
 
     /// A `.mbr/config.toml` written before this option existed must still load.

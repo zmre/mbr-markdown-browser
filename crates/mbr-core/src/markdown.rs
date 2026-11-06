@@ -242,6 +242,14 @@ pub struct MarkdownRenderResult {
     /// is rewritten with the same link transform the body's images get, so a
     /// relative portrait resolves from the page's trailing-slash URL.
     pub contact: Option<crate::contact::Contact>,
+    /// The note's `slides:` frontmatter map (deck settings), when it has one:
+    /// the settings that parsed and the entries that did not.
+    ///
+    /// Read from the raw YAML, like `contact`, because the simplified
+    /// `frontmatter` flattens the map and stringifies a float. A
+    /// `background_image` is rewritten with the image transform, so it
+    /// resolves relative to the note exactly like `![](…)` on the same page.
+    pub slides: Option<crate::slides::SlideFrontmatter>,
 }
 
 struct EventState {
@@ -431,6 +439,23 @@ fn section_rule_source_attrs(paragraph_source: &str) -> Option<&str> {
     let open = paragraph_source.find('{')?;
     let close = paragraph_source.rfind('}')?;
     paragraph_source.get(open..=close).filter(|_| open < close)
+}
+
+/// Whether `events` holds nothing but the note's frontmatter (or nothing at
+/// all): what precedes a `--- {attrs}` rule that styles the first section.
+///
+/// Blank lines produce no events, so "only frontmatter and whitespace" is
+/// exactly this. Anything else — text, a heading, an HTML comment, a plain
+/// `---` — is content, and an attributed rule after it opens a new section.
+fn only_frontmatter(events: &[Event<'_>]) -> bool {
+    matches!(
+        events,
+        [] | [
+            Event::Start(Tag::MetadataBlock(_)),
+            Event::Text(_),
+            Event::End(TagEnd::MetadataBlock(_)),
+        ]
+    )
 }
 
 /// Maps a non-standard [remark-hint](https://github.com/sergioramos/remark-hint)
@@ -1468,6 +1493,22 @@ fn collect_events_and_headings<'a>(
                         // slot, so the table has to shrink with the vector.
                         pop_event(&mut events, text_lines, block_lines); // Text
                         pop_event(&mut events, text_lines, block_lines); // Start(Paragraph)
+
+                        // A leading attributed rule styles the first section
+                        // rather than opening a second one: emitting a `Rule`
+                        // here would leave section 0 empty (an empty first
+                        // slide) and put the attributes on section 1. No
+                        // `Rule` means the writer's count never advances, so
+                        // index 0 is the one it opens with.
+                        if let Some(attrs) = parsed
+                            .as_ref()
+                            .filter(|_| only_frontmatter(&events))
+                            .filter(|_| !section_attrs.contains_key(&0))
+                        {
+                            debug_assert_eq!(section_index, 0);
+                            section_attrs.insert(0, attrs.clone());
+                            continue;
+                        }
 
                         // Emit a Rule event instead
                         push_event(
@@ -2779,6 +2820,18 @@ fn finalize_render(
             contact
         });
 
+    let slides = state
+        .metadata_parsed
+        .as_ref()
+        .and_then(crate::slides::SlideSettings::from_frontmatter)
+        .map(|mut slides| {
+            slides.settings.background_image = slides
+                .settings
+                .background_image
+                .map(|src| transform_link(&src, &state.link_transform_config));
+            slides
+        });
+
     Ok(MarkdownRenderResult {
         frontmatter,
         frontmatter_error: state.frontmatter_error,
@@ -2791,6 +2844,7 @@ fn finalize_render(
         syllable_count: state.syllable_count,
         ambiguous_wikilinks: state.ambiguous_wikilinks,
         contact,
+        slides,
     })
 }
 
@@ -5540,6 +5594,135 @@ mod tests {
         );
     }
 
+    /// A render with `data-mbr-line` on, for the leading-rule tests.
+    fn render_with_lines(content: &str) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let opts = RenderOptions {
+            review: ReviewLines::Emit,
+            ..plain_options(root, true)
+        };
+        render_str(content, &root.join("deck.md"), opts)
+            .unwrap()
+            .html
+    }
+
+    #[test]
+    fn leading_section_rule_styles_the_first_section() {
+        let html = render_with_lines("--- {#title .dark}\n\n# Deck\n\nIntro\n");
+        assert!(
+            html.starts_with("<section id=\"title\" class=\"dark\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+        assert!(!html.contains("<hr"), "Got: {html}");
+        assert!(!html.contains('\u{2014}'), "Got: {html}");
+        // The dropped paragraph leaves later lines where they were.
+        assert!(
+            html.contains(r#"<h1 data-mbr-line="3" id="deck">"#),
+            "Got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p data-mbr-line="5">Intro</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_after_frontmatter_and_blank_lines() {
+        let html = render_with_lines(
+            "---\ntitle: Deck\nstyle: slides\n---\n\n\n\n--- {.cover}\n\nIntro\n",
+        );
+        assert!(
+            html.starts_with("<section class=\"cover\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+        assert!(!html.contains("<hr"), "Got: {html}");
+        assert!(
+            html.contains(r#"<p data-mbr-line="10">Intro</p>"#),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_keeps_later_sections_numbered() {
+        let html = render_str_with_mode(
+            "--- {#one}\n\nA\n\n--- {#two}\n\nB\n\n---\n\nC\n\n--- {#four}\n\nD\n",
+            false,
+        )
+        .html;
+        let sections: Vec<&str> = html
+            .split("<section")
+            .skip(1)
+            .map(|s| s.split('>').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            sections,
+            [r#" id="one""#, r#" id="two""#, "", r#" id="four""#],
+            "Got: {html}"
+        );
+        assert!(
+            html.starts_with("<section id=\"one\">\n<p>A</p>"),
+            "Got: {html}"
+        );
+    }
+
+    #[test]
+    fn leading_section_rule_background_is_rewritten() {
+        let html = render_with_depth(
+            "--- {data-background-image=\"bg--wide.jpg\"}\n\n# Title\n",
+            Some(1),
+        );
+        assert!(
+            html.starts_with("<section data-background-image=\"../bg--wide.jpg\">\n"),
+            "Got: {html}"
+        );
+        assert_eq!(html.matches("<section").count(), 1, "Got: {html}");
+    }
+
+    #[tokio::test]
+    async fn leading_section_rule_keeps_incomplete_markers_aligned() {
+        let html = render_markdown_marked("--- {.cover}\n\nTODO: write it\n", &["TODO"]).await;
+        assert!(html.starts_with("<section class=\"cover\">"), "Got: {html}");
+        assert!(html.contains(r#"id="mbr-marker-3""#), "Got: {html}");
+    }
+
+    #[test]
+    fn plain_leading_rule_is_unchanged() {
+        let html = render_str_with_mode("---\n\nA\n", false).html;
+        assert_eq!(
+            html,
+            "<section>\n</section>\n<hr />\n<section>\n<p>A</p>\n</section>\n"
+        );
+    }
+
+    #[test]
+    fn second_leading_section_rule_opens_a_section() {
+        // The first section is styled once; another rule before any content is
+        // the author asking for a new (empty) section.
+        let html = render_str_with_mode("--- {#a}\n\n--- {#b}\n\nB\n", false).html;
+        assert_eq!(
+            html,
+            "<section id=\"a\">\n</section>\n<hr />\n<section id=\"b\">\n<p>B</p>\n</section>\n"
+        );
+    }
+
+    #[test]
+    fn section_rule_after_content_is_unchanged() {
+        for content in [
+            "A\n\n--- {#x}\n\nB\n",
+            "<!-- note -->\n\n--- {#x}\n\nB\n",
+            "---\ntitle: T\n---\n\nA\n\n--- {#x}\n\nB\n",
+        ] {
+            let html = render_str_with_mode(content, false).html;
+            assert!(html.starts_with("<section>\n"), "{content:?} → {html}");
+            assert!(
+                html.contains("</section>\n<hr />\n<section id=\"x\">\n<p>B</p>"),
+                "{content:?} → {html}"
+            );
+        }
+    }
+
     #[test]
     fn heading_attrs_are_not_smart_punctuated() {
         // pulldown-cmark parses heading attributes from the source itself.
@@ -5910,6 +6093,95 @@ mod tests {
             html.contains(r#"data-background-image="../../../static/bg.png""#),
             "{html}"
         );
+    }
+
+    /// The deck's default background from `slides.background_image`, as the
+    /// render resolves it for a page with the given build-mode depth.
+    fn deck_background(value: &str, url_depth: Option<usize>) -> Option<String> {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let base = plain_options(root, url_depth.is_none());
+        let opts = RenderOptions {
+            link_transform_config: LinkTransformConfig {
+                url_depth,
+                ..base.link_transform_config.clone()
+            },
+            ..base
+        };
+        let content =
+            format!("---\ntype: slides\nslides:\n  background_image: \"{value}\"\n---\n\nA\n");
+        render_str(&content, &root.join("deck.md"), opts)
+            .unwrap()
+            .slides
+            .expect("a slides map")
+            .settings
+            .background_image
+    }
+
+    /// `slides.background_image` resolves against the note exactly like
+    /// `![](…)` on the same page: server mode, a static build at any depth (a
+    /// note three folders down), root-relative, and external URLs untouched.
+    #[test]
+    fn deck_background_frontmatter_is_rewritten_like_an_image_src() {
+        for depth in [None, Some(0), Some(3)] {
+            for path in [
+                "images/x.png",
+                "../shared/bg.jpg",
+                "/images/x.png",
+                "https://example.com/bg.png",
+            ] {
+                assert_eq!(
+                    deck_background(path, depth),
+                    Some(image_src(path, depth)),
+                    "depth {depth:?}, {path}"
+                );
+            }
+        }
+        // Spelled out once, so the comparison above cannot pass vacuously.
+        assert_eq!(
+            deck_background("images/x.png", None).as_deref(),
+            Some("../images/x.png")
+        );
+        assert_eq!(
+            deck_background("/static/bg.png", Some(3)).as_deref(),
+            Some("../../../static/bg.png")
+        );
+        assert_eq!(
+            deck_background("https://example.com/bg.png", Some(3)).as_deref(),
+            Some("https://example.com/bg.png")
+        );
+    }
+
+    #[test]
+    fn deck_settings_frontmatter_reports_bad_entries_and_keeps_good_ones() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let result = render_str(
+            "---\ntype: slides\nslides:\n  transition: spin\n  slide_number: c/t\n---\n\nA\n",
+            &root.join("deck.md"),
+            plain_options(root, true),
+        )
+        .unwrap();
+        let slides = result.slides.expect("a slides map");
+        assert_eq!(
+            slides.settings.slide_number,
+            Some(crate::slides::SlideNumber::CurrentOfTotal)
+        );
+        assert_eq!(slides.settings.transition, None);
+        assert_eq!(slides.problems.len(), 1);
+        assert_eq!(slides.problems[0].field, "slides.transition");
+        // The page itself renders as always.
+        assert!(result.html.contains("A"));
+    }
+
+    #[test]
+    fn deck_settings_absent_without_a_slides_map() {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let result = render_str(
+            "---\ntype: slides\n---\n\nA\n",
+            &root.join("deck.md"),
+            plain_options(root, true),
+        )
+        .unwrap();
+        assert_eq!(result.slides, None);
     }
 
     #[test]

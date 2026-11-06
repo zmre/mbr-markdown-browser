@@ -250,6 +250,64 @@ describe('UNIT MbrSlidesElement', () => {
     })
   })
 
+  describe('deck settings', () => {
+    afterEach(() => {
+      delete window.__MBR_CONFIG__
+    })
+
+    it('passes the same Reveal options as before when nothing is configured', async () => {
+      setupPage('<section><p>one</p></section>')
+      const reveal = stubReveal()
+      element = await mount()
+      await play(element)
+
+      const config = revealConfig(reveal)
+      expect(config).toMatchObject({
+        transition: 'slide',
+        controls: true,
+        progress: true,
+        hash: true,
+        history: false,
+        center: true,
+      })
+      expect(config).not.toHaveProperty('slideNumber')
+      expect(config).not.toHaveProperty('transitionSpeed')
+      expect(config).not.toHaveProperty('backgroundTransition')
+    })
+
+    it('applies config, then frontmatter, and keeps the fixed settings', async () => {
+      window.__MBR_CONFIG__ = {
+        serverMode: true,
+        guiMode: false,
+        slides: { transition: 'fade', controls: false, background_image: '/bg/config.jpg' },
+        slidesPage: { transition: 'zoom', slide_number: 'c/t', background_image: '../page.jpg' },
+      }
+      setupPage(
+        '<section><p>one</p></section>' +
+          '<section data-background-color="#000"><p>two</p></section>' +
+          '<section><p>three</p></section>'
+      )
+      const reveal = stubReveal()
+      element = await mount()
+      await play(element)
+
+      expect(revealConfig(reveal)).toMatchObject({
+        transition: 'zoom',
+        controls: false,
+        progress: true,
+        slideNumber: 'c/t',
+        hash: true,
+        history: false,
+      })
+      const slides = Array.from(document.querySelectorAll('.reveal .slides > section'))
+      expect(slides.map((s) => s.getAttribute('data-background-image'))).toEqual([
+        '../page.jpg',
+        null,
+        '../page.jpg',
+      ])
+    })
+  })
+
   describe('diagrams', () => {
     beforeEach(() => {
       stubReveal()
@@ -909,6 +967,28 @@ describe('UNIT reveal-slides.css exit button', () => {
     const touch = /@media \(hover: none\)\s*\{\s*\.mbr-slides-exit\s*\{([^}]*)\}/.exec(__MBR_REVEAL_SLIDES_CSS__)?.[1] ?? ''
     expect(touch).toMatch(/width:\s*44px/)
     expect(Number(/opacity:\s*([\d.]+)/.exec(touch)?.[1])).toBeGreaterThanOrEqual(0.7)
+  })
+})
+
+describe('UNIT reveal-slides.css kanban cards', () => {
+  const column = '.reveal .slides section.kanban .mbr-kanban-column'
+
+  it('hangs card contents in theme.css\'s gutter, so tasks align with bullets', () => {
+    const nested = slidesRule(`${column} li :is(ul, ol)`)
+    expect(nested).toMatch(/padding:\s*0 0 0 var\(--mbr-kanban-gutter, 1\.7em\)/)
+    expect(nested).toMatch(/margin:\s*0\.2em 0 0;/)
+  })
+
+  it('rules off the first level of a card\'s contents from its title', () => {
+    const first = slidesRule(
+      `${column} > :is(ul, ol) > li > :is(ul, ol),\n${column} > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol)`
+    )
+    expect(first).toMatch(/border-top:\s*1px solid var\(--pico-muted-border-color/)
+  })
+
+  it('keeps cards the full width of their column', () => {
+    expect(slidesRule(`${column} > :is(ul, ol)`)).toMatch(/margin:\s*0;[\s\S]*padding:\s*0;/)
+    expect(slidesRule(`${column} > :is(ul, ol) > li`)).toMatch(/list-style:\s*none/)
   })
 })
 

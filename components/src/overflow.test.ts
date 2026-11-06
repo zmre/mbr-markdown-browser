@@ -245,3 +245,50 @@ describe('kanban print rules', () => {
     expect(printBreak).toBeGreaterThan(lastScreenBreak)
   })
 })
+
+describe('kanban card layout', () => {
+  const screen = (selector: string) => rulesFor(selector).find((r) => r.conditions.length === 0)
+
+  it('makes a card the full width of its column, with no marker', () => {
+    const card = screen('.kanban > ul > li')
+    expect(card).toBeDefined()
+    expect(declaration(card!, 'display')).toBe('block')
+    expect(declaration(card!, 'list-style')).toBe('none')
+    expect(declaration(card!, 'margin-inline')).toBe('0')
+    const list = screen('.kanban > ul')
+    expect(declaration(list!, 'padding-left')).toBe('0')
+    expect(declaration(list!, 'margin-left')).toBe('0')
+  })
+
+  it('rules off only the first level of a card\'s contents', () => {
+    const contents = screen('.kanban > :is(ul, ol) > li > :is(ul, ol)')
+    expect(contents).toBeDefined()
+    expect(declaration(contents!, 'border-top')).toBe('1px solid var(--pico-muted-border-color)')
+    // A card with no contents has no nested list, so no rule; deeper levels
+    // carry no border of their own.
+    expect(declaration(screen('.kanban li :is(ul, ol)')!, 'border-top')).toBeUndefined()
+  })
+
+  // A task line was indented twice: its <li> kept the bullet's padding and the
+  // checkbox then pushed the text one checkbox further in. Every content level
+  // now hangs bullets and checkboxes in one gutter, the checkbox exactly as
+  // wide (with its gap) as that gutter, so the text of both kinds of line
+  // starts at the same place.
+  it('hangs task checkboxes in the same gutter as bullets', () => {
+    const gutter = declaration(screen('.kanban')!, '--mbr-kanban-gutter')
+    expect(gutter).toBe('1.7em')
+    expect(declaration(screen('.kanban li :is(ul, ol)')!, 'padding-inline-start')).toBe(
+      'var(--mbr-kanban-gutter)'
+    )
+    const check = screen('.kanban li :is(ul, ol) > li > .mbr-task-check:first-child')
+    expect(check).toBeDefined()
+    expect(selectorsOf(check!)).toContain(
+      '.kanban li :is(ul, ol) > li > p:first-child > .mbr-task-check:first-child'
+    )
+    expect(declaration(check!, 'font-size')).toBe('inherit')
+    expect(declaration(check!, 'width')).toBe('1.25em')
+    expect(declaration(check!, 'margin-inline')).toBe('calc(-1 * var(--mbr-kanban-gutter)) 0.45em')
+    // 1.25em box + 0.45em gap = the 1.7em gutter.
+    expect(1.25 + 0.45).toBeCloseTo(parseFloat(gutter!))
+  })
+})

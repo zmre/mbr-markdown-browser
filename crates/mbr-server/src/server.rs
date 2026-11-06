@@ -1502,6 +1502,8 @@ pub struct ServerConfig {
     pub flashcards_concentric_threshold: f64,
     /// Draw review-progress indicators on flashcard notes' reading view.
     pub flashcards_progress_indicators: bool,
+    /// The repository's `[slides]` deck defaults, for `__MBR_CONFIG__.slides`.
+    pub slides: mbr_core::slides::SlideSettings,
     pub title_prefix: String,
     pub title_suffix: String,
     /// Highlight blocks beginning with an incomplete marker (TK/TODO/FIXME/XXX).
@@ -1613,6 +1615,7 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             graph_depth: config.graph_depth,
             flashcards_concentric_threshold: config.flashcards_concentric_threshold,
             flashcards_progress_indicators: config.flashcards_progress_indicators,
+            slides: config.slides.clone(),
             title_prefix: config.title_prefix.clone(),
             title_suffix: config.title_suffix.clone(),
             // Server/GUI default: on unless config overrides.
@@ -1839,6 +1842,8 @@ pub struct ServerState {
     pub flashcards_concentric_threshold: f64,
     /// Whether flashcard notes draw reading-view progress indicators.
     pub flashcards_progress_indicators: bool,
+    /// The repository's `[slides]` deck defaults.
+    pub slides: mbr_core::slides::SlideSettings,
     /// Text to prepend to all page titles
     pub title_prefix: String,
     /// Text to append to all page titles
@@ -2334,6 +2339,7 @@ impl Server {
             graph_depth,
             flashcards_concentric_threshold,
             flashcards_progress_indicators,
+            slides,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -2752,6 +2758,7 @@ impl Server {
             graph_depth,
             flashcards_concentric_threshold,
             flashcards_progress_indicators,
+            slides,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -6340,8 +6347,8 @@ impl Server {
         use mbr_core::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
             contact_problem_errors, detect_unresolved_wikilinks, frontmatter_parse_errors,
-            relationship_cycle_errors, validate_internal_links, validate_media_references,
-            validate_rendered_links,
+            relationship_cycle_errors, slide_setting_errors, validate_internal_links,
+            validate_media_references, validate_rendered_links, validate_slide_background,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -6383,18 +6390,19 @@ impl Server {
         // rendered HTML for media / wikilink scans (the `LinkCache` only holds
         // outbound links), so unlike `try_serve_links_json` we cannot short-
         // circuit through the cache when the HTML is missing.
-        let (
-            outbound_links,
-            html_for_scan,
-            frontmatter_error,
-            ambiguous_wikilinks,
-            contact_problems,
-        ): (
+        /// What a render found wrong with the page itself, beside its links
+        /// and HTML. Empty for tag pages, which have no authored body.
+        #[derive(Default)]
+        struct RenderProblems {
+            frontmatter_error: Option<String>,
+            ambiguous_wikilinks: Vec<mbr_core::wikilink_index::AmbiguousWikilink>,
+            contact_problems: Vec<mbr_core::contact::ContactProblem>,
+            slides: Option<mbr_core::slides::SlideFrontmatter>,
+        }
+        let (outbound_links, html_for_scan, render_problems): (
             Vec<mbr_core::link_index::OutboundLink>,
             String,
-            Option<String>,
-            Vec<mbr_core::wikilink_index::AmbiguousWikilink>,
-            Vec<mbr_core::contact::ContactProblem>,
+            RenderProblems,
         ) = match resolve_request_path(&resolver_config, request_path) {
             ResolvedPath::MarkdownFile(md_path) => {
                 let is_index_file = md_path
@@ -6456,12 +6464,15 @@ impl Server {
                         (
                             resolved_links,
                             render_result.html,
-                            render_result.frontmatter_error,
-                            render_result.ambiguous_wikilinks,
-                            render_result
-                                .contact
-                                .map(|c| c.problems)
-                                .unwrap_or_default(),
+                            RenderProblems {
+                                frontmatter_error: render_result.frontmatter_error,
+                                ambiguous_wikilinks: render_result.ambiguous_wikilinks,
+                                contact_problems: render_result
+                                    .contact
+                                    .map(|c| c.problems)
+                                    .unwrap_or_default(),
+                                slides: render_result.slides,
+                            },
                         )
                     }
                     // The page itself answers 503 "Downloading" and is
@@ -6488,11 +6499,11 @@ impl Server {
                     &config.repo.tag_index,
                     &config.tag_sources,
                 );
-                (outbound, String::new(), None, Vec::new(), Vec::new())
+                (outbound, String::new(), RenderProblems::default())
             }
             ResolvedPath::TagSourceIndex { source } => {
                 let outbound = build_tag_index_outbound_links(&source, &config.repo.tag_index);
-                (outbound, String::new(), None, Vec::new(), Vec::new())
+                (outbound, String::new(), RenderProblems::default())
             }
             _ => {
                 tracing::debug!("errors.json: page not found: {}", page_url_path);
@@ -6506,8 +6517,24 @@ impl Server {
                 message: message.clone(),
             });
         }
+        let RenderProblems {
+            frontmatter_error,
+            ambiguous_wikilinks,
+            contact_problems,
+            slides,
+        } = render_problems;
         errors.extend(frontmatter_parse_errors(&frontmatter_error));
         errors.extend(contact_problem_errors(&contact_problems));
+        if let Some(slides) = &slides {
+            errors.extend(slide_setting_errors(&slides.problems));
+            // The deck's default background lives in frontmatter, not in the
+            // HTML, so the media scan below cannot see it.
+            errors.extend(
+                slides.settings.background_image.as_deref().and_then(|src| {
+                    validate_slide_background(src, &resolver_config, &page_url_path)
+                }),
+            );
+        }
         if html_for_scan.is_empty() {
             // Tag pages and tag indexes have no authored body; their outbound
             // links are synthesized absolute URLs, so that list is the only
@@ -7503,6 +7530,7 @@ impl Server {
         let has_h1 = render_result.has_h1;
         let word_count = render_result.word_count;
         let contact = render_result.contact;
+        let slides = render_result.slides;
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -7607,6 +7635,7 @@ impl Server {
                 modified_secs,
                 current_url: &current_url,
                 siblings: &siblings,
+                slides: slides.as_ref().map(|s| &s.settings),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -7621,6 +7650,7 @@ impl Server {
                 title_prefix: &config.title_prefix,
                 title_suffix: &config.title_suffix,
                 root_dir: Some(&config.base_dir),
+                slides: &config.slides,
             },
             &page_context::UrlMode::Absolute,
         );

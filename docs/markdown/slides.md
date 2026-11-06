@@ -131,6 +131,31 @@ This slide has:
 This slide has centered class
 ```
 
+### Styling the First Slide
+
+The first slide has no rule in front of it, so give it one: start the note
+(after any frontmatter and blank lines) with an attribute rule, and its
+attributes go on the first slide instead of opening a new one.
+
+```markdown
+---
+title: My Deck
+style: slides
+---
+
+--- {.title-slide data-background-image="images/cover.jpg"}
+
+# My Deck
+
+--- {.centered}
+
+Second slide
+```
+
+Only a rule *with* attributes does this. A plain `---` at the top is still a
+divider, and in slides it makes an empty first slide; a second attribute rule
+before any content starts a new (empty) slide as well.
+
 ### Slide Backgrounds
 
 Reveal.js background attributes work too, and their paths resolve exactly like
@@ -178,6 +203,79 @@ take the full half; images and GIFs keep their own size up to it. A floated PDF
 is shown square, so it doesn't fill the slide. Figure captions are hidden while
 the slides play. The classes work on ordinary pages too (see
 [Floating Media Beside Text](media/#floating-media-beside-text)).
+
+## Deck Settings
+
+A few Reveal.js settings can be chosen for a whole deck: the transition, its
+speed, the background transition, the slide number, the arrow controls, the
+progress bar, and a default background image. Set them in two places:
+
+- **For every deck in the repository**, in `.mbr/config.toml`:
+
+  ```toml
+  [slides]
+  transition = "fade"
+  background_image = "images/deck-bg.jpg"
+  ```
+
+- **For one deck**, in its frontmatter, under `slides:`:
+
+  ```yaml
+  ---
+  type: slides
+  slides:
+    transition: zoom
+    slide_number: c/t
+    background_image: images/title-bg.jpg
+    background_opacity: 0.4
+  ---
+  ```
+
+| Key | Values | Default |
+|-----|--------|---------|
+| `transition` | `none`, `fade`, `slide`, `convex`, `concave`, `zoom` | `slide` |
+| `transition_speed` | `default`, `fast`, `slow` | `default` |
+| `background_transition` | same as `transition` | `fade` |
+| `slide_number` | `false`, `true`, `h.v`, `h/v`, `c`, `c/t` (`c/t` shows "3/12") | `false` |
+| `controls` | `true`, `false` | `true` |
+| `progress` | `true`, `false` | `true` |
+| `background_image` | an image path or URL | none |
+| `background_size` | a CSS `background-size` (`cover`, `contain`, `50%`) | `cover` |
+| `background_opacity` | 0 to 1 | `1` |
+
+**Which one wins**, lowest first: mbr's defaults (the table's last column),
+then `.mbr/config.toml`, then the note's `slides:` map, then the slide's own
+attributes. Each key is decided separately, so a note can change the
+transition and still get the repository's slide number. A slide's own
+`--- {data-transition="zoom"}` still applies to that slide alone, whatever
+the deck says.
+
+**A default background** goes on every slide that has no background of its
+own. A slide with `data-background`, `data-background-image`, `-color`,
+`-gradient`, `-video` or `-iframe` keeps its own and gets nothing from the
+default. In frontmatter the path is relative to the note, exactly like
+`![](...)` on the same page (see [Slide Backgrounds](#slide-backgrounds)); in
+`config.toml` it is relative to the repository root (`images/bg.jpg` or
+`/images/bg.jpg`). Web addresses are used as written. `background_size` and
+`background_opacity` apply to the default image only. The first slide counts
+like any other: give it its own background with a leading attribute rule (see
+[Styling the First Slide](#styling-the-first-slide)), e.g.
+`--- {data-background-color="black"}`, and it keeps it while the rest get the
+default. The default is set per slide rather than as Reveal's parallax
+background, which scrolls one image across the whole deck; a parallax option
+may come later.
+
+**Mistakes in frontmatter don't break the deck.** An unknown key or a value
+outside its list (`transition: spin`) is ignored, that key falls back to the
+repository's setting, and the page's error panel lists it under "Ignored slide
+settings". A `background_image` that doesn't exist is listed as a broken media
+reference. The same mistakes in `config.toml` stop mbr at startup, like any
+other configuration error. mbr's own settings (the slide hash in the URL,
+`q` to leave, the keyboard handling) can't be changed. See
+[Slide Settings](../reference/configuration.md#slide-settings) for the
+environment variables.
+
+The editor's Properties panel offers these keys on a slide deck.
 
 ## Keyboard Shortcuts
 

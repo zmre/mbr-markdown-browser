@@ -100,6 +100,16 @@ pub enum PageError {
         /// What was wrong and what was done about it.
         message: String,
     },
+    /// An entry of the note's `slides:` frontmatter map (deck settings) that
+    /// mbr could not use — an unknown key or a value outside its set — so the
+    /// deck ignores it and keeps the repository's setting. See
+    /// `slides::SlideSettingProblem`.
+    SlideSettingProblem {
+        /// The key at fault, e.g. `slides.transition`.
+        field: String,
+        /// What was wrong.
+        message: String,
+    },
     /// A `[[Wikilink]]` in the body named a title/stem shared by several notes;
     /// mbr silently resolved it to one of them.
     AmbiguousWikilink {
@@ -699,6 +709,36 @@ pub fn contact_problem_errors(problems: &[crate::contact::ContactProblem]) -> Ve
             message: p.message.clone(),
         })
         .collect()
+}
+
+/// Wraps the ignored `slides:` frontmatter entries found while rendering a
+/// page (from [`crate::markdown::MarkdownRenderResult::slides`]).
+pub fn slide_setting_errors(problems: &[crate::slides::SlideSettingProblem]) -> Vec<PageError> {
+    problems
+        .iter()
+        .map(|p| PageError::SlideSettingProblem {
+            field: p.field.clone(),
+            message: p.message.clone(),
+        })
+        .collect()
+}
+
+/// Checks a deck's default background (`slides.background_image`, already
+/// rewritten by the render against the page) the way an `<img src>` on the
+/// page is checked: a [`PageError::BrokenMediaReference`] when the server
+/// would 404 it, nothing for an external URL.
+pub fn validate_slide_background(
+    src: &str,
+    resolver_config: &PathResolverConfig,
+    page_url: &str,
+) -> Option<PageError> {
+    let internal = !src.is_empty() && !is_external_url(src);
+    (internal && !media_reference_resolves(src, resolver_config, page_url)).then(|| {
+        PageError::BrokenMediaReference {
+            src: src.to_string(),
+            kind: MediaKind::Image,
+        }
+    })
 }
 
 /// Wraps the ambiguous body wikilinks found while rendering a page (from
@@ -1455,6 +1495,48 @@ mod tests {
             &errs[0],
             PageError::BrokenMediaReference { kind: MediaKind::Image, src } if src == "./missing.png"
         ));
+    }
+
+    #[test]
+    fn slide_background_is_checked_like_an_image() {
+        let (_guard, base) = media_setup();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = vec![];
+        let cfg = make_config(&base, &exts, "index.md", &tags);
+
+        // As the render emits them for a page at `/deck/`: already rewritten.
+        assert_eq!(
+            validate_slide_background("../photo.png", &cfg, "/deck/"),
+            None
+        );
+        assert_eq!(
+            validate_slide_background("../gone.png", &cfg, "/deck/"),
+            Some(PageError::BrokenMediaReference {
+                src: "../gone.png".to_string(),
+                kind: MediaKind::Image,
+            })
+        );
+        assert_eq!(
+            validate_slide_background("https://example.com/x.png", &cfg, "/deck/"),
+            None
+        );
+        assert_eq!(validate_slide_background("", &cfg, "/deck/"), None);
+    }
+
+    #[test]
+    fn slide_setting_problems_serialize_with_field_and_message() {
+        let errs = slide_setting_errors(&[crate::slides::SlideSettingProblem {
+            field: "slides.transition".to_string(),
+            message: "unknown variant `spin`; ignored".to_string(),
+        }]);
+        assert_eq!(
+            serde_json::to_value(&errs).unwrap(),
+            serde_json::json!([{
+                "type": "slide_setting_problem",
+                "field": "slides.transition",
+                "message": "unknown variant `spin`; ignored",
+            }])
+        );
     }
 
     #[test]

@@ -31,6 +31,8 @@ import { ICON_LG, ICON_SM, icon, iconElement, iconPlay, iconX } from './icons.ts
 import { mermaidSettled } from './mbr-mermaid.ts'
 import { mathSettled } from './mbr-katex.ts'
 import { fitSlide } from './slide-fit.ts'
+import { getSlideSettingSources } from './shared.ts'
+import { applyDefaultBackground, deckSettings, revealConfig } from './slide-settings.ts'
 
 /**
  * How long Play waits for the page's diagrams and math before cloning the slides
@@ -373,7 +375,13 @@ export class MbrSlidesElement extends LitElement {
         return
       }
 
+      // Config defaults, then the note's `slides:` frontmatter
+      // (`slide-settings.ts`); a slide's own `data-*` attributes still win.
+      const { config, page } = getSlideSettingSources()
+      const settings = deckSettings(config, page)
+
       this._transformDom()
+      if (this._slidecontainer) applyDefaultBackground(this._slidecontainer, settings)
       this._isPlaying = true
       // The deck has replaced the page: announce it now, before Reveal lays
       // out, so the app's bar is already going when Reveal first measures (it
@@ -386,13 +394,12 @@ export class MbrSlidesElement extends LitElement {
 
       scheduleIdleTask(async () => {
         try {
-          await win.Reveal!.initialize({
+          // `revealConfig` spreads these last: the deck settings choose the
+          // look (transition, controls, progress, slide number), never these.
+          await win.Reveal!.initialize(revealConfig(settings, {
             hash: true,
             history: false,
-            controls: true,
-            progress: true,
             center: true,
-            transition: 'slide',
             // Reveal 6 switches to its scroll view whenever the viewport is
             // narrower than `scrollActivationWidth` (default 435px), i.e. on
             // every phone held upright. That view re-parents each slide into
@@ -415,7 +422,7 @@ export class MbrSlidesElement extends LitElement {
             // Reveal's bindings, so this covers it too.
             keyboardCondition: (e: KeyboardEvent) => !isInputTarget(e) && !isModalOpen(),
             plugins,
-          })
+          }))
           const deck = win.Reveal!
           this._deck = deck
           const fit = () => this._fitCurrentSlide()

@@ -74,6 +74,7 @@ pub mod readability;
 pub mod relationships;
 pub mod repo;
 pub mod search;
+pub mod slides;
 pub mod sorting;
 pub mod tag_index;
 pub mod task_index;

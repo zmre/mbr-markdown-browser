@@ -194,8 +194,19 @@ html.mbr-embedded body.slides-container .reveal .slide-number {
   content: none;
 }
 
+/* Card contents hang their bullets and checkboxes in theme.css's
+ * `--mbr-kanban-gutter` (the checkbox rule there applies here too), and the
+ * first level sits under a rule separating it from the card's title. */
 .reveal .slides section.kanban .mbr-kanban-column li :is(ul, ol) {
   display: block;
-  margin: 0.4em 0 0 1.1em;
+  margin: 0.2em 0 0;
+  padding: 0 0 0 var(--mbr-kanban-gutter, 1.7em);
   font-weight: normal;
+}
+
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > :is(ul, ol),
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol) {
+  margin-top: 0.5em;
+  padding-top: 0.4em;
+  border-top: 1px solid var(--pico-muted-border-color, rgba(127, 127, 127, 0.3));
 }

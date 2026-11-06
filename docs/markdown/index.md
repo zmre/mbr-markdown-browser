@@ -701,6 +701,26 @@ Multiple attributes can be combined:
 --- {#section-1 .slide .center data-transition="slide" data-background="#fff"}
 ```
 
+### The First Section
+
+Content before the first rule is section one, so an attribute rule at the very
+top of a note (only frontmatter and blank lines before it) applies to that
+first section rather than opening a new one. No empty section and no `<hr>` is
+produced:
+
+```markdown
+---
+title: Deck
+---
+
+--- {#cover .dark}
+
+This content is in the first section, with id="cover" and class="dark".
+```
+
+A plain `---` at the top, or an attribute rule anywhere after content, divides
+sections as usual.
+
 ### Use Cases
 
 **Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds.

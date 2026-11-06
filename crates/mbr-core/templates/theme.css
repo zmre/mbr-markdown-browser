@@ -199,6 +199,11 @@ main > section[data-theme="dark"] {
   padding: var(--pico-block-spacing-vertical) 0;
 }
 
+main h1 + h2 {
+  margin-top: -0.8em;
+  padding-top: 0;
+}
+
 body > header {
   background-color: var(--pico-background-color);
   /* A hairline: the 2px slate rule was the heaviest line on every page. */
@@ -3148,6 +3153,10 @@ main .mbr-fc-pie-unreviewed {
  */
 
 .kanban {
+  /* The hanging gutter of a card's content lists: a bullet or a task's
+   * checkbox sits in it and the text starts after it, so plain lines and
+   * tasks align (see "Card contents" below). */
+  --mbr-kanban-gutter: 1.7em;
   columns: 18rem; /* needs to be fixed since we don't know how many columns */
   column-gap: 2rem;
   column-fill: auto; /* should avoid balancing and just fill left first */
@@ -3209,16 +3218,50 @@ main .mbr-fc-pie-unreviewed {
   background: var(--pico-card-background-color);
   box-shadow: var(--pico-card-box-shadow);
   display: block;
+  /* A card is the whole width of its column: no marker, no indent. */
+  margin-inline: 0;
+  list-style: none;
   /* background-color: var(--pico-card-sectioning-background-color); */
   font-weight: bold;
   break-inside: avoid;
   -webkit-column-break-inside: avoid;
 }
 
-.kanban ul > li ul,
-.kanban ol > li ol {
+/*
+ * Card contents: the lists inside a card. Every level hangs its bullets and
+ * checkboxes in `--mbr-kanban-gutter`, so the text of a plain line and of a
+ * task starts at the same place. Before, a task line was indented twice: its
+ * `<li>` keeps the list's padding (the bullet's room) after `list-style: none`
+ * drops the bullet, and the checkbox then sat where the text would have been,
+ * pushing the task's text a checkbox further in.
+ */
+.kanban li :is(ul, ol) {
   font-weight: normal;
-  margin-top: 1em;
+  margin: 0.25em 0 0;
+  padding-inline-start: var(--mbr-kanban-gutter);
+}
+
+/* The first level sits flush under a rule that separates it from the card's
+ * title. Only a card with contents has one. The second selector is a card
+ * whose title holds an incomplete marker (`TODO: …`), whose wash wraps the
+ * nested list too. */
+.kanban > :is(ul, ol) > li > :is(ul, ol),
+.kanban > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol) {
+  margin-top: 0.75em;
+  padding-top: 0.5em;
+  border-top: 1px solid var(--pico-muted-border-color);
+}
+
+/* A task's checkbox goes in the gutter, where the bullet would be: sized from
+ * the text (Pico sizes inputs in `rem`, which in a scaled slide is not the
+ * text's size) and exactly as wide, with its gap, as the gutter. Shared with
+ * the slides' board (reveal-slides.css), whose section keeps `.kanban`. */
+.kanban li :is(ul, ol) > li > .mbr-task-check:first-child,
+.kanban li :is(ul, ol) > li > p:first-child > .mbr-task-check:first-child {
+  font-size: inherit;
+  width: 1.25em;
+  height: 1.25em;
+  margin-inline: calc(-1 * var(--mbr-kanban-gutter)) 0.45em;
 }
 
 .kanban ul:last-child,

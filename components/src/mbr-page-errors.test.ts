@@ -99,6 +99,15 @@ describe('UNIT summarizePageErrors', () => {
     );
   });
 
+  it('names ignored slide settings', () => {
+    const slide = {
+      type: 'slide_setting_problem' as const,
+      field: 'slides.transition',
+      message: 'unknown variant `spin`; ignored',
+    };
+    expect(summarizePageErrors([slide])).toBe('Detected 1 ignored slide setting.');
+  });
+
   it('returns an empty string when there is nothing to report', () => {
     expect(summarizePageErrors([])).toBe('');
   });
