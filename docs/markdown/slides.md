@@ -153,8 +153,10 @@ Second slide
 ```
 
 Only a rule *with* attributes does this. A plain `---` at the top is still a
-divider, and in slides it makes an empty first slide; a second attribute rule
-before any content starts a new (empty) slide as well.
+divider, shown as a rule on the page; the presentation skips the empty slide in
+front of it, so the deck still opens on your first real slide. A second rule
+before any content (or `---` directly after `---` anywhere later) does make an
+empty slide, which is kept.
 
 ### Slide Backgrounds
 

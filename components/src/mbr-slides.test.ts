@@ -195,6 +195,89 @@ describe('UNIT MbrSlidesElement', () => {
       expect(document.querySelector('#outer #inner')).toBeTruthy()
     })
 
+    describe('leading empty section (a plain `---` at the start of the note)', () => {
+      /** Ids (or `''`) of the deck's top-level slides, in order. */
+      async function slideIdsFor(mainHtml: string): Promise<string[]> {
+        setupPage(mainHtml)
+        element = await mount()
+        await play(element)
+        return Array.from(document.querySelectorAll('#wrapper .reveal > .slides > section')).map(
+          (s) => s.id
+        )
+      }
+
+      it('skips the empty section the renderer emits before the first rule', async () => {
+        // Exactly the renderer's shape for a note opening with `---`.
+        const ids = await slideIdsFor(
+          '<section>\n</section>\n<hr />\n<section id="a"><h1>A</h1></section>\n<hr />\n<section id="b"><p>B</p></section>'
+        )
+        expect(ids).toEqual(['a', 'b'])
+      })
+
+      it('makes the first real slide the one Reveal numbers 0', async () => {
+        await slideIdsFor('<section></section><hr /><section id="a"><p>A</p></section>')
+        const first = document.querySelector('#wrapper .reveal > .slides > section')
+        expect(first?.id).toBe('a')
+      })
+
+      it('skips a first section holding only whitespace and comments', async () => {
+        const ids = await slideIdsFor(
+          '<section>\n  <!-- a comment -->\n  \n</section><hr /><section id="a"><p>A</p></section>'
+        )
+        expect(ids).toEqual(['a'])
+      })
+
+      it('ignores mbr bookkeeping attributes when judging emptiness', async () => {
+        const ids = await slideIdsFor(
+          '<section data-mbr-line="3"></section><hr /><section id="a"><p>A</p></section>'
+        )
+        expect(ids).toEqual(['a'])
+      })
+
+      it.each([
+        ['an id', '<section id="intro"></section>', 'intro'],
+        ['a class', '<section class="title"></section>', ''],
+        ['a data attribute', '<section data-background-color="black"></section>', ''],
+      ])('keeps an empty first section with %s', async (_label, first, firstId) => {
+        const ids = await slideIdsFor(`${first}<hr /><section id="a"><p>A</p></section>`)
+        expect(ids).toEqual([firstId, 'a'])
+      })
+
+      it('keeps a first section with content', async () => {
+        const ids = await slideIdsFor(
+          '<section id="a"><p>A</p></section><hr /><section id="b"><p>B</p></section>'
+        )
+        expect(ids).toEqual(['a', 'b'])
+      })
+
+      it('keeps an empty section in the middle (an authored blank slide)', async () => {
+        const ids = await slideIdsFor(
+          '<section id="a"><p>A</p></section><hr /><section>\n</section><hr /><section id="b"><p>B</p></section>'
+        )
+        expect(ids).toEqual(['a', '', 'b'])
+      })
+
+      it('drops only the first of two leading empty sections', async () => {
+        const ids = await slideIdsFor(
+          '<section></section><hr /><section></section><hr /><section id="a"><p>A</p></section>'
+        )
+        expect(ids).toEqual(['', 'a'])
+      })
+
+      it('keeps a lone empty section, so the deck is never empty', async () => {
+        const ids = await slideIdsFor('<section>\n</section>')
+        expect(ids).toEqual([''])
+      })
+
+      it('gives the deck background to the remaining slides, starting with the first real one', async () => {
+        vi.stubGlobal('__MBR_CONFIG__', { slides: { background_image: '/bg.png' } })
+        await slideIdsFor('<section></section><hr /><section id="a"><p>A</p></section>')
+        const slides = document.querySelectorAll('#wrapper .reveal > .slides > section')
+        expect(slides.length).toBe(1)
+        expect(slides[0]!.getAttribute('data-background-image')).toBe('/bg.png')
+      })
+    })
+
     it('turns a triple blockquote into an aside.notes', async () => {
       setupPage(`
         <section id="s1">

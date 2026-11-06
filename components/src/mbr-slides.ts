@@ -12,7 +12,8 @@
  * 2. Loads Reveal.js CSS, JS, and notes plugin
  * 3. Removes <hr> elements (slide separators in markdown become DOM sections)
  * 4. Transforms triple blockquotes (>>>) into speaker notes (<aside class="notes">)
- * 5. Wraps sections in .reveal > .slides structure, loads every image eagerly
+ * 5. Wraps sections in .reveal > .slides structure (dropping the empty first
+ *    section a leading plain `---` leaves), loads every image eagerly
  *    and groups a `.kanban` section's lists into columns
  * 6. Initializes Reveal.js with notes plugin
  *
@@ -62,6 +63,25 @@ const EXIT_KEY_CODE = 81
  */
 export function isSlideHash(hash: string): boolean {
   return /^#\/[^\s/]*(\/[^\s/]*){0,2}$/.test(hash) && hash.length > 2
+}
+
+/**
+ * True for the empty `<section>` the renderer emits before a leading plain
+ * `---`: nothing in it but whitespace text and comments, and no attribute an
+ * author could have put there (`id`, `class`, `data-*`, anything else; only
+ * mbr's own `data-mbr-*` bookkeeping is ignored). A section with attributes
+ * came from a `--- {…}` and is intentional, so it stays.
+ */
+export function isSkippableLeadingSection(section: Element): boolean {
+  for (const attr of Array.from(section.attributes)) {
+    if (!attr.name.startsWith('data-mbr-')) return false
+  }
+  for (const node of Array.from(section.childNodes)) {
+    if (node.nodeType === Node.COMMENT_NODE) continue
+    if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() === '') continue
+    return false
+  }
+  return true
 }
 
 /**
@@ -531,10 +551,17 @@ export class MbrSlidesElement extends LitElement {
     // so cloning it again would repeat its content as its own horizontal
     // slide. The renderer emits nesting whenever a `---` divider lands inside
     // a blockquote or list item.
-    main.querySelectorAll('section').forEach(section => {
-      if (this._isNestedIn(section, main)) return
-      slidesDiv.appendChild(section.cloneNode(true))
-    })
+    //
+    // A note that opens with a plain `---` (after its frontmatter or at the
+    // top of the file) renders an empty `<section>` before it. On the page
+    // that rule is visible and stays; in the deck it would be an empty first
+    // slide, so it is dropped here (`isSkippableLeadingSection`). Only the
+    // first: an empty section later on is a blank slide the author made.
+    const topLevel = Array.from(main.querySelectorAll('section')).filter(
+      section => !this._isNestedIn(section, main)
+    )
+    if (topLevel.length > 1 && isSkippableLeadingSection(topLevel[0]!)) topLevel.shift()
+    topLevel.forEach(section => slidesDiv.appendChild(section.cloneNode(true)))
 
     // mbr renders `loading="lazy"` images. A lazy image on a hidden slide
     // is not fetched until the slide shows, by which time Reveal has
