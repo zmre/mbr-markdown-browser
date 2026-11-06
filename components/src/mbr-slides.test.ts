@@ -1063,9 +1063,7 @@ describe('UNIT reveal-slides.css kanban cards', () => {
   })
 
   it('rules off the first level of a card\'s contents from its title', () => {
-    const first = slidesRule(
-      `${column} > :is(ul, ol) > li > :is(ul, ol),\n${column} > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol)`
-    )
+    const first = slidesRule(`${column} > :is(ul, ol) > li > :is(ul, ol)`)
     expect(first).toMatch(/border-top:\s*1px solid var\(--pico-muted-border-color/)
   })
 

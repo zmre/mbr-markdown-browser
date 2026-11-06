@@ -3242,11 +3242,8 @@ main .mbr-fc-pie-unreviewed {
 }
 
 /* The first level sits flush under a rule that separates it from the card's
- * title. Only a card with contents has one. The second selector is a card
- * whose title holds an incomplete marker (`TODO: …`), whose wash wraps the
- * nested list too. */
-.kanban > :is(ul, ol) > li > :is(ul, ol),
-.kanban > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol) {
+ * title. Only a card with contents has one. */
+.kanban > :is(ul, ol) > li > :is(ul, ol) {
   margin-top: 0.75em;
   padding-top: 0.5em;
   border-top: 1px solid var(--pico-muted-border-color);

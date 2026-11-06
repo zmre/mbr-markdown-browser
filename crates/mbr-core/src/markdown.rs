@@ -2554,6 +2554,49 @@ fn push_marked_text<'a>(
     }
 }
 
+/// A block-level event that can open *inside* a pass-3 frame (a list item, a
+/// table cell): a block-wide wash, an inline `<span>`, must close before it.
+/// `Rule` has no `Start`, so it stands in for its own.
+fn is_nested_block_start(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Start(
+            Tag::Paragraph
+                | Tag::Heading { .. }
+                | Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::List(_)
+                | Tag::Table(_)
+                | Tag::FootnoteDefinition(_)
+                | Tag::DefinitionList
+                | Tag::MetadataBlock(_)
+        ) | Event::Rule
+    )
+}
+
+/// The closing counterpart of [`is_nested_block_start`]: the event that ends a
+/// nested block, after which a frame's inline content may resume.
+fn is_nested_block_end(event: Option<&Event<'_>>) -> bool {
+    matches!(
+        event,
+        Some(
+            Event::End(
+                TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::BlockQuote(_)
+                    | TagEnd::CodeBlock
+                    | TagEnd::HtmlBlock
+                    | TagEnd::List(_)
+                    | TagEnd::Table
+                    | TagEnd::FootnoteDefinition
+                    | TagEnd::DefinitionList
+                    | TagEnd::MetadataBlock(_)
+            ) | Event::Rule
+        )
+    )
+}
+
 /// Highlights markers (TK/TODO/FIXME/XXX, or whatever `incomplete_markers`
 /// configures) in `<span class="mbr-incomplete">…</span>`, and gives the first
 /// highlight on each source line a `#mbr-marker-{line}` anchor.
@@ -2565,7 +2608,12 @@ fn push_marked_text<'a>(
 ///   Eligible (innermost) blocks: `Paragraph`, `Heading{..}`, `Item`,
 ///   `TableCell`. Other container tags (`BlockQuote`, `List`, `Table`, code
 ///   blocks, …) are skipped — their inner `Paragraph`, or its absence, is what
-///   gets evaluated.
+///   gets evaluated. The wash is an inline `<span>`, so it covers only the
+///   frame's **own inline run**: it opens after any nested block that precedes
+///   the text and closes before the first nested block that follows it
+///   ([`is_nested_block_start`]). `- TODO: title` over a nested list washes the
+///   title and leaves the `<ul>` outside the span, where it is valid HTML; a
+///   marker in the nested item gets that item's own wash.
 /// * Every **other** occurrence has just the marker word wrapped, so
 ///   `The market fell 10% (source: TK).` highlights the `TK` and nothing else.
 ///
@@ -2592,29 +2640,28 @@ fn push_marked_text<'a>(
 /// This is the **only** place in the codebase where an index table has to cross
 /// to the *output* side of a pass that is not 1:1, and the reason is one line of
 /// code: everything here is `output.push`, except the single
-/// `output.insert(top.start_idx + 1, …)` that puts a block-wide wash span behind
-/// an already-emitted `Start`. That insert shifts every output index recorded
-/// after `top.start_idx`, and it fires in the **default** configuration:
+/// `output.insert(top.inline_start, …)` that puts a block-wide wash span behind
+/// already-emitted events. That insert shifts every output index recorded at or
+/// after `top.inline_start`.
 ///
-/// ```markdown
-/// - - inner
-///   TODO outer text
-/// ```
-///
-/// The inner `<li>` opens *and closes* before the outer item sees any text, so
-/// the span lands at `outer.start_idx + 1` — behind the inner item's already
-/// recorded output index — and that record, plus every block after it, needs a
-/// `+1`.
+/// `inline_start` is the slot after the frame's `Start`, moved past each nested
+/// block that ends inside the frame, so the events between it and the text are
+/// inline (`Start(Strong)` of `**TODO**`, a task checkbox) and carry no record:
+/// in every shape known today the shift moves nothing. It used to be
+/// `start_idx + 1`, which for a fenced code block in a tight list item put the
+/// span — and a `+1` — in front of the `<pre>`'s record (and the `<pre>` inside
+/// the span). The repair stays, because nothing but this argument keeps an
+/// insert from landing behind a record.
 ///
 /// [`BlockLines`] therefore cannot simply be carried through. It is **rebuilt**:
 /// `block_cursor` reads the incoming (pass-1-keyed) table, `remapped` is written
 /// with `output.len()` as the key, and `remapped.shift_from` repairs it at the
 /// insert. `output.len()` is exactly the slot the event is about to occupy —
-/// every block `Start` reaches an arm that ends in `output.push`, and the frame
-/// arms already compute `let start_idx = output.len();` immediately before
-/// pushing. The recording sits at the very top of the loop body, ahead of every
-/// `continue`; a block start is never an `Event::Text`, so the early text path
-/// can never reach it.
+/// every block `Start` reaches an arm that ends in `output.push`. The recording
+/// sits near the top of the loop body, ahead of every `continue`; a block start
+/// is never an `Event::Text`, so the early text path can never reach it. The
+/// one push allowed ahead of it is the wash close a nested block start forces,
+/// which is why that close is emitted *before* the record is taken.
 ///
 /// [`TextLines`] needs none of this: it is read on the *input* side, by the
 /// `enumerate()` counter.
@@ -2625,7 +2672,11 @@ fn mark_incomplete_blocks<'a>(
     block_lines: &mut BlockLines,
 ) -> Vec<Event<'a>> {
     struct Frame {
-        start_idx: usize,
+        /// Where a block-wide wash opens: just after the frame's `Start`, or
+        /// just after the last nested block that closed inside it, so the wash
+        /// never takes in a nested list, code block or quote that precedes the
+        /// frame's own first text.
+        inline_start: usize,
         has_seen_text: bool,
         marker_open: bool,
     }
@@ -2648,10 +2699,22 @@ fn mark_incomplete_blocks<'a>(
     // The index is the *input* position, which is what `TextLines` recorded;
     // `output` drifts from it as spans are inserted.
     for (index, event) in events.into_iter().enumerate() {
+        // A block-wide wash is an inline `<span>`, so it closes before the
+        // first nested block of its frame (`- TODO title` + a nested list):
+        // left open, it would wrap the `<ul>`. This push must come *before*
+        // the event's record below, which keys off `output.len()`.
+        if is_nested_block_start(&event)
+            && let Some(top) = stack.last_mut()
+            && top.marker_open
+        {
+            output.push(Event::Html(CowStr::Borrowed(INCOMPLETE_SPAN_CLOSE)));
+            top.marker_open = false;
+        }
+
         // Re-key this event's `data-mbr-line` record onto the slot it is about
-        // to occupy in `output`. Must stay at the very top of the body: every
-        // path below either pushes the event or `continue`s past it, and the
-        // text path continues. See `# Index alignment`.
+        // to occupy in `output`. Every path below either pushes the event or
+        // `continue`s past it, and the text path continues; nothing but the
+        // close above may push ahead of it. See `# Index alignment`.
         if block_lines.enabled
             && let Some(line) = block_cursor.line_at(index)
         {
@@ -2679,16 +2742,18 @@ fn mark_incomplete_blocks<'a>(
                     top.has_seen_text = true;
                     let indent = text.len() - text.trim_start().len();
                     if let Some(end) = rule.block_initial_match(text.trim_start()) {
-                        // Immediately after this frame's Start event.
+                        // After the frame's Start, or after its last nested
+                        // block: ahead of any inline events (`**TODO**`) that
+                        // precede this text.
                         output.insert(
-                            top.start_idx + 1,
+                            top.inline_start,
                             open_incomplete_span(line, &mut highest_anchored_line),
                         );
                         // The one non-`push` in this function, and therefore the
                         // one place the output keying has to be repaired. See
                         // `# Index alignment`.
                         if block_lines.enabled {
-                            remapped.shift_from(top.start_idx + 1);
+                            remapped.shift_from(top.inline_start);
                         }
                         top.marker_open = true;
                         // The block-wide span already covers this occurrence.
@@ -2733,10 +2798,9 @@ fn mark_incomplete_blocks<'a>(
             | Event::Start(Tag::Heading { .. })
             | Event::Start(Tag::Item)
             | Event::Start(Tag::TableCell) => {
-                let start_idx = output.len();
                 output.push(event);
                 stack.push(Frame {
-                    start_idx,
+                    inline_start: output.len(),
                     has_seen_text: false,
                     marker_open: false,
                 });
@@ -2755,6 +2819,14 @@ fn mark_incomplete_blocks<'a>(
             _ => {
                 output.push(event);
             }
+        }
+
+        // A nested block just closed inside the innermost frame: a wash for
+        // text that follows it starts here, not in front of the block.
+        if let Some(top) = stack.last_mut()
+            && is_nested_block_end(output.last())
+        {
+            top.inline_start = output.len();
         }
     }
 
@@ -8223,23 +8295,21 @@ mod tests {
         }
     }
 
-    /// The gotcha this whole remap exists for. `mark_incomplete_blocks` inserts
-    /// a wash span behind an *already emitted* `Start`, which shifts every
-    /// output index recorded after it. Removing the `shift_from` call in
-    /// `mark_incomplete_blocks` makes this test fail.
+    /// The shape the remap was built for. `mark_incomplete_blocks` inserts a
+    /// wash span behind already-emitted events, which shifts every output index
+    /// recorded after the insert point.
     ///
     /// # Why this fixture
     ///
-    /// The insert lands at `frame.start_idx + 1`, so it only shifts anything
-    /// when the frame's start is *not* the last thing in `output` — i.e. when a
+    /// A fenced code block in a **tight** list item is the one shape where a
     /// complete nested block sits between the frame's `Start` and its own first
-    /// text. A nested **list** does not produce that: `- - inner` followed by an
-    /// indented line makes the second line a lazy continuation of the *inner*
-    /// item, and separating them with a blank line wraps the outer text in its
-    /// own `Paragraph` frame, whose insert is an append. A fenced code block in
-    /// a **tight** list item is the shape that does it: the item's first text
-    /// arrives after `End(CodeBlock)`, with the item frame still text-less, so
-    /// the span is inserted behind the code block's already-recorded slot.
+    /// text: the item's first text arrives after `End(CodeBlock)`, with the item
+    /// frame still text-less. The insert used to land at `start_idx + 1`, in
+    /// front of the `<pre>` (wrapping it, and needing `shift_from` to keep the
+    /// `<pre>`'s record). It now lands after `</pre>`, so the span covers only
+    /// the item's own text and the `<pre>` keeps its line with nothing to shift.
+    /// (A nested **list** cannot produce the shape: `- - inner` + an indented
+    /// line makes the second line a lazy continuation of the inner item.)
     #[tokio::test]
     async fn block_lines_survive_pass_three_insertion() {
         let md = concat!(
@@ -8255,10 +8325,15 @@ mod tests {
             html.contains(INCOMPLETE_SPAN_PREFIX),
             "the insertion really did happen: {html}"
         );
-        // Recorded before the insert, and therefore the record that needs the
-        // `+1`. Without `shift_from` it addresses the inserted span instead —
-        // an `Event::Html`, which no writer arm asks for a line — so the `<pre>`
-        // silently loses its attribute.
+        let pre_end = html.find("</pre>").expect("code block rendered");
+        assert!(
+            html.find(INCOMPLETE_SPAN_PREFIX)
+                .is_some_and(|at| at > pre_end),
+            "the wash opens after the code block, not around it: {html}"
+        );
+        // Recorded before the insert. Had the span gone in front of it, the
+        // record would need the `+1` or it would address the span — an
+        // `Event::Html`, which no writer arm asks for a line.
         assert_eq!(
             block_line_of_tag(&html, "<pre"),
             Some(1),
@@ -8275,6 +8350,195 @@ mod tests {
             block_line_of(&html, "Later paragraph"),
             Some(6),
             "the later paragraph is on line 6: {html}"
+        );
+    }
+
+    /// The inner HTML of every incomplete-marker wash in `html`, outermost
+    /// first, matching each opening `<span` to its `</span>` by depth.
+    pub(super) fn wash_bodies(html: &str) -> Vec<&str> {
+        html.match_indices(INCOMPLETE_SPAN_PREFIX)
+            .map(|(at, _)| {
+                let body_at = at + html[at..].find('>').expect("a closed tag") + 1;
+                let mut depth = 1usize;
+                let mut cursor = body_at;
+                loop {
+                    let rest = &html[cursor..];
+                    let open = rest.find("<span");
+                    let close = rest.find("</span>").expect("an unclosed wash span");
+                    match open {
+                        Some(o) if o < close => {
+                            depth += 1;
+                            cursor += o + "<span".len();
+                        }
+                        _ => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return &html[body_at..cursor + close];
+                            }
+                            cursor += close + "</span>".len();
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Block-level tags a `<span>` may not contain.
+    const BLOCK_TAGS: &[&str] = &[
+        "<ul",
+        "<ol",
+        "<li",
+        "<pre",
+        "<blockquote",
+        "<table",
+        "<p>",
+        "<p ",
+        "<div",
+        "<hr",
+        "<h1",
+        "<h2",
+        "<h3",
+        "<h4",
+        "<h5",
+        "<h6",
+        "<dl",
+        "<section",
+    ];
+
+    /// Whether `html`'s elements nest properly: every close tag closes the most
+    /// recently opened element. Void elements are skipped.
+    pub(super) fn is_well_nested(html: &str) -> bool {
+        const VOID: &[&str] = &["input", "br", "hr", "img", "meta", "source", "wbr", "col"];
+        let mut stack: Vec<&str> = Vec::new();
+        let mut rest = html;
+        while let Some(at) = rest.find('<') {
+            let tag_end = match rest[at..].find('>') {
+                Some(end) => at + end,
+                None => return false,
+            };
+            let tag = &rest[at + 1..tag_end];
+            rest = &rest[tag_end + 1..];
+            if tag.starts_with('!') || tag.ends_with('/') {
+                continue;
+            }
+            if let Some(name) = tag.strip_prefix('/') {
+                if stack.pop() != Some(name.trim()) {
+                    return false;
+                }
+                continue;
+            }
+            let name = tag.split([' ', '\n', '\t']).next().unwrap_or_default();
+            if !VOID.contains(&name) {
+                stack.push(name);
+            }
+        }
+        stack.is_empty()
+    }
+
+    /// The wash on a list item covers only the item's own inline content and
+    /// closes before any nested block (#bug: `<ul>` inside an inline `<span>`
+    /// painted a stray wash around the nested list). Also checks that every
+    /// `data-mbr-line` is what the render without highlighting gives, and that
+    /// each anchor still names its marker's line.
+    #[tokio::test]
+    async fn wash_closes_before_a_nested_block() {
+        struct Case {
+            name: &'static str,
+            md: &'static str,
+            /// Each wash's inner HTML, in document order (anchors stripped).
+            washes: &'static [&'static str],
+            anchors: &'static [u32],
+        }
+        let cases = [
+            Case {
+                name: "tight item over a nested list (the kanban card)",
+                md: concat!(
+                    "* TODO: card title marker\n",
+                    "  * first content line\n",
+                    "  * [ ] a task\n",
+                    "* Normal card\n",
+                    "  * TODO: content marker\n",
+                ),
+                washes: &["TODO: card title marker", "TODO: content marker"],
+                anchors: &[1, 5],
+            },
+            Case {
+                name: "tight item over a fenced code block",
+                md: "- TODO: fix\n  ```\n  TODO in code\n  ```\n",
+                washes: &["TODO: fix"],
+                anchors: &[1],
+            },
+            Case {
+                name: "tight item over a blockquote",
+                md: "- TODO: quote\n  > quoted\n",
+                washes: &["TODO: quote"],
+                anchors: &[1],
+            },
+            Case {
+                name: "loose item",
+                md: "- TODO: loose\n\n  - nested\n",
+                washes: &["TODO: loose"],
+                anchors: &[1],
+            },
+            Case {
+                name: "marker only in the nested item",
+                md: "- parent\n  - TODO: child\n",
+                washes: &["TODO: child"],
+                anchors: &[2],
+            },
+            Case {
+                name: "marker at two levels",
+                md: "- TODO: one\n  - TODO: two\n    - three\n",
+                washes: &["TODO: one", "TODO: two"],
+                anchors: &[1, 2],
+            },
+            Case {
+                name: "inline markup before the marker",
+                md: "- **TODO** bold\n  - child\n",
+                washes: &["<strong>TODO</strong> bold"],
+                anchors: &[1],
+            },
+        ];
+        for case in cases {
+            let html = render_review(case.md, true).await;
+            let bodies: Vec<String> = wash_bodies(&html)
+                .into_iter()
+                .map(without_marker_ids)
+                .collect();
+            assert_eq!(bodies, case.washes, "{}: {html}", case.name);
+            assert!(is_well_nested(&html), "{}: badly nested: {html}", case.name);
+            assert_eq!(
+                marker_anchor_lines(&html),
+                case.anchors,
+                "{}: {html}",
+                case.name
+            );
+            assert_eq!(
+                emitted_block_lines(&html),
+                emitted_block_lines(&render_review(case.md, false).await),
+                "{}: data-mbr-line must not move: {html}",
+                case.name
+            );
+        }
+    }
+
+    /// A task item's wash keeps its checkbox (the historical whole-item wash)
+    /// and still stops at the nested list.
+    #[tokio::test]
+    async fn task_item_wash_stops_at_its_children() {
+        let md = "* [ ] TODO: x\n  * child\n";
+        let html = render_review(md, true).await;
+        let bodies = wash_bodies(&html);
+        assert_eq!(bodies.len(), 1, "{html}");
+        assert!(bodies[0].contains("TODO: x"), "{html}");
+        assert!(
+            !BLOCK_TAGS.iter().any(|tag| bodies[0].contains(tag)),
+            "{html}"
+        );
+        assert!(is_well_nested(&html), "{html}");
+        assert!(
+            html.contains("<li data-mbr-line=\"2\">child</li>"),
+            "{html}"
         );
     }
 
@@ -8935,6 +9199,98 @@ mod tests {
 mod proptests {
     use super::*;
     use proptest::prelude::*;
+
+    /// One generated list line: nesting depth (clamped to one more than the
+    /// previous line's), whether it starts with a marker, and what follows it.
+    fn nested_list_source(lines: &[(usize, bool, u8)], loose: bool) -> String {
+        let mut md = String::new();
+        let mut previous_depth = 0usize;
+        for (n, &(depth, marked, child)) in lines.iter().enumerate() {
+            let depth = if n == 0 {
+                0
+            } else {
+                depth.min(previous_depth + 1)
+            };
+            previous_depth = depth;
+            let indent = "  ".repeat(depth);
+            let text = if marked { "TODO: item" } else { "item" };
+            let task = if child == 4 { "[ ] " } else { "" };
+            md.push_str(&format!("{indent}- {task}{text} {n}\n"));
+            let inner = format!("{indent}  ");
+            match child {
+                1 => md.push_str(&format!("{inner}```\n{inner}TODO code\n{inner}```\n")),
+                2 => md.push_str(&format!("{inner}> TK quoted\n")),
+                3 => md.push_str(&format!("{inner}| A |\n{inner}|---|\n{inner}| TK |\n")),
+                _ => {}
+            }
+            if loose {
+                md.push('\n');
+            }
+        }
+        md
+    }
+
+    fn render_marked(md: &str, mark_incomplete: bool) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        let markers: Vec<String> = ["TK", "TODO", "FIXME", "XXX"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        let options = RenderOptions {
+            root_path: root,
+            oembed_timeout_ms: 0,
+            link_transform_config: crate::link_transform::LinkTransformConfig::default(),
+            oembed_cache: None,
+            server_mode: true,
+            transcode_enabled: false,
+            valid_tag_sources: HashSet::new(),
+            review: ReviewLines::Emit,
+            mark_incomplete,
+            incomplete_markers: &markers,
+            wikilink_index: None,
+            math_fences: true,
+        };
+        render_str(md, &root.join("note.md"), options).unwrap().html
+    }
+
+    fn block_line_values(html: &str) -> Vec<&str> {
+        const ATTR: &str = "data-mbr-line=\"";
+        html.match_indices(ATTR)
+            .map(|(at, _)| {
+                let rest = &html[at + ATTR.len()..];
+                &rest[..rest.find('"').expect("unterminated")]
+            })
+            .collect()
+    }
+
+    proptest! {
+        /// For any nested list with markers at any level and block children
+        /// (fences, quotes, tables) under any item: no wash wraps a block
+        /// element, the page stays well nested, every `data-mbr-line` is what
+        /// the render without highlighting gives, and no anchor id repeats.
+        #[test]
+        fn a_wash_never_wraps_a_block(
+            lines in proptest::collection::vec((0usize..4, any::<bool>(), 0u8..5), 1..10),
+            loose in any::<bool>(),
+        ) {
+            let md = nested_list_source(&lines, loose);
+            let html = render_marked(&md, true);
+            prop_assert!(super::tests::is_well_nested(&html), "badly nested:\n{}\n{}", md, html);
+            for body in super::tests::wash_bodies(&html) {
+                for tag in ["<ul", "<ol", "<li", "<pre", "<blockquote", "<table", "<p>", "<p ", "<div"] {
+                    prop_assert!(!body.contains(tag), "{} in a wash:\n{}\n{}", tag, md, html);
+                }
+            }
+            let plain = render_marked(&md, false);
+            prop_assert_eq!(block_line_values(&html), block_line_values(&plain), "{}", md);
+            let ids: Vec<&str> = html.match_indices("id=\"mbr-marker-").map(|(at, _)| {
+                let rest = &html[at..];
+                &rest[..rest[4..].find('"').expect("unterminated") + 5]
+            }).collect();
+            let unique: HashSet<&&str> = ids.iter().collect();
+            prop_assert_eq!(unique.len(), ids.len(), "{}", html);
+        }
+    }
 
     proptest! {
         /// A `---`-delimited block anywhere below the top never changes the

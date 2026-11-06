@@ -204,8 +204,7 @@ html.mbr-embedded body.slides-container .reveal .slide-number {
   font-weight: normal;
 }
 
-.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > :is(ul, ol),
-.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > .mbr-incomplete > :is(ul, ol) {
+.reveal .slides section.kanban .mbr-kanban-column > :is(ul, ol) > li > :is(ul, ol) {
   margin-top: 0.5em;
   padding-top: 0.4em;
   border-top: 1px solid var(--pico-muted-border-color, rgba(127, 127, 127, 0.3));
