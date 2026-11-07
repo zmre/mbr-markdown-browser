@@ -88,6 +88,31 @@
   /* Arrival flash for a #mbr-task-N deep link. */
   --mbr-task-flash-color: rgba(255, 213, 79, 0.55);
 
+  /* Calendar (mini month, day agenda, time chips). Derived from Pico's own
+   * colours, so they follow light and dark without a second copy below; the
+   * companion's shadow root reads the same properties. */
+  --mbr-companion-width: 300px;
+  --mbr-cal-daily-bg: color-mix(in srgb, var(--pico-primary) 14%, transparent);
+  --mbr-cal-today: var(--pico-primary);
+  --mbr-cal-selected: var(--pico-primary);
+  --mbr-cal-open: var(--pico-primary);
+  --mbr-cal-overdue: var(--pico-del-color, #c62828);
+  /* Note-type dots in the calendar overlay: a type's slot is FNV-1a of its
+   * lowercased name mod 8 (calendar/overlay-model.ts, pinned by a test).
+   * Mid-tone, so a dot reads on light and dark alike. */
+  --mbr-cal-type-0: #1e88e5;
+  --mbr-cal-type-1: #e53935;
+  --mbr-cal-type-2: #43a047;
+  --mbr-cal-type-3: #fb8c00;
+  --mbr-cal-type-4: #8e24aa;
+  --mbr-cal-type-5: #00897b;
+  --mbr-cal-type-6: #d81b60;
+  --mbr-cal-type-7: #c49000;
+  --mbr-agenda-chip-bg: color-mix(in srgb, var(--pico-primary) 13%, transparent);
+  --mbr-agenda-chip-color: var(--pico-primary);
+  --mbr-agenda-now-color: var(--pico-primary);
+  --mbr-agenda-next-color: color-mix(in srgb, var(--pico-primary) 45%, transparent);
+
   /* Review notes (r / R). One accent per note type, matching the six in
    * components/src/review/types.ts. The panel restates its rules against these
    * same properties inside its shadow root -- custom properties cross that
@@ -136,6 +161,8 @@
   --mbr-icon-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 16h.01'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z'/%3E%3C/svg%3E");
   --mbr-icon-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v3'/%3E%3Cpath d='M16 2v3'/%3E%3Crect x='3' y='3' width='18' height='18' rx='2'/%3E%3Cpath d='M3 9h18'/%3E%3C/svg%3E");
   --mbr-icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  --mbr-icon-calendar-clock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 14v2.2l1.6 1'/%3E%3Cpath d='M16 2v3'/%3E%3Cpath d='M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338'/%3E%3Cpath d='M3 9h5.859'/%3E%3Cpath d='M8 2v3'/%3E%3Ccircle cx='16' cy='16' r='6'/%3E%3C/svg%3E");
+  --mbr-icon-x: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 6 6 18'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E");
   --mbr-icon-arrow-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14'/%3E%3Cpath d='m12 5 7 7-7 7'/%3E%3C/svg%3E");
   --mbr-icon-chevron-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E");
 
@@ -791,7 +818,9 @@ blockquote.markdown-alert-caution > p:first-of-type::before {
 /*
  * Markup emitted by `markdown::collect_events_and_headings` for `- [ ]`,
  * `- [x]`, `- [-]` (canceled) and `- [>]` (moved), with the `@due` / `@done` /
- * `#tag` / `!!` annotations lifted out of the text and rendered as chips:
+ * `#tag` / `!!` annotations (and their Obsidian Tasks, Dataview and org
+ * spellings, plus scheduled and cancelled dates) lifted out of the text and
+ * rendered as chips:
  *
  *   <li><input type="checkbox" class="mbr-task-check" id="mbr-task-12"
  *              data-mbr-task-line="12" data-mbr-task-status="open" disabled>
@@ -899,7 +928,9 @@ li.mbr-task-flash,
  * machine-readable value it needs is already in each chip's `datetime`.
  */
 .mbr-task-due,
+.mbr-task-scheduled,
 .mbr-task-completed,
+.mbr-task-canceled-on,
 .mbr-task-moved {
   background: var(--mbr-task-chip-bg);
   color: var(--mbr-task-chip-color);
@@ -915,7 +946,9 @@ li.mbr-task-flash,
  * ignored by Chromium, which drew a colour emoji in every due chip.
  */
 .mbr-task-due::before,
+.mbr-task-scheduled::before,
 .mbr-task-completed::before,
+.mbr-task-canceled-on::before,
 .mbr-task-moved::before {
   content: "";
   display: inline-block;
@@ -932,8 +965,17 @@ li.mbr-task-flash,
   --mbr-chip-icon: var(--mbr-icon-calendar);
 }
 
+.mbr-task-scheduled {
+  --mbr-chip-icon: var(--mbr-icon-calendar-clock);
+}
+
 .mbr-task-completed {
   --mbr-chip-icon: var(--mbr-icon-check);
+}
+
+/* The day a task was cancelled (`❌ …`, `[cancelled:: …]`). */
+.mbr-task-canceled-on {
+  --mbr-chip-icon: var(--mbr-icon-x);
 }
 
 .mbr-task-moved {
@@ -2750,6 +2792,221 @@ main .mbr-fc-pie-unreviewed {
   }
 }
 
+/* ==================== Periodic-note Navigation (_calendar_nav.html) ==================== */
+/*
+ * The slim prev / up / next bar at the top of <main> on a daily, weekly,
+ * monthly, quarterly or yearly note. In <main>, not the header, because the
+ * iOS app collapses the header. `[` / `]` follow its rel=prev / rel=next.
+ * Placeholders keep the current period centred when a side has no note.
+ */
+.mbr-calendar-nav {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  font-size: 0.875rem;
+  color: var(--pico-muted-color);
+}
+
+.mbr-calendar-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+
+.mbr-calendar-nav a:hover,
+.mbr-calendar-nav a:focus-visible {
+  color: var(--pico-primary);
+}
+
+.mbr-calendar-nav-prev > span,
+.mbr-calendar-nav-next > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mbr-calendar-nav-next {
+  justify-self: end;
+}
+
+.mbr-calendar-nav-current {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem 0.6rem;
+  text-align: center;
+}
+
+.mbr-calendar-nav-current > strong {
+  color: var(--pico-color);
+  font-weight: 600;
+}
+
+.mbr-calendar-nav-current > svg {
+  flex-shrink: 0;
+}
+
+.mbr-calendar-nav-up {
+  padding: 0 0.4rem;
+  border-radius: var(--pico-border-radius);
+  background: var(--mbr-control-hover-bg, transparent);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 600px) {
+  .mbr-calendar-nav {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .mbr-calendar-nav-current {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  /* 44px touch targets for the two arrows. */
+  .mbr-calendar-nav-prev,
+  .mbr-calendar-nav-next {
+    min-height: 44px;
+  }
+}
+
+/* ==================== Toast (toast.ts) ==================== */
+/* A transient status message ("No daily notes found"), bottom centre, above
+ * the home indicator. Not interactive, so it never takes a click. */
+.mbr-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 10001;
+  max-width: min(90vw, 28rem);
+  padding: 0.5rem 1rem;
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-contrast-background, #333);
+  color: var(--pico-contrast-inverse, #fff);
+  font-size: 0.9rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+  animation: mbr-toast-in 0.15s ease-out;
+}
+
+@keyframes mbr-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 0.5rem);
+  }
+}
+
+/* ==================== Daily-note Companion (<mbr-calendar>) ==================== */
+/*
+ * On a day note under `[calendar] companion = "auto"` the server adds
+ * `mbr-has-companion` to <body>, and `_footer.html`'s `<mbr-calendar>` (a body
+ * child) becomes a fixed right column of `--mbr-companion-width`: at >=1280px,
+ * or >=1440px when the left sidebar is docked too (`mbr-browse-single` is a
+ * body child exactly when the server rendered it, so this is known before any
+ * script runs). The body is padded by the same width, so nothing shifts when
+ * the companion fills in. `html.mbr-companion-hidden` (set pre-paint by
+ * `_head.html` from the reader's dismissal) collapses it. The breakpoints are
+ * mirrored by `mbr-calendar.ts`'s COMPANION_DOCK_*_QUERY.
+ *
+ * Padding, not a grid column: the sidebar layout is already a grid whose
+ * auto-placed children (breadcrumbs, custom elements) would land in a new
+ * column. `screen and` for the WebKit print bug described at the sidebar grid.
+ *
+ * The header, breadcrumbs, main and footer get Pico's gutter, as with the
+ * sidebar: a container narrower than its max-width has no slack, and the
+ * header's last `<ul>` pulls outward by a negative margin. */
+@media screen and (min-width: 1280px) {
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) {
+    padding-right: var(--mbr-companion-width);
+  }
+
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > mbr-calendar {
+    display: block;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--mbr-companion-width);
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    border-left: 1px solid var(--pico-muted-border-color);
+    background: var(--pico-background-color);
+    z-index: 100;
+  }
+
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > header,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > nav.breadcrumbs,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > main,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > footer {
+    padding-inline: var(--pico-spacing);
+  }
+}
+
+@media screen and (min-width: 1440px) {
+  html:not(.mbr-companion-hidden) body.mbr-has-companion {
+    padding-right: var(--mbr-companion-width);
+  }
+
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > mbr-calendar {
+    display: block;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--mbr-companion-width);
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    border-left: 1px solid var(--pico-muted-border-color);
+    background: var(--pico-background-color);
+    z-index: 100;
+  }
+
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > header,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > nav.breadcrumbs,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > main,
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > footer {
+    padding-inline: var(--pico-spacing);
+  }
+}
+
+/* A playing slide deck covers the page: no column, no calendar button. */
+body.slides-container > mbr-calendar {
+  display: none !important;
+}
+
+/* ==================== Agenda Time Chips (calendar chunk) ==================== */
+/*
+ * The leading time of each agenda entry ("09:00 - 09:15 Standup") is painted
+ * with the CSS Custom Highlight API from StaticRanges: no element is wrapped,
+ * so review markers, find-in-page and cached ranges keep their text nodes.
+ * `::highlight()` takes only colours and text decoration. Gated by
+ * `[calendar] agenda_chips`. */
+::highlight(mbr-agenda-time) {
+  background-color: var(--mbr-agenda-chip-bg);
+  color: var(--mbr-agenda-chip-color);
+}
+
+/* Today's day note: the entry in progress and the next one. A 3px bar just
+ * left of the item's text (an outer shadow pulled in by its spread), so the
+ * class can come and go each minute without moving a line. */
+main li.mbr-agenda-now {
+  box-shadow: -5px 0 0 -2px var(--mbr-agenda-now-color);
+  background: color-mix(in srgb, var(--mbr-agenda-now-color) 7%, transparent);
+}
+
+main li.mbr-agenda-next {
+  box-shadow: -5px 0 0 -2px var(--mbr-agenda-next-color);
+}
+
 /* ==================== Print Styles ==================== */
 
 @media print {
@@ -2873,6 +3130,11 @@ main .mbr-fc-pie-unreviewed {
   /* The "+" marker announces hidden content. Nothing is hidden here. */
   .mbr-section-collapsed::before {
     content: none;
+  }
+
+  /* Periodic-note navigation is UI, not the note. */
+  .mbr-calendar-nav {
+    display: none;
   }
 
   /* Permalink anchors only exist to be hovered. */

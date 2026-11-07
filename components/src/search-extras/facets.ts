@@ -75,26 +75,118 @@ export function deriveSearchFacets(data: { markdown_files?: unknown } | null | u
 }
 
 /**
- * The `type:` facet token for a note type. A value with whitespace is quoted —
+ * The `key:value` facet token. A value with whitespace is quoted —
  * `parse_query` (src/search.rs `query_tokens`) keeps `key:"two words"` whole.
- * A literal `"` cannot be expressed inside that quoting, so it is dropped; the
- * facet is a substring match, so the remaining text still selects the type.
+ * A literal `"` cannot be expressed inside that quoting, so it is dropped; a
+ * frontmatter facet is a substring match, so the remaining text still selects
+ * the value.
  */
-export function typeFacetToken(type: string): string {
-  const value = type.replace(/"/g, '').trim()
-  return /\s/.test(value) ? `type:"${value}"` : `type:${value}`
+export function facetToken(key: string, value: string): string {
+  const clean = value.replace(/"/g, '').trim()
+  return /\s/.test(clean) ? `${key}:"${clean}"` : `${key}:${clean}`
 }
 
-/** Matches an existing `type:` facet token, quoted or bare. */
-const TYPE_TOKEN = /(^|\s)type:("[^"]*"?|\S*)/gi
+/** The `type:` facet token for a note type. */
+export function typeFacetToken(type: string): string {
+  return facetToken('type', type)
+}
+
+/** Matches every `key:` facet token, quoted or bare, case-insensitively. */
+function facetPattern(key: string): RegExp {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|\\s)${escaped}:("[^"]*"?|\\S*)`, 'gi')
+}
 
 /**
- * `query` with any existing `type:` facet replaced by the one for `type`, so
- * choosing a second type swaps rather than stacking two facets (which would
- * have to both match and select nothing).
+ * `query` with every existing `key:` facet replaced by one for `value` (or
+ * just removed, for `null` or an empty value), so choosing a second value
+ * swaps rather than stacking two facets (which would both have to match).
  */
-export function withTypeFacet(query: string, type: string): string {
-  const rest = query.replace(TYPE_TOKEN, ' ').replace(/\s+/g, ' ').trim()
-  const token = typeFacetToken(type)
+export function withFacet(query: string, key: string, value: string | null): string {
+  const rest = query.replace(facetPattern(key), ' ').replace(/\s+/g, ' ').trim()
+  if (value === null || !value.trim()) return rest
+  const token = facetToken(key, value)
   return rest ? `${rest} ${token}` : token
+}
+
+/** {@link withFacet} for the note-type selector. */
+export function withTypeFacet(query: string, type: string): string {
+  return withFacet(query, 'type', type)
+}
+
+/** The value of the last `key:` facet in `query`, unquoted, or `null`. */
+export function facetValue(query: string, key: string): string | null {
+  let value: string | null = null
+  for (const m of query.matchAll(facetPattern(key))) {
+    const raw = m[2]
+    const unquoted = raw.startsWith('"') ? raw.replace(/^"|"$/g, '') : raw
+    if (unquoted) value = unquoted
+  }
+  return value
+}
+
+// ---- The search modal's "When" select (design/calendar.md §6.3) ----
+
+/** One `when:` preset; `value` is what goes after `when:`. */
+export interface WhenPreset {
+  readonly label: string
+  readonly value: string
+}
+
+/** The select's value for "Any time" (no `when:` facet). */
+export const WHEN_ANY = ''
+
+/** The select's value for "Custom…" (a hand-made range). Not an expression. */
+export const WHEN_CUSTOM = 'custom'
+
+/** The presets, in menu order, between "Any time" and "Custom…". */
+export const WHEN_PRESETS: readonly WhenPreset[] = [
+  { label: 'Today', value: 'today' },
+  { label: 'Last 7 days', value: '-7d' },
+  { label: 'Last 30 days', value: '-30d' },
+  { label: 'Last 3 months', value: '-3m' },
+  { label: 'Last 12 months', value: '-12m' },
+  { label: 'This year', value: 'this-year' },
+]
+
+/**
+ * What the When select shows for `query`: {@link WHEN_ANY} with no `when:`
+ * facet, the preset's value when the (hand-typed or chosen) facet equals one
+ * (ASCII case-insensitive, as the grammar is), else {@link WHEN_CUSTOM}.
+ */
+export function whenSelectValue(query: string): string {
+  const value = facetValue(query, 'when')
+  if (value === null) return WHEN_ANY
+  const lower = value.toLowerCase()
+  return WHEN_PRESETS.find((p) => p.value === lower)?.value ?? WHEN_CUSTOM
+}
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * The two date inputs of "Custom…" for `query`'s `when:` facet: the ends of a
+ * `YYYY-MM-DD..YYYY-MM-DD` range (either may be open), both ends for a single
+ * day, and empty for anything else (a hand-typed `when:2026-W44` is still
+ * applied; the inputs just cannot show it).
+ */
+export function whenCustomRange(query: string): { from: string; to: string } {
+  const value = facetValue(query, 'when') ?? ''
+  if (DAY.test(value)) return { from: value, to: value }
+  const dots = value.indexOf('..')
+  if (dots < 0) return { from: '', to: '' }
+  const from = value.slice(0, dots)
+  const to = value.slice(dots + 2)
+  return {
+    from: DAY.test(from) ? from : '',
+    to: DAY.test(to) ? to : '',
+  }
+}
+
+/**
+ * The `when:` value for a custom range from two `<input type="date">` values
+ * (`YYYY-MM-DD` or empty): `A..B`, `A..`, `..B`, or `null` when both are
+ * empty (no facet).
+ */
+export function whenCustomValue(from: string, to: string): string | null {
+  return from || to ? `${from}..${to}` : null
 }

@@ -26,7 +26,7 @@ use mbr_core::oembed_cache::OembedCache;
 use mbr_core::page_context::{self, ModeFlags, PageChrome, UrlMode, markdown_file_to_json};
 use mbr_core::path_resolver::{PathResolverConfig, ResolvedPath, resolve_request_path};
 use mbr_core::repo::MarkdownInfo;
-use mbr_core::search::{SearchEngine, SearchQuery, search_other_files};
+use mbr_core::search::{SearchEngine, SearchQuery, parse_query, search_other_files};
 use mbr_core::sorting::sort_files;
 use mbr_core::task_query::IncludeFilter;
 use mbr_core::templates;
@@ -354,10 +354,16 @@ impl ListingCaches {
 /// invalidation cleared the slot, and that stale body would then be served
 /// until the next change. A builder captures the generation up front and its
 /// store is rejected if the generation moved meanwhile.
+///
+/// It also memoizes the [`PeriodicIndex`](mbr_core::calendar::PeriodicIndex)
+/// (periodic-note navigation), which is derived from the same index and so
+/// is dropped by the same invalidation: rebuilt at most once per change
+/// batch, under the same generation guard.
 #[derive(Default)]
 pub struct SiteJsonCache {
     generation: u64,
     body: Option<axum::body::Bytes>,
+    periodic: Option<Arc<mbr_core::calendar::PeriodicIndex>>,
 }
 
 impl SiteJsonCache {
@@ -377,6 +383,19 @@ impl SiteJsonCache {
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.body = None;
+        self.periodic = None;
+    }
+
+    /// The current generation and periodic index, read together.
+    fn periodic_snapshot(&self) -> (u64, Option<Arc<mbr_core::calendar::PeriodicIndex>>) {
+        (self.generation, self.periodic.clone())
+    }
+
+    /// Publishes `index` only if no invalidation happened since `generation`.
+    fn store_periodic(&mut self, generation: u64, index: Arc<mbr_core::calendar::PeriodicIndex>) {
+        if self.generation == generation {
+            self.periodic = Some(index);
+        }
     }
 }
 
@@ -1504,6 +1523,9 @@ pub struct ServerConfig {
     pub flashcards_progress_indicators: bool,
     /// The repository's `[slides]` deck defaults, for `__MBR_CONFIG__.slides`.
     pub slides: mbr_core::slides::SlideSettings,
+    /// The repository's `[calendar]` table: which notes are periodic, which
+    /// frontmatter fields date a note, and `__MBR_CONFIG__.calendar`.
+    pub calendar: mbr_core::calendar::CalendarConfig,
     pub title_prefix: String,
     pub title_suffix: String,
     /// Highlight blocks beginning with an incomplete marker (TK/TODO/FIXME/XXX).
@@ -1616,6 +1638,7 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             flashcards_concentric_threshold: config.flashcards_concentric_threshold,
             flashcards_progress_indicators: config.flashcards_progress_indicators,
             slides: config.slides.clone(),
+            calendar: config.calendar.clone(),
             title_prefix: config.title_prefix.clone(),
             title_suffix: config.title_suffix.clone(),
             // Server/GUI default: on unless config overrides.
@@ -1714,6 +1737,59 @@ impl ServerState {
     fn key_exists(&self, key: &Path) -> bool {
         self.vault_path(key)
             .is_ok_and(|path| matches!(self.vault().stat(&path), Ok(Some(_))))
+    }
+
+    /// The periodic-note index, memoized beside the `site.json` body and
+    /// dropped with it, so it is built at most once per change batch.
+    /// `None` while `[calendar] enabled = false` or before the initial scan
+    /// has finished (a partial index would be memoized as if complete).
+    fn periodic_index(&self) -> Option<Arc<mbr_core::calendar::PeriodicIndex>> {
+        if !self.calendar.enabled || !self.repo.is_scan_complete() {
+            return None;
+        }
+        let (generation, cached) = self.site_json_cache.read().periodic_snapshot();
+        if let Some(index) = cached {
+            return Some(index);
+        }
+        let started = Instant::now();
+        let index = Arc::new(self.repo.periodic_index());
+        tracing::debug!(
+            "Periodic index built in {:?}: {} periods",
+            started.elapsed(),
+            index.len()
+        );
+        self.site_json_cache
+            .write()
+            .store_periodic(generation, Arc::clone(&index));
+        Some(index)
+    }
+
+    /// The prev / next / up bar for the note at `md_path` (an index key),
+    /// when it is a periodic note.
+    fn calendar_nav(
+        &self,
+        md_path: &Path,
+        relative_md_path: &Path,
+    ) -> Option<mbr_core::calendar::CalendarNav> {
+        if !self.calendar.enabled {
+            return None;
+        }
+        // The index entry is the scan's answer; a note the index does not
+        // hold yet (created a moment ago) is judged by its path alone, which
+        // is all a period depends on.
+        let period = self
+            .repo
+            .markdown_files
+            .pin()
+            .get(md_path)
+            .map(|info| info.calendar.and_then(|c| c.period))
+            .unwrap_or_else(|| {
+                self.repo
+                    .calendar_rules()
+                    .resolve(relative_md_path, None)
+                    .and_then(|c| c.period)
+            })?;
+        Some(self.periodic_index()?.nav(&period))
     }
 
     /// Whether `key` is an existing directory, as `Path::is_dir` answered.
@@ -1844,6 +1920,8 @@ pub struct ServerState {
     pub flashcards_progress_indicators: bool,
     /// The repository's `[slides]` deck defaults.
     pub slides: mbr_core::slides::SlideSettings,
+    /// The repository's `[calendar]` table.
+    pub calendar: Arc<mbr_core::calendar::CalendarConfig>,
     /// Text to prepend to all page titles
     pub title_prefix: String,
     /// Text to append to all page titles
@@ -2340,6 +2418,7 @@ impl Server {
             flashcards_concentric_threshold,
             flashcards_progress_indicators,
             slides,
+            calendar,
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -2421,7 +2500,8 @@ impl Server {
                     &relationship_types,
                 )
                 .with_explicit_hidden_dirs(&explicit_hidden_dirs)
-                .with_symlink_mounts(symlink_mounts),
+                .with_symlink_mounts(symlink_mounts)
+                .with_calendar(&calendar),
                 None,
             ),
             Some(EmbeddedStorage { vault, snapshot }) => (
@@ -2436,6 +2516,7 @@ impl Server {
                     &relationship_types,
                 )
                 .with_explicit_hidden_dirs(&explicit_hidden_dirs)
+                .with_calendar(&calendar)
                 .with_change_tracking(),
                 snapshot,
             ),
@@ -2759,6 +2840,7 @@ impl Server {
             flashcards_concentric_threshold,
             flashcards_progress_indicators,
             slides,
+            calendar: Arc::new(calendar),
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -3303,9 +3385,14 @@ impl Server {
             let engine = SearchEngine::new(repo.clone());
             let mut response = engine.search(&query)?;
 
-            // If searching all filetypes or non-markdown, also search other files
-            if query.filetype.as_deref() == Some("all")
-                || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown"))
+            // If searching all filetypes or non-markdown, also search other files.
+            // Not for a query with a date facet: this path-only match knows
+            // nothing of dates, and its re-sort by score would undo the date
+            // order. The engine already applied the date facets to other files.
+            let has_date_facets = parse_query(&query.q).has_date_facets();
+            if !has_date_facets
+                && (query.filetype.as_deref() == Some("all")
+                    || (query.filetype.is_some() && query.filetype.as_deref() != Some("markdown")))
             {
                 let other_results = search_other_files(
                     &repo,
@@ -3431,6 +3518,9 @@ impl Server {
         // worth keeping off the async runtime.
         let files = config.task_index.snapshot();
         let today = chrono::Local::now().date_naive();
+        if query.mode == mbr_core::task_query::TaskMode::Grid {
+            return Self::tasks_grid(&config, files, query, today, scan_in_progress).await;
+        }
         let result = tokio::task::spawn_blocking(move || {
             mbr_core::task_query::run_query(&files, &query, today)
         })
@@ -3464,6 +3554,72 @@ impl Server {
             ),
             Err(e) => {
                 tracing::error!("Failed to serialize task response: {e}");
+                Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to serialize task response",
+                )
+            }
+        }
+    }
+
+    /// `mode: "grid"` (design/calendar.md §8.1): the tasks placed on each day
+    /// of `from..=to`, for the task panel's week and month grids and the
+    /// calendar companion's day markers.
+    ///
+    /// The day notes of the range come from the memoized periodic index (one
+    /// lookup per day, at most [`mbr_core::task_query::MAX_GRID_DAYS`]); while
+    /// it is unavailable (calendar off, scan still running) no undated counts
+    /// are reported, and `scan_in_progress` says why.
+    async fn tasks_grid(
+        config: &ServerState,
+        files: Vec<std::sync::Arc<mbr_core::task_index::FileTasks>>,
+        query: mbr_core::task_query::TaskQuery,
+        today: chrono::NaiveDate,
+        scan_in_progress: bool,
+    ) -> Response<Body> {
+        let (from, to) = mbr_core::task_query::grid_range(query.from, query.to, today);
+        let day_notes: std::collections::HashMap<String, chrono::NaiveDate> = config
+            .periodic_index()
+            .map(|index| {
+                from.iter_days()
+                    .take_while(|day| *day <= to)
+                    .filter_map(|day| {
+                        let period = mbr_core::calendar::Period::day(day)?;
+                        index.get(&period).map(|note| (note.url_path.clone(), day))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let result = tokio::task::spawn_blocking(move || {
+            mbr_core::task_query::run_grid_query(&files, &query, today, &day_notes)
+        })
+        .await;
+        let mut response = match result {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::error!("Task grid query task panicked: {e}");
+                return Self::tasks_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Task query task failed",
+                );
+            }
+        };
+        response.scan_in_progress = scan_in_progress;
+        tracing::debug!(
+            "Task grid query completed: {} matches over {} day(s), {}ms",
+            response.total_matches,
+            response.days.len(),
+            response.duration_ms
+        );
+        match serde_json::to_vec(&response) {
+            Ok(body) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to serialize task grid response: {e}");
                 Self::tasks_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to serialize task response",
@@ -4918,6 +5074,7 @@ impl Server {
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
                 root_dir: Some(&config.base_dir),
+                calendar: &config.calendar,
             },
         );
 
@@ -5249,6 +5406,8 @@ impl Server {
                 // (discrete parameters only) and an error page has no
                 // markdown body to scope review storage against anyway.
                 root_dir: None,
+                // Discrete parameters only here: the defaults.
+                calendar: &mbr_core::calendar::CalendarConfig::default(),
             },
         );
 
@@ -6582,6 +6741,15 @@ impl Server {
             ));
         }
 
+        // A periodic note that lost its period to another note. The index is
+        // the one the navigation bar uses, so the two cannot disagree.
+        if let Some(duplicate) = config
+            .periodic_index()
+            .and_then(|index| index.duplicate_of(&page_url_path).cloned())
+        {
+            errors.push(mbr_core::page_errors::periodic_duplicate_error(&duplicate));
+        }
+
         let payload = PageErrors {
             page_url: page_url_path,
             errors,
@@ -7622,6 +7790,9 @@ impl Server {
         // render; the cache is cleared whenever files change.
         let siblings: Arc<Vec<serde_json::Value>> = cached_dir_files(config, parent_dir);
 
+        // Periodic-note navigation (`_calendar_nav.html`), for a periodic note.
+        let calendar_nav = config.calendar_nav(md_path, &relative_md_path);
+
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; server mode uses absolute URLs.
         let mut extra_context = page_context::markdown_extra_context(
@@ -7636,6 +7807,7 @@ impl Server {
                 current_url: &current_url,
                 siblings: &siblings,
                 slides: slides.as_ref().map(|s| &s.settings),
+                calendar_nav: calendar_nav.as_ref(),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -7651,6 +7823,7 @@ impl Server {
                 title_suffix: &config.title_suffix,
                 root_dir: Some(&config.base_dir),
                 slides: &config.slides,
+                calendar: &config.calendar,
             },
             &page_context::UrlMode::Absolute,
         );
@@ -7921,6 +8094,7 @@ impl Server {
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
                 root_dir: Some(&config.base_dir),
+                calendar: &config.calendar,
             },
         );
 
@@ -8006,6 +8180,7 @@ impl Server {
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
                 root_dir: Some(&config.base_dir),
+                calendar: &config.calendar,
             },
         );
 
@@ -8052,6 +8227,7 @@ impl Server {
                 tasks_default_include: config.tasks_default_include,
                 title_affixes: Some((&config.title_prefix, &config.title_suffix)),
                 root_dir: Some(&config.base_dir),
+                calendar: &config.calendar,
             },
         );
 
@@ -8959,6 +9135,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 0,
             modified: 0,
+            calendar: None,
             relationships: Vec::new(),
         }
     }
@@ -9655,6 +9832,7 @@ mod tests {
             sibling_nav_cache: Arc::new(papaya::HashMap::new()),
             subdir_cache: Arc::new(papaya::HashMap::new()),
             site_json_cache: Arc::new(parking_lot::RwLock::new(SiteJsonCache {
+                periodic: None,
                 generation: 0,
                 body: Some(axum::body::Bytes::from_static(b"{\"markdown_files\":[]}")),
             })),

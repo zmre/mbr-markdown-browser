@@ -14,7 +14,7 @@
 import { html, nothing, type TemplateResult } from 'lit'
 import { chipDatetime, formatChipLabel, isOverdue, priorityDot } from './task-format.js'
 import type { TaskHit, TaskStatus } from './types.js'
-import { icon, iconCalendar, iconCheck } from '../icons.js'
+import { icon, iconCalendar, iconCalendarClock, iconCheck } from '../icons.js'
 
 /** Indent per nesting level for a subtask, in rem. */
 const DEPTH_INDENT_REM = 0.9
@@ -167,7 +167,7 @@ function renderChips(
   locale?: string
 ): TemplateResult | typeof nothing {
   const tags = hit.tags ?? []
-  const hasChips = tags.length > 0 || hit.due !== null || hit.done !== null
+  const hasChips = tags.length > 0 || hit.due !== null || hit.scheduled !== null || hit.done !== null
   if (!hasChips) return nothing
 
   const overdue = status === 'open' && isOverdue(hit.due, today)
@@ -181,6 +181,14 @@ function renderChips(
             datetime=${chipDatetime(hit.due, hit.due_has_time)}
             title=${overdue ? 'Overdue' : 'Due'}
             >${icon(iconCalendar, { size: 12, className: 'chip-icon' })}${formatChipLabel(hit.due, hit.due_has_time, locale)}</time
+          >`
+        : nothing}
+      ${hit.scheduled
+        ? html`<time
+            class="mbr-task-scheduled"
+            datetime=${chipDatetime(hit.scheduled, hit.scheduled_has_time)}
+            title="Scheduled"
+            >${icon(iconCalendarClock, { size: 12, className: 'chip-icon' })}${formatChipLabel(hit.scheduled, hit.scheduled_has_time, locale)}</time
           >`
         : nothing}
       ${hit.done

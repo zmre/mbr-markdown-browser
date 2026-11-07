@@ -21,6 +21,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::calendar::{CalendarConfig, CalendarNav, CompanionMode, PeriodKind};
 use crate::config::TagSource;
 use crate::edit_auth::content_hash;
 use crate::link_transform::make_relative_url;
@@ -111,6 +112,9 @@ pub struct PageChrome<'a> {
     /// review feature is unconditionally off there) or an error page (no
     /// markdown body, nothing to review).
     pub root_dir: Option<&'a Path>,
+    /// The repository's `[calendar]` table, published as
+    /// `__MBR_CONFIG__.calendar` (the `d` key works on every page).
+    pub calendar: &'a CalendarConfig,
 }
 
 /// Inserts the shared chrome key set into a template context.
@@ -148,6 +152,57 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
         ctx.insert("title_suffix".to_string(), json!(suffix));
     }
     insert_repo_id(ctx, chrome.root_dir);
+    insert_calendar_config(ctx, chrome.calendar);
+}
+
+/// Inserts `calendar_config`, the `[calendar]` table as script-safe JSON for
+/// `_head.html`'s `__MBR_CONFIG__.calendar`, and `calendar_enabled`, which
+/// gates `_footer.html`'s `<mbr-calendar>` and `_head.html`'s pre-paint
+/// companion preference.
+pub fn insert_calendar_config(ctx: &mut HashMap<String, Value>, calendar: &CalendarConfig) {
+    let json = serde_json::to_string(calendar).unwrap_or_else(|_| "{}".to_string());
+    ctx.insert(
+        "calendar_config".to_string(),
+        json!(crate::templates::escape_json_for_script(&json)),
+    );
+    ctx.insert("calendar_enabled".to_string(), json!(calendar.enabled));
+}
+
+/// Whether the daily-note companion docks on this page (§4.1 of
+/// `design/calendar.md`): a **day** note under `companion = "auto"`. The
+/// window width is the stylesheet's business; this only decides whether the
+/// page asks for the column, so the space is reserved before any script runs.
+pub fn companion_docks(nav: Option<&CalendarNav>, calendar: &CalendarConfig) -> bool {
+    calendar.enabled
+        && calendar.companion == CompanionMode::Auto
+        && nav.is_some_and(|nav| nav.kind == PeriodKind::Day)
+}
+
+/// Inserts `calendar_companion: true` when [`companion_docks`]; the template
+/// renderer folds it into the `<body>` class list as `mbr-has-companion`
+/// (`templates::COMPANION_BODY_CLASS`), so a custom `.mbr/index.html` that
+/// renders `{{ style }}` gets the column without a change.
+pub fn insert_calendar_companion(
+    ctx: &mut HashMap<String, Value>,
+    nav: Option<&CalendarNav>,
+    calendar: &CalendarConfig,
+) {
+    if companion_docks(nav, calendar) {
+        ctx.insert("calendar_companion".to_string(), json!(true));
+    }
+}
+
+/// Inserts `calendar_nav` (drawn by `_calendar_nav.html`) for a periodic
+/// note, with its URLs in `url_mode`'s form. Nothing for any other page.
+pub fn insert_calendar_nav(
+    ctx: &mut HashMap<String, Value>,
+    nav: Option<&CalendarNav>,
+    url_mode: &UrlMode,
+) {
+    if let Some(nav) = nav {
+        let nav = nav.clone().map_urls(|url| url_mode.rewrite(url));
+        ctx.insert("calendar_nav".to_string(), json!(nav));
+    }
 }
 
 /// Inserts `repo_id`, a stable per-repository id derived from the server's
@@ -356,6 +411,10 @@ pub struct MarkdownPageParams<'a> {
     /// The note's own `slides:` frontmatter settings (already validated, its
     /// `background_image` already resolved against the note), if any.
     pub slides: Option<&'a SlideSettings>,
+    /// The prev / next / up bar of a periodic note
+    /// ([`crate::calendar::PeriodicIndex::nav`]), site-absolute; `None` for
+    /// every other page and whenever `[calendar] enabled = false`.
+    pub calendar_nav: Option<&'a CalendarNav>,
 }
 
 /// Repository-level configuration for the markdown-page context builder.
@@ -386,6 +445,8 @@ pub struct MarkdownContextOptions<'a> {
     pub root_dir: Option<&'a Path>,
     /// The repository's `[slides]` defaults (`config.slides`).
     pub slides: &'a SlideSettings,
+    /// The repository's `[calendar]` table (`config.calendar`).
+    pub calendar: &'a CalendarConfig,
 }
 
 /// Builds the `extra_context` map shared by server-mode and static-build
@@ -475,6 +536,9 @@ pub fn markdown_extra_context(
     ctx.insert("title_suffix".to_string(), json!(opts.title_suffix));
     insert_repo_id(&mut ctx, opts.root_dir);
     insert_slide_settings(&mut ctx, opts.slides, params.slides, url_mode);
+    insert_calendar_config(&mut ctx, opts.calendar);
+    insert_calendar_nav(&mut ctx, params.calendar_nav, url_mode);
+    insert_calendar_companion(&mut ctx, params.calendar_nav, opts.calendar);
 
     // Modified date from file metadata
     if let Some(secs) = params.modified_secs {
@@ -639,6 +703,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 1699000000,
             modified: 1700000000,
+            calendar: None,
             relationships: Vec::new(),
         };
 
@@ -660,6 +725,7 @@ mod tests {
             frontmatter: None,
             created: 1699000000,
             modified: 1700000000,
+            calendar: None,
             relationships: Vec::new(),
         };
 
@@ -684,6 +750,7 @@ mod tests {
             frontmatter: Some(frontmatter),
             created: 1699000000,
             modified: 1700000000,
+            calendar: None,
             relationships: Vec::new(),
         };
 
@@ -733,6 +800,7 @@ mod tests {
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("pre ", " suf")),
                 root_dir: Some(Path::new("/repo/root")),
+                calendar: &CalendarConfig::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -769,6 +837,7 @@ mod tests {
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: None,
                 root_dir: None,
+                calendar: &CalendarConfig::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -796,6 +865,7 @@ mod tests {
                 // Static builds never have a live repo to scope storage
                 // against.
                 root_dir: None,
+                calendar: &CalendarConfig::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(false)));
@@ -969,6 +1039,9 @@ mod tests {
         assert!(!ctx.contains_key("error_message"));
     }
 
+    static DEFAULT_CALENDAR: std::sync::LazyLock<CalendarConfig> =
+        std::sync::LazyLock::new(CalendarConfig::default);
+
     fn markdown_opts<'a>(
         sources: &'a [TagSource],
         root_dir: Option<&'a Path>,
@@ -987,6 +1060,7 @@ mod tests {
             title_suffix: "",
             root_dir,
             slides: &SlideSettings::UNSET,
+            calendar: &DEFAULT_CALENDAR,
         }
     }
 
@@ -1017,6 +1091,7 @@ mod tests {
             current_url: "/docs/b/",
             siblings: &siblings,
             slides: None,
+            calendar_nav: None,
         };
         let root_dir = Path::new("/repo/root");
         let ctx = markdown_extra_context(
@@ -1077,6 +1152,7 @@ mod tests {
             current_url: "/docs/b/",
             siblings: &siblings,
             slides: None,
+            calendar_nav: None,
         };
         // Static builds never have a live repo to scope storage against.
         let ctx = markdown_extra_context(
@@ -1098,6 +1174,123 @@ mod tests {
             json!(make_relative_url("/docs/a/", 2))
         );
         assert!(!ctx.contains_key("next_page"));
+    }
+
+    fn sample_nav() -> CalendarNav {
+        use crate::calendar::{Period, PeriodicEntry, PeriodicIndex};
+        let entry = |key: &str, url: &str| PeriodicEntry {
+            period: Period::parse_key(key).unwrap(),
+            url_path: url.to_string(),
+            raw_path: format!("{}.md", url.trim_matches('/')),
+            title: key.to_string(),
+        };
+        PeriodicIndex::build([
+            entry("2026-10-30", "/daily/2026-10-30/"),
+            entry("2026-10-31", "/daily/2026-10-31/"),
+            entry("2026-10", "/monthly/2026-10/"),
+        ])
+        .nav(&Period::parse_key("2026-10-31").unwrap())
+    }
+
+    #[test]
+    fn test_calendar_nav_is_relativized_in_static_mode() {
+        let nav = sample_nav();
+        let mut server = HashMap::new();
+        insert_calendar_nav(&mut server, Some(&nav), &UrlMode::Absolute);
+        assert_eq!(
+            server["calendar_nav"]["prev"]["url"],
+            json!("/daily/2026-10-30/")
+        );
+        assert_eq!(server["calendar_nav"]["kind"], json!("day"));
+        assert_eq!(server["calendar_nav"]["next"], json!(null));
+
+        let mut static_ctx = HashMap::new();
+        insert_calendar_nav(&mut static_ctx, Some(&nav), &UrlMode::RelativeToDepth(2));
+        assert_eq!(
+            static_ctx["calendar_nav"]["prev"]["url"],
+            json!(make_relative_url("/daily/2026-10-30/", 2))
+        );
+        assert_eq!(
+            static_ctx["calendar_nav"]["up"][0]["url"],
+            json!(make_relative_url("/monthly/2026-10/", 2))
+        );
+
+        let mut none = HashMap::new();
+        insert_calendar_nav(&mut none, None, &UrlMode::Absolute);
+        assert!(!none.contains_key("calendar_nav"));
+    }
+
+    #[test]
+    fn test_companion_docks_only_on_day_notes_under_auto() {
+        use crate::calendar::{Period, PeriodicEntry, PeriodicIndex};
+        let day = sample_nav();
+        let month = PeriodicIndex::build([PeriodicEntry {
+            period: Period::parse_key("2026-10").unwrap(),
+            url_path: "/monthly/2026-10/".to_string(),
+            raw_path: "monthly/2026-10.md".to_string(),
+            title: "2026-10".to_string(),
+        }])
+        .nav(&Period::parse_key("2026-10").unwrap());
+        let with = |companion| CalendarConfig {
+            companion,
+            ..CalendarConfig::default()
+        };
+
+        assert!(companion_docks(Some(&day), &with(CompanionMode::Auto)));
+        assert!(!companion_docks(Some(&month), &with(CompanionMode::Auto)));
+        assert!(!companion_docks(None, &with(CompanionMode::Auto)));
+        assert!(!companion_docks(Some(&day), &with(CompanionMode::OnDemand)));
+        assert!(!companion_docks(Some(&day), &with(CompanionMode::Off)));
+        let disabled = CalendarConfig {
+            enabled: false,
+            ..CalendarConfig::default()
+        };
+        assert!(!companion_docks(Some(&day), &disabled));
+
+        let mut ctx = HashMap::new();
+        insert_calendar_companion(&mut ctx, Some(&day), &with(CompanionMode::Auto));
+        assert_eq!(ctx.get("calendar_companion"), Some(&json!(true)));
+        let mut ctx = HashMap::new();
+        insert_calendar_companion(&mut ctx, Some(&month), &with(CompanionMode::Auto));
+        assert!(!ctx.contains_key("calendar_companion"));
+    }
+
+    #[test]
+    fn test_calendar_enabled_flag_follows_config() {
+        let mut ctx = HashMap::new();
+        insert_calendar_config(&mut ctx, &CalendarConfig::default());
+        assert_eq!(ctx.get("calendar_enabled"), Some(&json!(true)));
+        let mut ctx = HashMap::new();
+        let off = CalendarConfig {
+            enabled: false,
+            ..CalendarConfig::default()
+        };
+        insert_calendar_config(&mut ctx, &off);
+        assert_eq!(ctx.get("calendar_enabled"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn test_calendar_config_is_script_safe_json() {
+        let config = CalendarConfig {
+            periodic_folders: vec!["</script><b>".into()],
+            ..CalendarConfig::default()
+        };
+        let mut ctx = HashMap::new();
+        insert_calendar_config(&mut ctx, &config);
+        let raw = ctx["calendar_config"].as_str().unwrap();
+        assert!(!raw.contains("</script>"), "{raw}");
+        let parsed: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed["enabled"], json!(true));
+        assert_eq!(
+            parsed["periods"],
+            json!(["day", "week", "month", "quarter", "year"])
+        );
+        assert_eq!(parsed["companion"], json!("auto"));
+        assert_eq!(parsed["week_start"], json!("locale"));
+        assert!(
+            parsed.get("week_numbers").is_none(),
+            "unset = decided by the browser"
+        );
     }
 
     fn slides_ctx(
@@ -1224,6 +1417,7 @@ mod tests {
             current_url: "/deck/",
             siblings: &[],
             slides: Some(&page),
+            calendar_nav: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert_eq!(ctx.get("slides_config"), Some(&json!("{}")));
@@ -1247,6 +1441,7 @@ mod tests {
             current_url: "/not-in-list/",
             siblings: &[],
             slides: None,
+            calendar_nav: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert!(!ctx.contains_key("prev_page"));

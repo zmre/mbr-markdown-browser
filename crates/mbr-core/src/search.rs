@@ -9,19 +9,28 @@
 //! Supports faceted search with `key:value` syntax for filtering on specific
 //! frontmatter fields (e.g., `category:rust` or `tags:async`).
 //!
+//! Four facet keys have **date** semantics when their value is a date
+//! expression ([`crate::date_expr`]): `date:` (the note date, D1), `created:`,
+//! `modified:` and `when:` (note date OR modified, D7). A value that is not an
+//! expression falls back to the substring frontmatter match every other key
+//! uses. See [`FacetFilter`].
+//!
 //! Both modes use sequential iteration to avoid rayon thread pool contention
 //! when multiple searches run concurrently (e.g., from per-keystroke queries).
 
 use std::sync::Arc;
 
+use chrono::{NaiveDate, TimeZone};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::calendar::{NoteCalendar, note_date};
 use crate::config::TagSource;
+use crate::date_expr::{DateExpr, DateRange, InstantRange};
 use crate::errors::SearchError;
 use crate::repo::{MarkdownInfo, OtherFileInfo, Repo};
 use crate::vault::VaultPath;
@@ -61,6 +70,14 @@ impl ParsedQuery {
     /// Returns true if the query is empty (no terms and no facets).
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty() && self.facets.is_empty()
+    }
+
+    /// Whether any facet is a date facet (`date:`/`created:`/`modified:`/
+    /// `when:` with a value that parses as a date expression).
+    pub fn has_date_facets(&self) -> bool {
+        self.facets.iter().any(|(key, value)| {
+            DateFacetKey::from_key(key).is_some() && DateExpr::parse(value).is_some()
+        })
     }
 }
 
@@ -173,6 +190,188 @@ fn facet_matches(
     }
 }
 
+// ==================== Date facets ====================
+
+/// The facet keys with date semantics (ASCII case-insensitive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateFacetKey {
+    /// The note date: filename, then frontmatter, then birthtime (D1).
+    Date,
+    Created,
+    Modified,
+    /// Note date OR modified (D7).
+    When,
+}
+
+impl DateFacetKey {
+    fn from_key(key: &str) -> Option<Self> {
+        [
+            ("date", Self::Date),
+            ("created", Self::Created),
+            ("modified", Self::Modified),
+            ("when", Self::When),
+        ]
+        .into_iter()
+        .find_map(|(name, k)| key.eq_ignore_ascii_case(name).then_some(k))
+    }
+}
+
+/// Which of a file's dates a result matched on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DateField {
+    /// The note date (for a non-markdown file, which has none, `date:` and
+    /// `when:` read `modified` and report it as such).
+    Date,
+    Created,
+    Modified,
+}
+
+/// The date a result matched its query's first date facet on, shown as a
+/// label beside the result and used to sort a date-only query.
+///
+/// Serialized `{"date": "2026-10-31", "field": "modified"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MatchedDate {
+    pub date: NaiveDate,
+    pub field: DateField,
+}
+
+/// The dates one file offers to date facets.
+struct FileDates<'a> {
+    /// `Some` for a markdown note (which always has a note date), `None` for
+    /// any other file.
+    note: Option<Option<&'a NoteCalendar>>,
+    created: Option<u64>,
+    modified: Option<u64>,
+}
+
+/// One date facet, resolved once per query.
+struct DateFacet {
+    key: DateFacetKey,
+    range: DateRange,
+    /// `range` as unix-second bounds in the query's time zone, so a timestamp
+    /// is checked with integer compares and converted to a date only once it
+    /// has matched.
+    instants: InstantRange,
+}
+
+impl DateFacet {
+    fn matches<Tz: TimeZone>(&self, file: &FileDates<'_>, tz: &Tz) -> Option<MatchedDate> {
+        let by_timestamp = |secs: Option<u64>, field: DateField| {
+            let secs = secs.filter(|&s| self.instants.contains(s))?;
+            let date = note_date(None, secs, tz)?;
+            Some(MatchedDate { date, field })
+        };
+        let by_note_date = || match file.note {
+            Some(Some(calendar)) => self.range.contains(calendar.date).then_some(MatchedDate {
+                date: calendar.date,
+                field: DateField::Date,
+            }),
+            Some(None) => by_timestamp(file.created, DateField::Date),
+            None => by_timestamp(file.modified, DateField::Modified),
+        };
+        match self.key {
+            DateFacetKey::Date => by_note_date(),
+            DateFacetKey::Created => by_timestamp(file.created, DateField::Created),
+            DateFacetKey::Modified => by_timestamp(file.modified, DateField::Modified),
+            DateFacetKey::When => {
+                by_note_date().or_else(|| by_timestamp(file.modified, DateField::Modified))
+            }
+        }
+    }
+}
+
+/// A query's facets, split **once per query** into date facets (parsed and
+/// resolved against `today`) and the substring facets every other key, and a
+/// date key whose value is not a date expression, use. All facets AND
+/// together; per file the date checks are date or integer compares.
+///
+/// Birthtime and mtime become dates in `tz` (the server's local zone). The
+/// request's `today` is the reader's date; only the client knows it, which is
+/// why it sends one (design/calendar.md §6.3).
+struct FacetFilter<'q, Tz: TimeZone> {
+    text: Vec<(&'q str, &'q str)>,
+    dates: Vec<DateFacet>,
+    tz: Tz,
+}
+
+impl<'q, Tz: TimeZone> FacetFilter<'q, Tz> {
+    fn new(facets: &'q [(String, String)], today: NaiveDate, tz: Tz) -> Self {
+        let mut text = Vec::new();
+        let mut dates = Vec::new();
+        for (key, value) in facets {
+            let date_facet =
+                DateFacetKey::from_key(key)
+                    .zip(DateExpr::parse(value))
+                    .map(|(key, expr)| {
+                        let range = expr.resolve(today);
+                        DateFacet {
+                            key,
+                            range,
+                            instants: range.instants(&tz),
+                        }
+                    });
+            match date_facet {
+                Some(facet) => dates.push(facet),
+                None => text.push((key.as_str(), value.as_str())),
+            }
+        }
+        Self { text, dates, tz }
+    }
+
+    fn has_dates(&self) -> bool {
+        !self.dates.is_empty()
+    }
+
+    /// Every date facet against `file`: `None` when one fails, else the first
+    /// facet's matched date (`Some(None)` when the query has no date facet).
+    fn match_dates(&self, file: &FileDates<'_>) -> Option<Option<MatchedDate>> {
+        let mut first = None;
+        for facet in &self.dates {
+            let matched = facet.matches(file, &self.tz)?;
+            first.get_or_insert(matched);
+        }
+        Some(first)
+    }
+
+    /// Every facet against a markdown note; see [`Self::match_dates`].
+    fn match_note(&self, info: &MarkdownInfo) -> Option<Option<MatchedDate>> {
+        if !self
+            .text
+            .iter()
+            .all(|(field, value)| facet_matches(info.frontmatter.as_ref(), field, value))
+        {
+            return None;
+        }
+        self.match_dates(&FileDates {
+            note: Some(info.calendar.as_ref()),
+            created: Some(info.created),
+            modified: Some(info.modified),
+        })
+    }
+
+    /// The date facets against a non-markdown file, which has no frontmatter:
+    /// substring facets do not apply to it (as before date facets existed).
+    fn match_other(&self, info: &OtherFileInfo) -> Option<Option<MatchedDate>> {
+        self.match_dates(&FileDates {
+            note: None,
+            created: info.created(),
+            modified: info.modified(),
+        })
+    }
+}
+
+/// `today` from a request: a `YYYY-MM-DD` string; anything else is ignored
+/// (the server's date is used), so a malformed value cannot fail the search.
+fn lenient_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()))
+}
+
 /// Build a `"Line {n}: {text}"` snippet for a content match, truncating the
 /// matched line to [`MAX_SNIPPET_LENGTH`] bytes when it is longer.
 ///
@@ -238,6 +437,13 @@ pub struct SearchQuery {
     /// Folder scope: "current" (within folder) or "everywhere" (whole repo).
     #[serde(default)]
     pub folder_scope: FolderScope,
+
+    /// The reader's local date, `YYYY-MM-DD`, which the relative date facets
+    /// (`when:today`, `when:-30d`, …) resolve against. The browser always
+    /// sends it: it is the only time-zone-correct "today". Absent or malformed
+    /// → the server's local date.
+    #[serde(default, deserialize_with = "lenient_date")]
+    pub today: Option<NaiveDate>,
 }
 
 fn default_limit() -> usize {
@@ -287,6 +493,11 @@ pub struct SearchResult {
 
     /// File type category.
     pub filetype: String,
+
+    /// The date this result matched the query's first date facet on; only
+    /// present when the query has a date facet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_date: Option<MatchedDate>,
 }
 
 /// Search response containing results and metadata.
@@ -359,32 +570,40 @@ impl SearchEngine {
             });
         }
 
+        // Facets are split and date expressions resolved once per query.
+        let today = query
+            .today
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        let filter = FacetFilter::new(&parsed.facets, today, chrono::Local);
+
         let mut all_results = Vec::new();
         let mut not_downloaded = 0;
 
         // Metadata search (always fast, data in memory)
         if query.scope != SearchScope::Content {
-            all_results.extend(self.search_metadata(query, &parsed)?);
-            all_results.extend(self.search_tag_pages(query, &parsed));
+            all_results.extend(self.search_metadata(query, &parsed, &filter)?);
+            all_results.extend(self.search_tag_pages(query, &parsed, &filter));
         }
 
         // Content search (requires file I/O) - only if we have search terms
         if query.scope != SearchScope::Metadata && !parsed.terms.is_empty() {
-            let content = self.search_content(query, &parsed)?;
+            let content = self.search_content(query, &parsed, &filter)?;
             not_downloaded = content.not_downloaded;
             all_results.extend(content.results);
         }
 
         // Search other files (PDFs, text files) when filetype is "all"
         if self.should_search_other_files(&query.filetype) {
-            all_results.extend(self.search_other_files_metadata(query, &parsed)?);
+            all_results.extend(self.search_other_files_metadata(query, &parsed, &filter)?);
         }
 
         // Deduplicate results (same file might match both metadata and content)
         all_results = Self::deduplicate_results(all_results);
 
-        // Sort by score descending
-        all_results.sort_by_key(|r| std::cmp::Reverse(r.score));
+        sort_results(
+            &mut all_results,
+            filter.has_dates() && parsed.terms.is_empty(),
+        );
 
         let total_matches = all_results.len();
 
@@ -404,10 +623,11 @@ impl SearchEngine {
     }
 
     /// Search metadata (titles, paths, tags, frontmatter) using nucleo-matcher.
-    fn search_metadata(
+    fn search_metadata<Tz: TimeZone>(
         &self,
         query: &SearchQuery,
         parsed: &ParsedQuery,
+        filter: &FacetFilter<'_, Tz>,
     ) -> Result<Vec<SearchResult>, SearchError> {
         // Build pattern from terms only (facets are handled separately)
         let pattern = if parsed.terms.is_empty() {
@@ -436,13 +656,14 @@ impl SearchEngine {
             .filter(|info| self.matches_folder_filter(info, &query.folder, &query.folder_scope))
             .filter(|info| self.matches_filetype_filter(info, &query.filetype, true))
             // Apply facet filters - all facets must match
-            .filter(|info| {
-                parsed
-                    .facets
-                    .iter()
-                    .all(|(field, value)| facet_matches(info.frontmatter.as_ref(), field, value))
+            .filter_map(|info| filter.match_note(info).map(|matched| (info, matched)))
+            .filter_map(|(info, matched)| {
+                self.match_metadata(pattern.as_ref(), info, &mut matcher)
+                    .map(|result| SearchResult {
+                        matched_date: matched,
+                        ..result
+                    })
             })
-            .filter_map(|info| self.match_metadata(pattern.as_ref(), info, &mut matcher))
             .collect();
 
         Ok(results)
@@ -452,9 +673,17 @@ impl SearchEngine {
     ///
     /// For each configured tag source, fuzzy-matches tag display values against
     /// the search pattern. Matching tags produce results pointing to their tag page URL.
-    fn search_tag_pages(&self, query: &SearchQuery, parsed: &ParsedQuery) -> Vec<SearchResult> {
-        // Tag pages are global — skip when scoped to a folder
-        if query.folder_scope == FolderScope::Current && query.folder.is_some() {
+    fn search_tag_pages<Tz: TimeZone>(
+        &self,
+        query: &SearchQuery,
+        parsed: &ParsedQuery,
+        filter: &FacetFilter<'_, Tz>,
+    ) -> Vec<SearchResult> {
+        // Tag pages are global — skip when scoped to a folder. A tag page has
+        // no date, so a date facet excludes it too.
+        if (query.folder_scope == FolderScope::Current && query.folder.is_some())
+            || filter.has_dates()
+        {
             return Vec::new();
         }
 
@@ -500,6 +729,7 @@ impl SearchEngine {
                         snippet: None,
                         is_content_match: false,
                         filetype: "tag".to_string(),
+                        matched_date: None,
                     });
                 }
             }
@@ -594,6 +824,7 @@ impl SearchEngine {
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
+                matched_date: None,
             });
         };
 
@@ -656,6 +887,7 @@ impl SearchEngine {
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
+                matched_date: None,
             })
         } else {
             None
@@ -670,10 +902,11 @@ impl SearchEngine {
     }
 
     /// Search file contents using grep-searcher.
-    fn search_content(
+    fn search_content<Tz: TimeZone>(
         &self,
         query: &SearchQuery,
         parsed: &ParsedQuery,
+        filter: &FacetFilter<'_, Tz>,
     ) -> Result<ContentHits, SearchError> {
         // Build regex pattern from terms (escape special characters for literal search)
         let search_terms = parsed.terms.join(" ");
@@ -687,23 +920,22 @@ impl SearchEngine {
             })?;
 
         // Collect files to search, applying facet filters
-        let files: Vec<_> =
-            self.repo
-                .markdown_files
-                .pin()
-                .iter()
-                .filter(|(_, info)| {
-                    self.matches_folder_filter(info, &query.folder, &query.folder_scope)
-                })
-                .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
-                // Apply facet filters - all facets must match
-                .filter(|(_, info)| {
-                    parsed.facets.iter().all(|(field, value)| {
-                        facet_matches(info.frontmatter.as_ref(), field, value)
-                    })
-                })
-                .map(|(_, info)| info.clone())
-                .collect();
+        let files: Vec<_> = self
+            .repo
+            .markdown_files
+            .pin()
+            .iter()
+            .filter(|(_, info)| {
+                self.matches_folder_filter(info, &query.folder, &query.folder_scope)
+            })
+            .filter(|(_, info)| self.matches_filetype_filter(info, &query.filetype, true))
+            // Apply facet filters - all facets must match
+            .filter_map(|(_, info)| {
+                filter
+                    .match_note(info)
+                    .map(|matched| (info.clone(), matched))
+            })
+            .collect();
 
         // One `Searcher` for the whole query, reused across files. Building one
         // allocates ~72 KB of zero-filled decode/line buffers, so constructing
@@ -723,10 +955,14 @@ impl SearchEngine {
         let mut not_downloaded = 0;
         let results: Vec<SearchResult> = files
             .into_iter()
-            .filter_map(|info| {
+            .filter_map(|(info, matched)| {
                 self.search_file_content(&mut searcher, &matcher, &info, &mut not_downloaded)
                     .ok()
                     .flatten()
+                    .map(|result| SearchResult {
+                        matched_date: matched,
+                        ..result
+                    })
             })
             .collect();
 
@@ -846,6 +1082,7 @@ impl SearchEngine {
                 snippet,
                 is_content_match: true,
                 filetype: "markdown".to_string(),
+                matched_date: None,
             }))
         } else {
             Ok(None)
@@ -907,21 +1144,27 @@ impl SearchEngine {
     }
 
     /// Search other files (PDFs, text files) by path and extracted text.
-    fn search_other_files_metadata(
+    fn search_other_files_metadata<Tz: TimeZone>(
         &self,
         query: &SearchQuery,
         parsed: &ParsedQuery,
+        filter: &FacetFilter<'_, Tz>,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        // Build pattern from terms (facets don't apply to other files - they have no frontmatter)
+        // Build pattern from terms (substring facets don't apply to other
+        // files - they have no frontmatter; date facets do, on their times)
         let pattern = if parsed.terms.is_empty() {
-            // No terms and other files have no frontmatter, so facet-only queries return nothing
-            return Ok(Vec::new());
+            // A facet-only query reaches other files only when every facet is
+            // a date facet; a frontmatter facet can never match them.
+            if !filter.has_dates() || !filter.text.is_empty() {
+                return Ok(Vec::new());
+            }
+            None
         } else {
-            Pattern::parse(
+            Some(Pattern::parse(
                 &parsed.terms.join(" "),
                 CaseMatching::Ignore,
                 Normalization::Smart,
-            )
+            ))
         };
 
         // Collect searchable files (PDFs and text files with extracted text)
@@ -934,26 +1177,55 @@ impl SearchEngine {
             .filter(|(_, info)| {
                 self.matches_other_file_folder_filter(info, &query.folder, &query.folder_scope)
             })
-            .map(|(_, info)| info.clone())
+            .filter_map(|(_, info)| {
+                filter
+                    .match_other(info)
+                    .map(|matched| (info.clone(), matched))
+            })
             .collect();
 
         // Sequential fuzzy matching (same rayon contention rationale as search_metadata)
         let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
         let results: Vec<SearchResult> = files
             .into_iter()
-            .filter_map(|info| self.match_other_file(&pattern, &info, &mut matcher))
+            .filter_map(|(info, matched)| {
+                self.match_other_file(pattern.as_ref(), &info, &mut matcher)
+                    .map(|result| SearchResult {
+                        matched_date: matched,
+                        ..result
+                    })
+            })
             .collect();
 
         Ok(results)
     }
 
-    /// Match a single other file against the pattern.
+    /// Match a single other file against the pattern. With no pattern (a
+    /// date-facet-only query, already filtered) every file matches with the
+    /// facet base score and no snippet.
     fn match_other_file(
         &self,
-        pattern: &Pattern,
+        pattern: Option<&Pattern>,
         info: &OtherFileInfo,
         matcher: &mut Matcher,
     ) -> Option<SearchResult> {
+        let Some(pattern) = pattern else {
+            return Some(SearchResult {
+                url_path: info.url_path.clone(),
+                title: info
+                    .raw_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string()),
+                description: None,
+                tags: None,
+                score: FACET_MATCH_BASE_SCORE,
+                snippet: None,
+                is_content_match: false,
+                filetype: info.filetype().to_string(),
+                matched_date: None,
+            });
+        };
         let mut best_score: u32 = 0;
 
         // Match against URL path
@@ -1007,6 +1279,7 @@ impl SearchEngine {
                 snippet,
                 is_content_match: info.extracted_text.is_some(),
                 filetype: info.filetype().to_string(),
+                matched_date: None,
             })
         } else {
             None
@@ -1065,6 +1338,22 @@ impl SearchEngine {
         }
 
         seen.into_values().collect()
+    }
+}
+
+/// Order results: by score, highest first; or, for a query with a date facet
+/// and no free text (`by_date`), by the matched date, newest first. Ties (and
+/// results without a date, last) go by URL so the order is deterministic.
+fn sort_results(results: &mut [SearchResult], by_date: bool) {
+    if by_date {
+        results.sort_by(|a, b| {
+            let date = |r: &SearchResult| r.matched_date.map(|m| m.date);
+            date(b)
+                .cmp(&date(a))
+                .then_with(|| a.url_path.cmp(&b.url_path))
+        });
+    } else {
+        results.sort_by_key(|r| std::cmp::Reverse(r.score));
     }
 }
 
@@ -1160,6 +1449,7 @@ pub fn search_other_files(
                     snippet: None,
                     is_content_match: false,
                     filetype: filetype.to_string(),
+                    matched_date: None,
                 }
             })
         })
@@ -1227,6 +1517,7 @@ mod tests {
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
+                matched_date: None,
             },
             SearchResult {
                 url_path: "/test/".to_string(),
@@ -1237,6 +1528,7 @@ mod tests {
                 snippet: Some("content match".to_string()),
                 is_content_match: true,
                 filetype: "markdown".to_string(),
+                matched_date: None,
             },
         ];
 
@@ -1699,6 +1991,7 @@ mod tests {
             filetype: None,
             folder: None,
             folder_scope: FolderScope::Everywhere,
+            today: None,
         }
     }
 
@@ -1811,6 +2104,7 @@ mod tests {
             filetype: None,
             folder: None,
             folder_scope: FolderScope::Everywhere,
+            today: None,
         };
 
         let response = engine.search(&query).expect("search");
@@ -1823,6 +2117,297 @@ mod tests {
         assert_eq!(hit.tags.as_deref(), Some("rust"));
         assert!(!hit.is_content_match);
         assert!(hit.score > 0);
+    }
+
+    // ==================== Date facet tests ====================
+
+    fn date(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("test date")
+    }
+
+    fn query_on(q: &str, today: Option<&str>) -> SearchQuery {
+        SearchQuery {
+            q: q.to_string(),
+            limit: DEFAULT_RESULT_LIMIT,
+            scope: SearchScope::All,
+            filetype: None,
+            folder: None,
+            folder_scope: FolderScope::Everywhere,
+            today: today.map(date),
+        }
+    }
+
+    /// Set a file's mtime to noon local time on `day`.
+    fn set_mtime(path: &std::path::Path, day: &str) {
+        let noon = chrono::Local
+            .from_local_datetime(&date(day).and_hms_opt(12, 0, 0).unwrap())
+            .earliest()
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::from(noon))
+            .unwrap();
+    }
+
+    /// A repo with one note dated each way: by filename, by frontmatter, by
+    /// birthtime only (`undated`), one whose frontmatter date is old but whose
+    /// mtime is 2026-10-20 (`old`), and one whose `date:` is not a date.
+    fn dated_engine() -> (SearchEngine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let files = [
+            ("daily/2026-10-31.md", "# Saturday\n\nwalked the dog\n"),
+            (
+                "post.md",
+                "---\ntitle: Post\ndate: 2026-09-15\ntype: log\n---\n\nbody\n",
+            ),
+            ("undated.md", "# Undated\n\nbody\n"),
+            (
+                "old.md",
+                "---\ntitle: Old\ndate: 2020-01-01\ntype: log\n---\n\nbody\n",
+            ),
+            ("wip.md", "---\ntitle: Wip\ndate: draft copy\n---\n\nbody\n"),
+        ];
+        for (rel, contents) in files {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+        set_mtime(&dir.path().join("old.md"), "2026-10-20");
+        let repo = Repo::init(
+            dir.path().to_path_buf(),
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan repo");
+        (SearchEngine::new(Arc::new(repo)), dir)
+    }
+
+    fn urls(response: &SearchResponse) -> Vec<&str> {
+        response
+            .results
+            .iter()
+            .map(|r| r.url_path.as_str())
+            .collect()
+    }
+
+    fn matched(response: &SearchResponse, url: &str) -> MatchedDate {
+        response
+            .results
+            .iter()
+            .find(|r| r.url_path == url)
+            .and_then(|r| r.matched_date)
+            .unwrap_or_else(|| panic!("{url} has a matched date: {:?}", response.results))
+    }
+
+    #[test]
+    fn date_facet_matches_a_filename_date() {
+        let (engine, _dir) = dated_engine();
+        let response = engine.search(&query_on("date:2026-10", None)).unwrap();
+        assert_eq!(urls(&response), vec!["/daily/2026-10-31/"]);
+        assert_eq!(
+            matched(&response, "/daily/2026-10-31/"),
+            MatchedDate {
+                date: date("2026-10-31"),
+                field: DateField::Date
+            }
+        );
+    }
+
+    #[test]
+    fn date_facet_matches_a_frontmatter_date() {
+        let (engine, _dir) = dated_engine();
+        let response = engine.search(&query_on("date:2026-09-15", None)).unwrap();
+        assert_eq!(urls(&response), vec!["/post/"]);
+    }
+
+    #[test]
+    fn date_facet_falls_back_to_birthtime() {
+        let (engine, _dir) = dated_engine();
+        let today = chrono::Local::now().date_naive().to_string();
+        let response = engine
+            .search(&query_on("date:today", Some(&today)))
+            .unwrap();
+        // `wip.md`'s `date: draft copy` is not a date, so it too is dated by
+        // birthtime; everything else has a filename or frontmatter date.
+        let mut got = urls(&response);
+        got.sort_unstable();
+        assert_eq!(got, vec!["/undated/", "/wip/"]);
+        assert_eq!(matched(&response, "/undated/").field, DateField::Date);
+    }
+
+    #[test]
+    fn created_facet_reads_birthtime_not_the_note_date() {
+        let (engine, _dir) = dated_engine();
+        let today = chrono::Local::now().date_naive().to_string();
+        let response = engine
+            .search(&query_on("created:today", Some(&today)))
+            .unwrap();
+        let got = urls(&response);
+        // Where there is no birthtime `created` falls back to mtime, which
+        // moved `old.md`; every other note was created just now.
+        for url in ["/daily/2026-10-31/", "/post/", "/undated/", "/wip/"] {
+            assert!(got.contains(&url), "{url} in {got:?}");
+        }
+        assert_eq!(matched(&response, "/post/").field, DateField::Created);
+    }
+
+    #[test]
+    fn modified_facet_reads_mtime() {
+        let (engine, _dir) = dated_engine();
+        let response = engine
+            .search(&query_on("modified:2026-10-20", None))
+            .unwrap();
+        assert_eq!(urls(&response), vec!["/old/"]);
+        assert_eq!(
+            matched(&response, "/old/"),
+            MatchedDate {
+                date: date("2026-10-20"),
+                field: DateField::Modified
+            }
+        );
+    }
+
+    #[test]
+    fn when_facet_is_note_date_or_modified_sorted_newest_first() {
+        let (engine, _dir) = dated_engine();
+        let response = engine.search(&query_on("when:2026-10", None)).unwrap();
+        // Date order, not score order: both have the facet base score.
+        assert_eq!(urls(&response), vec!["/daily/2026-10-31/", "/old/"]);
+        assert_eq!(
+            matched(&response, "/daily/2026-10-31/").field,
+            DateField::Date
+        );
+        assert_eq!(matched(&response, "/old/").field, DateField::Modified);
+    }
+
+    #[test]
+    fn relative_facets_resolve_against_the_requests_today() {
+        let (engine, _dir) = dated_engine();
+        let on = |today| {
+            let response = engine
+                .search(&query_on("date:yesterday", Some(today)))
+                .unwrap();
+            urls(&response)
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(on("2026-11-01"), vec!["/daily/2026-10-31/"]);
+        assert!(on("2026-11-02").is_empty());
+        // A `today` before the fixtures were written, so only `old.md`'s
+        // mtime and the daily note's filename can fall in the last 12 days.
+        let response = engine
+            .search(&query_on("when:-12d", Some("2026-10-31")))
+            .unwrap();
+        assert_eq!(urls(&response), vec!["/daily/2026-10-31/", "/old/"]);
+    }
+
+    #[test]
+    fn date_facets_and_with_frontmatter_facets() {
+        let (engine, _dir) = dated_engine();
+        let response = engine
+            .search(&query_on("type:log when:2026-10", None))
+            .unwrap();
+        assert_eq!(urls(&response), vec!["/old/"]);
+        let response = engine
+            .search(&query_on("when:2026 date:2026-09", None))
+            .unwrap();
+        assert_eq!(urls(&response), vec!["/post/"]);
+    }
+
+    #[test]
+    fn a_value_that_is_not_an_expression_is_a_substring_facet() {
+        let (engine, _dir) = dated_engine();
+        let response = engine.search(&query_on("date:draft", None)).unwrap();
+        assert_eq!(urls(&response), vec!["/wip/"]);
+        assert!(
+            response.results[0].matched_date.is_none(),
+            "a substring facet has no date to show"
+        );
+    }
+
+    #[test]
+    fn free_text_keeps_score_order_and_still_labels_the_date() {
+        let (engine, _dir) = dated_engine();
+        let response = engine.search(&query_on("dog when:2026-10", None)).unwrap();
+        assert_eq!(urls(&response), vec!["/daily/2026-10-31/"]);
+        assert_eq!(
+            matched(&response, "/daily/2026-10-31/").date,
+            date("2026-10-31")
+        );
+    }
+
+    #[test]
+    fn matched_date_serializes_and_is_omitted_without_a_date_facet() {
+        let (engine, _dir) = dated_engine();
+        let json =
+            serde_json::to_value(engine.search(&query_on("date:2026-10", None)).unwrap()).unwrap();
+        assert_eq!(
+            json["results"][0]["matched_date"],
+            serde_json::json!({"date": "2026-10-31", "field": "date"})
+        );
+        let json =
+            serde_json::to_value(engine.search(&query_on("Saturday", None)).unwrap()).unwrap();
+        assert!(json["results"][0].get("matched_date").is_none());
+    }
+
+    #[test]
+    fn facet_filter_splits_date_and_substring_facets_once() {
+        let parsed = parse_query("Date:2026 when:-30d date:draft created:2026-13 tags:x");
+        assert!(parsed.has_date_facets());
+        let filter = FacetFilter::new(&parsed.facets, date("2026-11-06"), chrono::Utc);
+        assert_eq!(filter.dates.len(), 2);
+        assert_eq!(
+            filter.text,
+            vec![("date", "draft"), ("created", "2026-13"), ("tags", "x")]
+        );
+        assert!(!parse_query("date:draft tags:x").has_date_facets());
+    }
+
+    #[test]
+    fn today_is_optional_and_lenient() {
+        let q: SearchQuery = serde_json::from_str(r#"{"q":"x","today":"2026-11-06"}"#).unwrap();
+        assert_eq!(q.today, Some(date("2026-11-06")));
+        let q: SearchQuery = serde_json::from_str(r#"{"q":"x","today":"soon"}"#).unwrap();
+        assert_eq!(q.today, None);
+        let q: SearchQuery = serde_json::from_str(r#"{"q":"x","today":7}"#).unwrap();
+        assert_eq!(q.today, None);
+        let q: SearchQuery = serde_json::from_str(r#"{"q":"x"}"#).unwrap();
+        assert_eq!(q.today, None);
+    }
+
+    #[test]
+    fn date_sort_is_newest_first_then_by_url_with_undated_last() {
+        let result = |url: &str, day: Option<&str>| SearchResult {
+            url_path: url.to_string(),
+            title: None,
+            description: None,
+            tags: None,
+            score: 100,
+            snippet: None,
+            is_content_match: false,
+            filetype: "markdown".to_string(),
+            matched_date: day.map(|d| MatchedDate {
+                date: date(d),
+                field: DateField::Date,
+            }),
+        };
+        let mut results = vec![
+            result("/b/", Some("2026-01-01")),
+            result("/none/", None),
+            result("/c/", Some("2026-03-01")),
+            result("/a/", Some("2026-01-01")),
+        ];
+        sort_results(&mut results, true);
+        let order: Vec<&str> = results.iter().map(|r| r.url_path.as_str()).collect();
+        assert_eq!(order, vec!["/c/", "/a/", "/b/", "/none/"]);
     }
 
     // ==================== SearchResponse Serialization Tests ====================

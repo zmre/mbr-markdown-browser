@@ -29,11 +29,35 @@ import { css, type ReactiveController, type ReactiveControllerHost } from 'lit'
 /** Below this width the play button floats instead of sitting in the nav. */
 export const PLAY_FAB_QUERY = '(max-width: 600px)'
 
-/** How far the review button moves up while a play button is showing. */
-export const FAB_STACK_OFFSET = '4.25rem'
+/** The height of one floating-button slot (button plus gap), in rem. */
+const FAB_SLOT_REM = 4.25
 
+/** How far the review button moves up while a play button is showing. */
+export const FAB_STACK_OFFSET = `${FAB_SLOT_REM}rem`
+
+/**
+ * Which slot of the bottom-right stack a host's button takes, bottom first:
+ * the play button (slides, flashcards) sits in the corner, the calendar
+ * button above it, and `<mbr-review>`'s button above both.
+ */
+export type FabLayer = 'play' | 'calendar'
+
+/** Total height of the shown play and calendar buttons: the review button reads it. */
 const STACK_PROPERTY = '--mbr-fab-stack-offset'
-const STACK_COUNT = 'mbrFabStack'
+/** Height of the shown play button only: the calendar button reads it. */
+export const PLAY_OFFSET_PROPERTY = '--mbr-fab-play-offset'
+/** Per-layer reference counts on `<html>`'s dataset. */
+const STACK_COUNT: Record<FabLayer, string> = { play: 'mbrFabStack', calendar: 'mbrFabStackCalendar' }
+
+/** Publishes both offsets from the per-layer counts. */
+function publishStack(root: HTMLElement): void {
+  const showing = (layer: FabLayer): boolean => Number(root.dataset[STACK_COUNT[layer]] ?? 0) > 0
+  const slots = (showing('play') ? 1 : 0) + (showing('calendar') ? 1 : 0)
+  if (slots > 0) root.style.setProperty(STACK_PROPERTY, `${FAB_SLOT_REM * slots}rem`)
+  else root.style.removeProperty(STACK_PROPERTY)
+  if (showing('play')) root.style.setProperty(PLAY_OFFSET_PROPERTY, FAB_STACK_OFFSET)
+  else root.style.removeProperty(PLAY_OFFSET_PROPERTY)
+}
 
 /** True inside the iOS app, which marks `<html>` at document start. */
 export function isEmbeddedPage(): boolean {
@@ -98,7 +122,9 @@ export const FAB_CSS = css`
 /**
  * Tracks whether a floating play button may show (narrow viewport or the iOS
  * app) and keeps `--mbr-fab-stack-offset` in step with whether this host is
- * actually showing one, which `shows` answers after each update.
+ * actually showing one, which `shows` answers after each update. A host on the
+ * `calendar` layer (`<mbr-calendar>`) decides its own visibility and only uses
+ * the stacking; its button sits `--mbr-fab-play-offset` above the corner.
  */
 export class PlayFabController implements ReactiveController {
   private _narrow = false
@@ -107,7 +133,8 @@ export class PlayFabController implements ReactiveController {
 
   constructor(
     private readonly _host: ReactiveControllerHost,
-    private readonly _shows: () => boolean
+    private readonly _shows: () => boolean,
+    private readonly _layer: FabLayer = 'play'
   ) {
     _host.addController(this)
   }
@@ -143,13 +170,10 @@ export class PlayFabController implements ReactiveController {
     if (want === this._holding) return
     this._holding = want
     const root = document.documentElement
-    const count = Number(root.dataset[STACK_COUNT] ?? 0) + (want ? 1 : -1)
-    if (count > 0) {
-      root.dataset[STACK_COUNT] = String(count)
-      root.style.setProperty(STACK_PROPERTY, FAB_STACK_OFFSET)
-    } else {
-      delete root.dataset[STACK_COUNT]
-      root.style.removeProperty(STACK_PROPERTY)
-    }
+    const key = STACK_COUNT[this._layer]
+    const count = Number(root.dataset[key] ?? 0) + (want ? 1 : -1)
+    if (count > 0) root.dataset[key] = String(count)
+    else delete root.dataset[key]
+    publishStack(root)
   }
 }

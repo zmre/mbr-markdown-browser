@@ -329,12 +329,20 @@ extension SelfTest {
 
     /// A page four folders down with a long title: what the native bar
     /// (title, breadcrumb menu, ⋯ menu, Back) is for. Stays open, logging
-    /// `SCREEN deep`, for the UI test that opens the menus.
+    /// `SCREEN deep`, for the UI test that opens the menus. Also writes one
+    /// day note (dated in the past, so ⋯ → Today's Note falls back to it).
     static func runDeep(_ session: VaultSession) async {
         let folder = session.access.url.appending(
             path: "Projects/Clients/Acme Corporation/Quarterly Planning", directoryHint: .isDirectory
         )
+        let journal = session.access.url.appending(path: "Journal", directoryHint: .isDirectory)
         await Task.detached {
+            try? FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
+            try? """
+            # Journal Day One
+
+            - 09:00 Standup
+            """.write(to: journal.appending(path: "2026-11-01.md"), atomically: true, encoding: .utf8)
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try? """
             ---

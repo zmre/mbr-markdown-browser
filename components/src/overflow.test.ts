@@ -125,6 +125,29 @@ describe('theme.css: nothing widens the page', () => {
     }
   })
 
+  it('reserves the docked companion column by padding, with the same gutter, only at its widths', () => {
+    const cases = [
+      {
+        media: '@media screen and (min-width: 1280px)',
+        body: 'html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single))',
+      },
+      { media: '@media screen and (min-width: 1440px)', body: 'html:not(.mbr-companion-hidden) body.mbr-has-companion' },
+    ]
+    for (const { media, body } of cases) {
+      const reserve = rulesFor(body).find((r) => declaration(r, 'padding-right'))
+      expect(reserve && declaration(reserve, 'padding-right'), body).toBe('var(--mbr-companion-width)')
+      expect(reserve?.conditions).toEqual([media])
+      const column = rulesFor(`${body} > mbr-calendar`)[0]
+      expect(column && declaration(column, 'position')).toBe('fixed')
+      expect(column && declaration(column, 'width')).toBe('var(--mbr-companion-width)')
+      for (const child of ['header', 'nav.breadcrumbs', 'main', 'footer']) {
+        const gutter = rulesFor(`${body} > ${child}`).find((r) => declaration(r, 'padding-inline'))
+        expect(gutter && declaration(gutter, 'padding-inline'), child).toBe('var(--pico-spacing)')
+        expect(gutter?.conditions).toEqual([media])
+      }
+    }
+  })
+
   it('keeps the marginalia dagger narrower than the 16px sidebar gutter', () => {
     const dagger = rulesFor('blockquote blockquote blockquote::before').find(
       (r) => r.conditions.length === 0 && declaration(r, 'padding')

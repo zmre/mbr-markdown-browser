@@ -1,6 +1,8 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { getTasksDefaultInclude, isEditEnabled, isTasksEnabled, resolveUrl } from './shared.js'
+import { getCalendarConfig, getTasksDefaultInclude, isEditEnabled, isTasksEnabled, resolveUrl } from './shared.js'
+import { loadCalendarChunk } from './calendar-chunk.js'
+import { resolveWeekStart } from './calendar/month-grid.js'
 import { isInputTarget, isModalOpen, isPresentationPlaying } from './mbr-keys.js'
 import { getMbrAssetBase } from './dynamic-loader.js'
 import { currentDocumentPath, syncDocumentTask, toggleTask } from './task-toggle.js'
@@ -214,6 +216,9 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
     // second guard keeps a stale custom `_nav.html` from rendering a button
     // whose endpoint answers 404.
     if (!isTasksEnabled()) return nothing
+    // "By Due"'s Week and Month grids are the calendar chunk's elements, so
+    // they exist only where the calendar does.
+    const calendar = getCalendarConfig()
 
     return html`
       ${this._renderTrigger()}
@@ -227,6 +232,8 @@ export class MbrTasksElement extends LitElement implements MbrOverlay {
               .defaultInclude=${getTasksDefaultInclude()}
               .toggleTask=${panelToggle}
               .currentPath=${currentDocumentPath()}
+              .loadCalendarChunk=${calendar.enabled ? loadCalendarChunk : null}
+              .weekStart=${resolveWeekStart(calendar.weekStart, navigator.language || 'en-US')}
               @mbr-tasks-close=${() => this.close()}
             ></mbr-tasks-panel>
           `

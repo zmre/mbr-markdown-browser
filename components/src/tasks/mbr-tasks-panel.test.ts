@@ -1,16 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import './mbr-tasks-panel.js'
 import type { MbrTasksPanelElement } from './mbr-tasks-panel.js'
+import '../calendar/mbr-calendar-grid.js'
+import type { MbrCalendarMonthGridElement } from '../calendar/mbr-calendar-grid.js'
+import { moveDay, overflowSplit, overlayCommand } from '../calendar/overlay-model.js'
+import type { CalendarChunk } from '../calendar-chunk.js'
 import {
   calendarResponse,
   categoryResponse,
+  gridResponse,
+  makeGridHit,
   makeGroup,
   makeHit,
   makeMarker,
   makeResponse,
   markerResponse,
 } from './test-fixtures.js'
-import type { IncludeFilter, TaskQueryResponse } from './types.js'
+import type { IncludeFilter, TaskGridResponse, TaskQueryResponse, TaskToggler } from './types.js'
 
 /** Today for every test here; matches the fixture dates. */
 const TODAY = new Date(2026, 7, 4, 12, 0, 0)
@@ -614,6 +620,39 @@ describe('MbrTasksPanelElement', () => {
       const chips = Array.from(element.shadowRoot!.querySelectorAll('.mbr-task-due'))
       expect(chips[0].classList.contains('mbr-task-overdue')).toBe(true)
       expect(chips[1].classList.contains('mbr-task-overdue')).toBe(false)
+    })
+
+    it('shows a scheduled date as its own chip, between due and done', async () => {
+      element = await mount(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/n/',
+              label: 'N',
+              tasks: [
+                makeHit({
+                  text: 'plan',
+                  due: '2026-08-09T00:00:00',
+                  scheduled: '2026-08-07T09:30:00',
+                  scheduled_has_time: true,
+                  done: '2026-08-08T00:00:00',
+                }),
+                makeHit({ text: 'only scheduled', line: 2, scheduled: '2026-08-07T00:00:00' }),
+              ],
+            }),
+          ],
+        })
+      )
+      const cards = Array.from(element.shadowRoot!.querySelectorAll('.task-card'))
+      const kinds = Array.from(cards[0].querySelectorAll('time')).map((t) => t.className.trim())
+      expect(kinds).toEqual(['mbr-task-due', 'mbr-task-scheduled', 'mbr-task-completed'])
+      const scheduled = cards[0].querySelector('.mbr-task-scheduled')!
+      expect(scheduled.getAttribute('datetime')).toBe('2026-08-07T09:30')
+      expect(scheduled.getAttribute('title')).toBe('Scheduled')
+      // A scheduled date alone still draws the chip row, and is never "overdue".
+      const lone = cards[1].querySelector('.mbr-task-scheduled')!
+      expect(lone.textContent?.trim()).toBe('Aug 7')
+      expect(lone.classList.contains('mbr-task-overdue')).toBe(false)
     })
   })
 
@@ -1475,5 +1514,231 @@ describe('MbrTasksPanelElement', () => {
       press('Escape')
       expect(onClose).not.toHaveBeenCalled()
     })
+  })
+})
+
+// ============================================================================
+// By Due: Week and Month grids (design/calendar.md §8.2)
+// ============================================================================
+
+describe('MbrTasksPanelElement By Due grids', () => {
+  let element: MbrTasksPanelElement | null = null
+  let chunkLoads = 0
+
+  /** The calendar chunk as the trigger would hand it over: the real key map. */
+  const loadCalendarChunk = (): Promise<CalendarChunk | null> => {
+    chunkLoads++
+    return Promise.resolve({ enhancePage: () => ({ entries: [], dispose: () => {} }), overlayCommand, moveDay, overflowSplit })
+  }
+
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    chunkLoads = 0
+  })
+
+  afterEach(() => {
+    element?.remove()
+    element = null
+    vi.restoreAllMocks()
+  })
+
+  async function mountGrid(
+    opts: { calendar?: boolean; editEnabled?: boolean; toggleTask?: TaskToggler } = {}
+  ): Promise<MbrTasksPanelElement> {
+    respondWith(categoryResponse())
+    const el = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
+    el.today = TODAY
+    el.locale = 'en-US'
+    el.weekStart = 1
+    if (opts.calendar !== false) el.loadCalendarChunk = loadCalendarChunk
+    el.editEnabled = opts.editEnabled ?? false
+    if (opts.toggleTask) el.toggleTask = opts.toggleTask
+    document.body.appendChild(el)
+    await flush(el)
+    return el
+  }
+
+  function root(): ShadowRoot {
+    return element!.shadowRoot!
+  }
+
+  async function byDue(): Promise<void> {
+    respondWith(calendarResponse())
+    root().querySelectorAll<HTMLButtonElement>('.mode-tab')[1].click()
+    await flush(element!)
+  }
+
+  async function chooseView(label: 'List' | 'Week' | 'Month', response: TaskGridResponse | TaskQueryResponse = gridResponse()) {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(response) })
+    const button = Array.from(root().querySelectorAll<HTMLButtonElement>('.view-option')).find(
+      (b) => b.textContent?.trim() === label
+    )!
+    button.click()
+    await flush(element!)
+  }
+
+  it('offers List · Week · Month in By Due only, and only with the calendar', async () => {
+    element = await mountGrid()
+    expect(root().querySelector('.view-switch')).toBeNull()
+    await byDue()
+    const labels = Array.from(root().querySelectorAll('.view-option')).map((b) => b.textContent?.trim())
+    expect(labels).toEqual(['List', 'Week', 'Month'])
+    expect(root().querySelector('.view-option.active')?.textContent?.trim()).toBe('List')
+    element.remove()
+
+    element = await mountGrid({ calendar: false })
+    await byDue()
+    expect(root().querySelector('.view-switch')).toBeNull()
+  })
+
+  it('posts mode "grid" over the visible week or month, leaving the list body alone', async () => {
+    element = await mountGrid()
+    await byDue()
+    expect((lastBody() as { mode: string }).mode).toBe('calendar')
+    expect(lastBody()).not.toHaveProperty('from')
+
+    await chooseView('Week')
+    expect(lastBody()).toMatchObject({ mode: 'grid', from: '2026-08-03', to: '2026-08-09', include: 'tasks' })
+
+    await chooseView('Month')
+    // August 2026 from a Monday start: six rows, 2026-07-27 .. 2026-09-06.
+    expect(lastBody()).toMatchObject({ mode: 'grid', from: '2026-07-27', to: '2026-09-06' })
+
+    await chooseView('List', calendarResponse())
+    expect((lastBody() as { mode: string }).mode).toBe('calendar')
+  })
+
+  it('loads the calendar chunk once and draws its grid element by tag name', async () => {
+    element = await mountGrid()
+    await byDue()
+    expect(chunkLoads).toBe(0)
+    await chooseView('Week')
+    await chooseView('Month')
+    expect(chunkLoads).toBe(1)
+    const grid = root().querySelector('mbr-calendar-month-grid') as MbrCalendarMonthGridElement
+    expect(grid).not.toBeNull()
+    expect(grid.month).toBe('2026-08')
+    const entries = grid.dayEntries('2026-08-05')
+    // A time the text starts with is not repeated as a label.
+    expect(entries.map((e) => [e.title, e.status, e.time])).toEqual([
+      ['09:00 standup', 'open', undefined],
+      ['shipped', 'done', undefined],
+    ])
+    expect(entries[0].tooltip).toBe('09:00 standup — Notes')
+    expect(entries[0].href).toContain('#mbr-task-2')
+    expect(grid.dayMarks('2026-08-03')).toEqual({ notes: 0, open: 1, overdue: true })
+    await grid.updateComplete
+    expect(grid.shadowRoot!.querySelector('[data-date="2026-08-03"]')?.classList.contains('overdue')).toBe(true)
+  })
+
+  it('pages the range with ] and [ and refetches only when it changes', async () => {
+    element = await mountGrid()
+    await byDue()
+    await chooseView('Week')
+    const calls = fetchMock.mock.calls.length
+    press('l')
+    await flush(element)
+    expect(fetchMock.mock.calls.length).toBe(calls)
+    press(']')
+    await flush(element)
+    expect(lastBody()).toMatchObject({ from: '2026-08-10', to: '2026-08-16' })
+    press('t')
+    await flush(element)
+    expect(lastBody()).toMatchObject({ from: '2026-08-03', to: '2026-08-09' })
+  })
+
+  it('keeps letters in the filter field', async () => {
+    element = await mountGrid()
+    await byDue()
+    await chooseView('Week')
+    const calls = fetchMock.mock.calls.length
+    const input = root().querySelector<HTMLInputElement>('#tasks-filter')!
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true, composed: true }))
+    await flush(element)
+    expect(fetchMock.mock.calls.length).toBe(calls)
+  })
+
+  it('switches to the overdue list from the Overdue chip', async () => {
+    element = await mountGrid()
+    await byDue()
+    await chooseView('Week')
+    const chip = root().querySelector<HTMLButtonElement>('.overdue-chip')!
+    expect(chip.textContent?.trim()).toBe('Overdue (3)')
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(calendarResponse()) })
+    chip.click()
+    await flush(element)
+    expect(lastBody()).toMatchObject({ mode: 'calendar', due: 'overdue' })
+    expect(root().querySelector('.view-option.active')?.textContent?.trim()).toBe('List')
+  })
+
+  it('says it is indexing while the scan runs and nothing is placed yet', async () => {
+    element = await mountGrid()
+    await byDue()
+    await chooseView('Week', gridResponse({ days: {}, scan_in_progress: true }))
+    expect(root().querySelector('.grid-body')?.textContent).toContain('Indexing tasks…')
+  })
+
+  it('lists a day as task cards whose checkboxes use the injected toggler', async () => {
+    const toggleTask = vi.fn<TaskToggler>().mockResolvedValue({ ok: true })
+    element = await mountGrid({ editEnabled: true, toggleTask })
+    await byDue()
+    await chooseView('Week')
+    const grid = root().querySelector('mbr-calendar-week-grid')!
+    grid.dispatchEvent(new CustomEvent('mbr-calendar-focus', { detail: { date: '2026-08-05' }, bubbles: true, composed: true }))
+    await flush(element)
+    const cards = root().querySelectorAll('.day-popover .task-card')
+    expect(cards.length).toBe(2)
+    expect(root().querySelector('.day-popover .day-popover-note')?.textContent).toBe('Notes')
+
+    root().querySelector<HTMLInputElement>('.day-popover .task-card input[type="checkbox"]')!.click()
+    await flush(element)
+    expect(toggleTask).toHaveBeenCalledWith({ path: 'notes.md', line: 2, to: 'done' })
+    // The write re-runs the grid query.
+    expect((lastBody() as { mode: string }).mode).toBe('grid')
+
+    press('Escape')
+    await flush(element)
+    expect(root().querySelector('.day-popover')).toBeNull()
+    expect(element.isConnected).toBe(true)
+  })
+
+  it('toggles the only task of the focused day with Space, and never a marker', async () => {
+    const toggleTask = vi.fn<TaskToggler>().mockResolvedValue({ ok: true })
+    element = await mountGrid({ editEnabled: true, toggleTask })
+    await byDue()
+    const marker = makeGridHit({ text: 'TODO: a marker', line: 9, kind: 'marker' })
+    await chooseView(
+      'Week',
+      gridResponse({
+        days: {
+          '2026-08-04': { tasks: [makeGridHit({ text: 'only one', line: 7 })], open: 1, done: 0, overdue: false },
+          '2026-08-06': { tasks: [marker], open: 1, done: 0, overdue: false },
+        },
+      })
+    )
+    press(' ')
+    await flush(element)
+    expect(toggleTask).toHaveBeenCalledWith({ path: 'notes.md', line: 7, to: 'done' })
+
+    press('l')
+    press('l')
+    await flush(element)
+    press(' ')
+    await flush(element)
+    expect(toggleTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows Month as Week on a narrow screen', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({ matches: query === '(max-width: 600px)', media: query, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList
+    )
+    element = await mountGrid()
+    await byDue()
+    await chooseView('Month')
+    expect(lastBody()).toMatchObject({ mode: 'grid', from: '2026-08-03', to: '2026-08-09' })
+    expect(root().querySelector('mbr-calendar-week-grid')).not.toBeNull()
+    expect(root().querySelector('.view-option.active')?.textContent?.trim()).toBe('Week')
   })
 })

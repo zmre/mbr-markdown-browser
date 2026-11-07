@@ -321,7 +321,10 @@ impl Templates {
                 context.insert(k, v);
             }
         });
-        let body_class = body_class_list(&frontmatter);
+        let body_class = with_companion_class(
+            body_class_list(&frontmatter),
+            extra_context.get("calendar_companion"),
+        );
         // Left undefined when there is nothing to say, so `{% if style %}` in a
         // custom template still distinguishes "no classes" from an empty string.
         if !body_class.is_empty() {
@@ -507,6 +510,26 @@ fn body_class_list(frontmatter: &SimpleMetadata) -> String {
         .join(" ")
 }
 
+/// `<body>` class that reserves the daily-note companion's right column
+/// (theme.css, "Daily-note Companion"). Set on day notes under
+/// `[calendar] companion = "auto"`; see `page_context::companion_docks`.
+pub const COMPANION_BODY_CLASS: &str = "mbr-has-companion";
+
+/// Appends [`COMPANION_BODY_CLASS`] when the page context asks for the docked
+/// companion (`calendar_companion: true`). Folded into `style` rather than
+/// emitted separately for the reason [`body_class_list`] gives: a custom
+/// `.mbr/index.html` that renders `{{ style }}` gets the column untouched.
+fn with_companion_class(classes: String, companion: Option<&serde_json::Value>) -> String {
+    if companion != Some(&serde_json::Value::Bool(true)) {
+        return classes;
+    }
+    if classes.is_empty() {
+        COMPANION_BODY_CLASS.to_string()
+    } else {
+        format!("{classes} {COMPANION_BODY_CLASS}")
+    }
+}
+
 /// Expands a `style` frontmatter value into individual class names.
 ///
 /// Strings are split on whitespace rather than passed through whole so that
@@ -585,6 +608,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../templates/_display_enhancements.html"),
     ),
     ("_contact_card.html", CONTACT_CARD_TEMPLATE),
+    (
+        "_calendar_nav.html",
+        include_str!("../templates/_calendar_nav.html"),
+    ),
     // Compat shim for customized `index.html` files written before the card.
     (
         "_person_infobox.html",
@@ -1251,6 +1278,27 @@ mod tests {
             HashMap::new(),
         );
         assert_eq!(body_tag(&html), r#"<body class="slides other">"#);
+    }
+
+    #[test]
+    fn test_rendered_body_class_gains_the_companion_on_request() {
+        let html = render_page(
+            SimpleMetadata::from([("type".to_string(), json!("daily"))]),
+            HashMap::from([("calendar_companion".to_string(), json!(true))]),
+        );
+        assert_eq!(body_tag(&html), r#"<body class="daily mbr-has-companion">"#);
+
+        let html = render_page(
+            SimpleMetadata::new(),
+            HashMap::from([("calendar_companion".to_string(), json!(true))]),
+        );
+        assert_eq!(body_tag(&html), r#"<body class="mbr-has-companion">"#);
+
+        let html = render_page(
+            SimpleMetadata::new(),
+            HashMap::from([("calendar_companion".to_string(), json!(false))]),
+        );
+        assert_eq!(body_tag(&html), "<body>");
     }
 
     #[test]

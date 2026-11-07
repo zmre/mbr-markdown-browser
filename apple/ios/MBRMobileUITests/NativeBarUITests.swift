@@ -38,9 +38,18 @@ final class NativeBarUITests: XCTestCase {
 
         more.tap()
         XCTAssertTrue(app.buttons["Open Other Vault…"].waitForExistence(timeout: 5), "⋯ menu")
-        XCTAssertTrue(app.buttons["Search"].exists, "the page's actions in the ⋯ menu")
+        // Menu items are matched inside the menu: the page's own header (collapsed
+        // to zero height in the app, still in the accessibility tree) has a
+        // "Search" button too.
+        let menu = app.collectionViews
+        XCTAssertTrue(menu.buttons["Search"].exists, "the page's actions in the ⋯ menu")
+        // The calendar actions (design/calendar.md §9.1): the deep scenario
+        // writes a day note, and a phone never docks the day panel.
+        for label in ["Today's Note", "Calendar", "Day Panel"] {
+            XCTAssertTrue(menu.buttons[label].exists, "⋯ → \(label)")
+        }
         self.shot("more-menu")
-        app.buttons["Search"].tap()
+        menu.buttons["Search"].tap()
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), "the native search sheet")
         self.shot("search-from-menu")
@@ -57,6 +66,30 @@ final class NativeBarUITests: XCTestCase {
         // Last: the picker it opens is the page's, and the test ends there.
         newNote.tap()
         self.shot("new-note")
+    }
+
+    /// ⋯ → Today's Note opens the most recent day note (the deep scenario's
+    /// only one is in the past), whose title the bar then shows.
+    func testTodaysNoteFromMenu() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-mbrSelfTest", "deep"]
+        app.launch()
+
+        let more = app.navigationBars.buttons["More"]
+        XCTAssertTrue(more.waitForExistence(timeout: 60), "the ⋯ menu")
+        let deepTitle = app.navigationBars.buttons
+            .matching(NSPredicate(format: "label CONTAINS 'Roadmap'"))
+            .firstMatch
+        XCTAssertTrue(deepTitle.waitForExistence(timeout: 30), "the deep page loaded")
+        more.tap()
+        let today = app.collectionViews.buttons["Today's Note"]
+        XCTAssertTrue(today.waitForExistence(timeout: 5), "⋯ → Today's Note")
+        today.tap()
+        let dayTitle = app.navigationBars.buttons
+            .matching(NSPredicate(format: "label CONTAINS 'Journal Day One'"))
+            .firstMatch
+        XCTAssertTrue(dayTitle.waitForExistence(timeout: 15), "the day note's title in the bar")
+        self.shot("todays-note")
     }
 
     /// ⋯ → Search opens the native search sheet with the keyboard already up
@@ -77,7 +110,8 @@ final class NativeBarUITests: XCTestCase {
             "the page has loaded"
         )
         more.tap()
-        let search = app.buttons["Search"]
+        // Inside the menu: the page's collapsed header has a "Search" button too.
+        let search = app.collectionViews.buttons["Search"]
         XCTAssertTrue(search.waitForExistence(timeout: 5), "Search in the ⋯ menu")
         search.tap()
 

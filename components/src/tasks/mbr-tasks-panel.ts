@@ -6,6 +6,7 @@ import {
   ICON_SM,
   icon,
   iconCalendarDays,
+  iconChevronLeft,
   iconChevronRight,
   iconFileText,
   iconFolder,
@@ -32,9 +33,32 @@ import {
   type FolderTreeNode,
 } from './folder-tree.js'
 import { formatDateHeading, progressPercent } from './task-format.js'
+import {
+  NARROW_QUERY,
+  effectiveView,
+  gridDay,
+  gridDayMarks,
+  gridEntries,
+  gridIsEmpty,
+  gridRange,
+  gridTitle,
+  stepGrid,
+  taskKey,
+  type GridView,
+} from './task-grid.js'
+import { positionAnchored } from '../anchored-popover.js'
+import { localDateKey, type DateKey } from '../calendar/note-date.js'
+import { formatDate, monthOf, type Weekday } from '../calendar/month-grid.js'
+import type { CalendarChunk } from '../calendar-chunk.js'
+import type { DayMarks, GridEntry } from '../calendar/types.js'
+import type { MbrCalendarMonthGridElement } from '../calendar/mbr-calendar-grid.js'
 import type {
   DueFilter,
+  DueView,
+  GridTaskHit,
   IncludeFilter,
+  TaskGridRequest,
+  TaskGridResponse,
   TaskHit,
   TaskMode,
   TaskPriority,
@@ -98,17 +122,6 @@ function ownsEnter(target: HTMLElement | null): boolean {
   return tag === 'INPUT' && (target as HTMLInputElement).type === 'checkbox'
 }
 
-/**
- * Identity of one task across a re-query.
- *
- * Path + line, not the array index: a toggle re-queries, and with the default
- * incomplete-only filter the task it completed leaves the list — so index `3`
- * afterwards is a different task than index `3` before.
- */
-function taskKey(hit: TaskHit): string {
-  return `${hit.path}:${hit.line}`
-}
-
 const DUE_OPTIONS: ReadonlyArray<{ value: DueFilter; label: string }> = [
   { value: 'any', label: 'Any due date' },
   { value: 'overdue', label: 'Overdue' },
@@ -131,6 +144,13 @@ const INCLUDE_OPTIONS: ReadonlyArray<{ value: IncludeFilter; label: string }> = 
  * hand behaves like one built from a default configuration.
  */
 const DEFAULT_INCLUDE: IncludeFilter = 'tasks'
+
+/** "By Due"'s view switch, in display order. */
+const VIEW_OPTIONS: ReadonlyArray<{ value: DueView; label: string }> = [
+  { value: 'list', label: 'List' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: 'Month' },
+]
 
 /**
  * `<mbr-tasks-panel>` — the two-pane task browser.
@@ -221,6 +241,19 @@ export class MbrTasksPanelElement extends LitElement {
   @property({ attribute: false })
   currentPath: string | null = null
 
+  /**
+   * The calendar chunk's single-flight loader (`calendar-chunk.ts`), injected
+   * by the trigger; `null` when the calendar is off, which hides "By Due"'s
+   * Week and Month views. The grids are that chunk's elements, created here
+   * by tag name only: this chunk must never bundle (and so re-define) them.
+   */
+  @property({ attribute: false })
+  loadCalendarChunk: (() => Promise<CalendarChunk | null>) | null = null
+
+  /** First grid column, 0 = Sunday (the `[calendar] week_start` setting, resolved). */
+  @property({ attribute: false })
+  weekStart: Weekday = 1
+
   // === Query state ===
   @state() private _q = ''
   @state() private _folder: string | null = null
@@ -236,12 +269,27 @@ export class MbrTasksPanelElement extends LitElement {
    */
   @state() private _include: IncludeFilter = DEFAULT_INCLUDE
   @state() private _mode: TaskMode = 'category'
+  /** "By Due"'s view, for the panel's life. Read through {@link _gridView}. */
+  @state() private _dueView: DueView = 'list'
+  /** The grids' focused day; the range on screen is the view around it. */
+  @state() private _gridFocus: DateKey = ''
 
   // === Response state ===
   @state() private _response: TaskQueryResponse | null = null
   @state() private _folderTree: FolderTreeNode | null = null
   @state() private _loading = false
   @state() private _error: string | null = null
+  /** The last `mode: "grid"` answer; `_response` keeps the list's. */
+  @state() private _grid: TaskGridResponse | null = null
+  /** The loaded calendar chunk, once a grid view has asked for it. */
+  @state() private _calendar: CalendarChunk | null = null
+  /** The calendar chunk failed to load: the grid views say so. */
+  @state() private _calendarFailed = false
+  /** Below {@link NARROW_QUERY}: Month shows as Week. */
+  @state() private _narrow = false
+  /** A grid day's task list, open over the grid, and its focused row. */
+  @state() private _dayPopover: { date: DateKey; anchor: HTMLElement } | null = null
+  @state() private _popIndex = 0
 
   // === UI state ===
   @state() private _collapsed = new Set<string>()
@@ -271,6 +319,7 @@ export class MbrTasksPanelElement extends LitElement {
 
   private _debounceTimeout: number | null = null
   private _abortController: AbortController | null = null
+  private _narrowQuery: MediaQueryList | null = null
 
   /**
    * Monotonic id for query runs. Bumped when a query starts and when the panel
@@ -306,11 +355,18 @@ export class MbrTasksPanelElement extends LitElement {
   override connectedCallback() {
     super.connectedCallback()
     document.addEventListener('keydown', this._handleKeydown)
+    if (typeof window.matchMedia === 'function') {
+      this._narrowQuery = window.matchMedia(NARROW_QUERY)
+      this._narrow = this._narrowQuery.matches
+      this._narrowQuery.addEventListener?.('change', this._onNarrow)
+    }
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback()
     document.removeEventListener('keydown', this._handleKeydown)
+    this._narrowQuery?.removeEventListener?.('change', this._onNarrow)
+    this._narrowQuery = null
     // Invalidate anything in flight: the element is destroyed on close and a
     // late response must not write to a detached element.
     this._generation++
@@ -323,6 +379,7 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   override firstUpdated() {
+    this._gridFocus = localDateKey(this.today)
     this._applyDefaultInclude()
     this._applyCurrentFolder()
     this._input?.focus()
@@ -383,9 +440,19 @@ export class MbrTasksPanelElement extends LitElement {
     return this._mode === 'calendar' ? 'tasks' : this._include
   }
 
+  /**
+   * The grid view on screen, or `null` for a list. "By Due" only, only with
+   * a calendar chunk to draw it, and Month as Week on a narrow screen.
+   */
+  private get _gridView(): GridView | null {
+    if (this._mode !== 'calendar' || !this.loadCalendarChunk) return null
+    const view = effectiveView(this._dueView, this._narrow)
+    return view === 'list' ? null : view
+  }
+
   /** The exact body posted to `/.mbr/tasks` for the current filter state. */
-  public requestBody(): TaskQueryRequest {
-    return {
+  public requestBody(): TaskQueryRequest | TaskGridRequest {
+    const body: TaskQueryRequest = {
       q: this._q,
       folder: folderScopeValue(this._folder),
       statuses: [...this._statuses],
@@ -395,6 +462,9 @@ export class MbrTasksPanelElement extends LitElement {
       mode: this._mode,
       limit: TASK_LIMIT,
     }
+    const view = this._gridView
+    if (!view) return body
+    return { ...body, mode: 'grid', ...gridRange(view, this._gridFocus, this.weekStart) }
   }
 
   private _scheduleQuery() {
@@ -446,7 +516,7 @@ export class MbrTasksPanelElement extends LitElement {
             : `Task query failed: ${response.status}`
         )
       }
-      const data = (await response.json()) as TaskQueryResponse
+      const data = (await response.json()) as TaskQueryResponse | TaskGridResponse
       // Every state write happens after the last await, so a superseded run
       // cannot leave the folder tree describing one query and the groups another.
       if (isStale()) return
@@ -465,7 +535,9 @@ export class MbrTasksPanelElement extends LitElement {
       // therefore runs at most once. So the chain is at most three requests
       // (scoped+narrow, scoped+all, unscoped+all) and then both flags are
       // permanently false for the life of the panel.
-      if (data.groups.length === 0 && (widenInclude || widenFolder)) {
+      const isGrid = 'days' in data
+      const empty = isGrid ? gridIsEmpty(data) : data.groups.length === 0
+      if (empty && (widenInclude || widenFolder)) {
         if (widenInclude) {
           // Mutated, not applied invisibly: the Show select is bound to this, so
           // it goes on describing what is actually on screen — exactly as the
@@ -480,10 +552,14 @@ export class MbrTasksPanelElement extends LitElement {
         await this._runQuery()
         return
       }
+      this._folderTree = buildTaskFolderTree(data.folders ?? [])
+      if (isGrid) {
+        this._grid = data
+        return
+      }
       const focusedKey = options.keepFocus ? this._focusedTaskKey() : null
       const previousRow = this._focusRow
       this._response = data
-      this._folderTree = buildTaskFolderTree(data.folders ?? [])
       this._focusRow = options.keepFocus ? this._rowFor(focusedKey, previousRow) : -1
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return
@@ -491,6 +567,7 @@ export class MbrTasksPanelElement extends LitElement {
       console.error('Task query error:', err)
       this._error = err instanceof Error ? err.message : 'Task query failed'
       this._response = null
+      this._grid = null
     } finally {
       // Only the newest run owns the loading indicator; a superseded run
       // clearing it would hide the spinner while a request is still running.
@@ -579,7 +656,86 @@ export class MbrTasksPanelElement extends LitElement {
     // hide the wrong headings.
     this._collapsed = new Set()
     this._focusRow = -1
+    this._dayPopover = null
+    if (this._gridView) void this._ensureCalendar()
     void this._runQuery()
+  }
+
+  /** "By Due"'s List · Week · Month switch. Kept for the panel's life. */
+  private _setView(view: DueView) {
+    const before = this._gridView
+    this._dueView = view
+    this._dayPopover = null
+    const after = this._gridView
+    if (after) void this._ensureCalendar()
+    // Month and Week on a narrow screen are the same grid: nothing to fetch.
+    if (before !== after) void this._runQuery()
+  }
+
+  /** The narrow breakpoint moved: Month may have become Week, or back. */
+  private _onNarrow = (e: MediaQueryListEvent): void => {
+    const before = this._gridView
+    this._narrow = e.matches
+    if (before !== this._gridView) {
+      this._dayPopover = null
+      void this._runQuery()
+    }
+  }
+
+  /** Loads the calendar chunk once; the grids are its elements. */
+  private async _ensureCalendar(): Promise<void> {
+    if (this._calendar || !this.loadCalendarChunk) return
+    const chunk = await this.loadCalendarChunk()
+    if (chunk) this._calendar = chunk
+    else this._calendarFailed = true
+  }
+
+  /**
+   * Moves the grids' focus, fetching only when the range on screen changes
+   * (a day within the same week or month is already loaded).
+   */
+  private _setGridFocus(date: DateKey, options: { focusCell?: boolean } = {}) {
+    const view = this._gridView
+    const before = view ? gridRange(view, this._gridFocus, this.weekStart).from : null
+    this._gridFocus = date
+    this._dayPopover = null
+    if (view && gridRange(view, date, this.weekStart).from !== before) void this._runQuery()
+    if (options.focusCell) this._focusGridCell()
+  }
+
+  /** The grid element on screen, by tag name: this chunk never imports it. */
+  private _gridElement(): MbrCalendarMonthGridElement | null {
+    return this.shadowRoot?.querySelector<MbrCalendarMonthGridElement>('mbr-calendar-month-grid, mbr-calendar-week-grid') ?? null
+  }
+
+  private _focusGridCell() {
+    void this.updateComplete.then(() => this._gridElement()?.focusDay())
+  }
+
+  /** The tasks on a grid day, in display order. */
+  private _dayTasks(date: DateKey): GridTaskHit[] {
+    return gridDay(this._grid, date)?.tasks ?? []
+  }
+
+  /** Opens a day's task list over the grid, anchored on its cell. */
+  private _openDay(date: DateKey, anchor?: HTMLElement | null) {
+    if (this._dayTasks(date).length === 0) return
+    const cell = anchor ?? this._gridElement()?.cellFor(date)
+    if (!cell) return
+    this._gridFocus = date
+    this._dayPopover = { date, anchor: cell }
+    this._popIndex = 0
+  }
+
+  private _closeDay() {
+    this._dayPopover = null
+    this._focusGridCell()
+  }
+
+  /** "Overdue (N)": the overdue list, in List view. */
+  private _showOverdue() {
+    this._due = 'overdue'
+    this._setView('list')
   }
 
   /**
@@ -758,6 +914,10 @@ export class MbrTasksPanelElement extends LitElement {
   private _handleKeydown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       e.preventDefault()
+      if (this._dayPopover) {
+        this._closeDay()
+        return
+      }
       if (this._filtersOpen) {
         this._filtersOpen = false
         return
@@ -803,6 +963,11 @@ export class MbrTasksPanelElement extends LitElement {
     }
 
     if (e.metaKey || e.altKey) return
+
+    if (this._gridView) {
+      this._handleGridKey(e)
+      return
+    }
 
     // A <select> owns its own arrow keys (the due-range filter), and buttons,
     // selects and checkboxes own Enter. Hijacking those would leave the filter
@@ -860,6 +1025,118 @@ export class MbrTasksPanelElement extends LitElement {
           this._toggleDone(hit)
         }
         break
+      }
+    }
+  }
+
+  /**
+   * Keys in the Week and Month views: the calendar overlay's map
+   * (design/calendar.md §5.5), read through the chunk's own `overlayCommand`
+   * and `moveDay` so the two cannot drift.
+   *
+   * The filter field keeps its characters: there, only `↓` / `Enter` (into
+   * the grid) and PageUp / PageDown (page the range) are taken. Once a day
+   * cell has focus, the letters are grid keys too. A day's task list (Enter,
+   * or a click on a cell) is where `Space` / `x` toggle and `Enter` opens,
+   * as in the list; on a day holding exactly one task they act on it directly.
+   */
+  private _handleGridKey(e: KeyboardEvent) {
+    const view = this._gridView
+    const chunk = this._calendar
+    if (!view) return
+    const target = realTarget(e)
+    const tag = target?.tagName ?? ''
+    if (this._dayPopover) {
+      this._handlePopoverKey(e, target)
+      return
+    }
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+      if (target?.id !== 'tasks-filter') return
+      if (e.key === 'ArrowDown' || e.key === 'Enter') {
+        e.preventDefault()
+        this._focusGridCell()
+      } else if (e.key === 'PageUp' || e.key === 'PageDown') {
+        e.preventDefault()
+        this._setGridFocus(stepGrid(view, this._gridFocus, e.key === 'PageUp' ? -1 : 1))
+      }
+      return
+    }
+    if ((e.key === 'Enter' || e.key === ' ') && ownsEnter(target)) return
+    if (e.key === ' ' || e.key === 'x') {
+      const tasks = this._dayTasks(this._gridFocus)
+      // A lone marker declines the key, as it does in the list.
+      if (tasks.length === 0 || (tasks.length === 1 && tasks[0].kind === 'marker')) return
+      e.preventDefault()
+      if (tasks.length > 1 || !this.editEnabled) {
+        this._openDay(this._gridFocus)
+        return
+      }
+      if (e.key === 'x') this._toggleCanceled(tasks[0])
+      else this._toggleDone(tasks[0])
+      return
+    }
+    const command = chunk?.overlayCommand(e.key) ?? null
+    if (!command || !chunk) return
+    switch (command) {
+      case 'open':
+        e.preventDefault()
+        this._openDay(this._gridFocus)
+        return
+      case 'today':
+        e.preventDefault()
+        this._setGridFocus(localDateKey(this.today), { focusCell: true })
+        return
+      case 'month':
+      case 'week':
+      case 'list':
+        e.preventDefault()
+        this._setView(command)
+        if (command === 'list') this._input?.focus()
+        else this._focusGridCell()
+        return
+      case 'filter':
+        e.preventDefault()
+        this._input?.focus()
+        return
+      default: {
+        const next = chunk.moveDay(command, view, this._gridFocus)
+        if (!next) return
+        e.preventDefault()
+        this._setGridFocus(next, { focusCell: true })
+      }
+    }
+  }
+
+  /** `↑`/`↓` (`k`/`j`) walk a day's task list; `Enter` opens; `Space`/`x` toggle. */
+  private _handlePopoverKey(e: KeyboardEvent, target: HTMLElement | null) {
+    const pop = this._dayPopover
+    if (!pop) return
+    const tasks = this._dayTasks(pop.date)
+    if (e.key === 'Enter' && ownsEnter(target)) return
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'j':
+      case 'ArrowUp':
+      case 'k': {
+        e.preventDefault()
+        const delta = e.key === 'ArrowDown' || e.key === 'j' ? 1 : -1
+        this._popIndex = Math.max(0, Math.min(tasks.length - 1, this._popIndex + delta))
+        return
+      }
+      case 'Enter': {
+        const hit = tasks[this._popIndex]
+        if (!hit) return
+        e.preventDefault()
+        this._navigateTo(hit)
+        return
+      }
+      case ' ':
+      case 'x': {
+        const hit = tasks[this._popIndex]
+        if (!hit || !this.editEnabled || hit.kind === 'marker') return
+        e.preventDefault()
+        if (e.key === 'x') this._toggleCanceled(hit)
+        else this._toggleDone(hit)
       }
     }
   }
@@ -1031,8 +1308,9 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   private _renderResultsPane(): TemplateResult {
+    const grid = this._gridView
     return html`
-      <div class="results-pane ${this._activePaneIndex === 1 ? 'active' : ''}">
+      <div class="results-pane ${this._activePaneIndex === 1 ? 'active' : ''} ${grid ? 'grid' : ''}">
         <div class="filter-bar">
           <button
             class="folders-button mbr-icon-btn"
@@ -1065,8 +1343,8 @@ export class MbrTasksPanelElement extends LitElement {
           <button class="close-button mbr-icon-btn" @click=${() => this._close()} aria-label="Close" title="Close (Esc)">${icon(iconX)}</button>
         </div>
         ${this._filtersOpen ? this._renderFilterPopover() : nothing} ${this._renderModeTabs()}
-        ${this._renderStatusLine()} ${this._renderNotice()}
-        <div class="results-list">${this._renderResults()}</div>
+        ${this._renderViewSwitch()} ${this._renderStatusLine()} ${this._renderNotice()}
+        ${grid ? this._renderGridArea(grid) : html`<div class="results-list">${this._renderResults()}</div>`}
         ${this._renderFooter()}
       </div>
     `
@@ -1197,9 +1475,93 @@ export class MbrTasksPanelElement extends LitElement {
     `
   }
 
+  /** "By Due"'s List · Week · Month switch; absent without a calendar chunk. */
+  private _renderViewSwitch(): TemplateResult | typeof nothing {
+    if (this._mode !== 'calendar' || !this.loadCalendarChunk) return nothing
+    const shown = effectiveView(this._dueView, this._narrow)
+    return html`
+      <div class="view-switch" role="group" aria-label="View">
+        ${VIEW_OPTIONS.map(
+          (option) => html`<button
+            type="button"
+            class="view-option ${shown === option.value ? 'active' : ''}"
+            aria-pressed=${shown === option.value}
+            title=${option.value === 'month' && this._narrow ? 'Month shows as Week on a narrow screen' : nothing}
+            @click=${() => this._setView(option.value)}
+          >
+            ${option.label}
+          </button>`
+        )}
+      </div>
+    `
+  }
+
+  /** The reader's locale for the grids, which need a concrete tag. */
+  private _gridLocale(): string {
+    return this.locale ?? (typeof navigator === 'undefined' ? 'en-US' : navigator.language || 'en-US')
+  }
+
+  /** Week / Month: a header, the calendar chunk's grid, and the day's list. */
+  private _renderGridArea(view: GridView): TemplateResult {
+    const locale = this._gridLocale()
+    const grid = this._grid
+    const overdue = grid?.overdue_before_range ?? 0
+    const unit = view === 'week' ? 'week' : 'month'
+    // prettier-ignore
+    const header = html`<div class="grid-header"><button type="button" class="mbr-icon-btn sm" aria-label=${`Previous ${unit}`} title=${`Previous ${unit} ([)`} @click=${() => this._setGridFocus(stepGrid(view, this._gridFocus, -1))}>${icon(iconChevronLeft, { size: ICON_SM })}</button><strong class="grid-title">${gridTitle(view, this._gridFocus, this.weekStart, locale)}</strong><button type="button" class="mbr-icon-btn sm" aria-label=${`Next ${unit}`} title=${`Next ${unit} (])`} @click=${() => this._setGridFocus(stepGrid(view, this._gridFocus, 1))}>${icon(iconChevronRight, { size: ICON_SM })}</button><button type="button" class="mbr-icon-btn sm labeled" title="Today (t)" @click=${() => this._setGridFocus(localDateKey(this.today))}>Today</button>${overdue > 0 ? html`<button type="button" class="overdue-chip" title="List the overdue tasks" @click=${() => this._showOverdue()}>Overdue (${overdue})</button>` : nothing}</div>`
+    return html`<div class="grid-area">${header}<div class="grid-body">${this._renderGridBody(view, locale)}</div>${this._renderDayPopover(locale)}</div>`
+  }
+
+  private _renderGridBody(view: GridView, locale: string): TemplateResult {
+    if (this._calendarFailed) return html`<div class="results-error">The calendar could not be loaded.</div>`
+    if (this._error) return html`<div class="results-error">${this._error}</div>`
+    const grid = this._grid
+    if (!this._calendar || !grid) {
+      return html`<div class="results-empty" aria-busy="true">${this._calendar ? 'Loading tasks…' : 'Loading calendar…'}</div>`
+    }
+    if (grid.scan_in_progress && gridIsEmpty(grid)) {
+      return html`<div class="results-empty" aria-busy="true">Indexing tasks…</div>`
+    }
+    // Fresh closures each render: the grid re-renders when its inputs change
+    // identity, and these read the latest response and optimistic statuses.
+    const href = (hit: TaskHit) => safeHref(taskHref(hit, this.resolveHref))
+    const statusOf = (hit: TaskHit) => this._statusOf(hit)
+    const entries = (date: DateKey): readonly GridEntry[] => gridEntries(gridDay(grid, date), statusOf, href)
+    const marks = (date: DateKey): DayMarks => gridDayMarks(gridDay(grid, date))
+    const today = localDateKey(this.today)
+    const onFocus = (e: CustomEvent<{ date: DateKey }>) => {
+      this._gridFocus = e.detail.date
+      this._dayPopover = null
+      // The week grid has no day event: a click on its cell lists the day.
+      if (view === 'week') this._openDay(e.detail.date)
+    }
+    const onDay = (e: CustomEvent<{ date: DateKey; anchor: HTMLElement }>) => this._openDay(e.detail.date, e.detail.anchor)
+    if (view === 'week') {
+      // prettier-ignore
+      return html`<mbr-calendar-week-grid .start=${gridRange('week', this._gridFocus, this.weekStart).from} .focused=${this._gridFocus} .today=${today} .locale=${locale} .dayEntries=${entries} .dayMarks=${marks} @mbr-calendar-focus=${onFocus}></mbr-calendar-week-grid>`
+    }
+    // prettier-ignore
+    return html`<mbr-calendar-month-grid .month=${monthOf(this._gridFocus)} .focused=${this._gridFocus} .today=${today} .weekStart=${this.weekStart} .locale=${locale} .dayEntries=${entries} .dayMarks=${marks} @mbr-calendar-focus=${onFocus} @mbr-calendar-day=${onDay}></mbr-calendar-month-grid>`
+  }
+
+  /** A grid day's tasks as the list's own cards: same checkboxes, same toggles. */
+  private _renderDayPopover(locale: string): TemplateResult | typeof nothing {
+    const pop = this._dayPopover
+    if (!pop) return nothing
+    const tasks = this._dayTasks(pop.date)
+    // prettier-ignore
+    return html`<div class="day-popover" role="dialog" aria-label=${formatDate(pop.date, locale, { dateStyle: 'full' })}><div class="day-popover-head"><strong>${formatDate(pop.date, locale, { weekday: 'long', month: 'long', day: 'numeric' })}</strong><button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${() => this._closeDay()}>${icon(iconX, { size: ICON_SM })}</button></div><div class="day-popover-list">${tasks.length === 0 ? html`<p class="results-empty">No tasks match these filters.</p>` : tasks.map((hit, i) => html`${this._renderCard(hit, i === this._popIndex, () => (this._popIndex = i))}<div class="day-popover-note">${hit.note}</div>`)}</div></div>`
+  }
+
+  protected override updated(): void {
+    const pop = this._dayPopover
+    const card = pop ? this.shadowRoot?.querySelector<HTMLElement>('.day-popover') : null
+    if (pop && card) positionAnchored(pop.anchor, card)
+  }
+
   private _renderStatusLine(): TemplateResult | typeof nothing {
     if (this._error) return nothing
-    const response = this._response
+    const response = this._gridView ? this._grid : this._response
     if (!response) return nothing
     const count = response.total_matches
     return html`
@@ -1302,7 +1664,11 @@ export class MbrTasksPanelElement extends LitElement {
     taskIndex: number,
     rowIndex: number
   ): TemplateResult {
-    const hit = group.tasks[taskIndex]
+    return this._renderCard(group.tasks[taskIndex], rowIndex === this._focusRow, () => (this._focusRow = rowIndex))
+  }
+
+  /** One task card, in the list or in a grid day's list. */
+  private _renderCard(hit: TaskHit, focused: boolean, onFocus: () => void): TemplateResult {
     // A marker is never editable, whatever the server allows: there is no
     // checkbox on its line to rewrite, and `POST /.mbr/task` refuses it with a
     // 400. `renderTaskCard` omits the box entirely on the strength of this.
@@ -1311,11 +1677,11 @@ export class MbrTasksPanelElement extends LitElement {
       hit,
       status: this._statusOf(hit),
       href: safeHref(taskHref(hit, this.resolveHref)),
-      focused: rowIndex === this._focusRow,
+      focused,
       editable,
       today: this.today,
       locale: this.locale,
-      onFocus: () => (this._focusRow = rowIndex),
+      onFocus,
       onActivate: () => this._navigateTo(hit),
       onToggle: editable ? () => this._toggleDone(hit) : undefined,
       onCancel: editable ? () => this._toggleCanceled(hit) : undefined,
@@ -1323,6 +1689,10 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   private _renderFooter(): TemplateResult {
+    if (this._gridView) {
+      // prettier-ignore
+      return html`<div class="tasks-footer"><span class="footer-hint"><span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> days</span><span><kbd>[</kbd><kbd>]</kbd> page</span><span><kbd>↵</kbd> list the day</span>${this.editEnabled ? html`<span><kbd>space</kbd> done</span>` : nothing}<span><kbd>esc</kbd> close</span></span></div>`
+    }
     return html`
       <div class="tasks-footer">
         <span class="footer-hint">
@@ -1644,6 +2014,124 @@ export class MbrTasksPanelElement extends LitElement {
       color: var(--pico-primary-inverse, #fff);
     }
 
+    /* ---- By Due: List · Week · Month ---- */
+
+    .results-pane.grid {
+      width: min(980px, calc(100vw - 240px));
+      max-width: none;
+    }
+
+    .view-switch {
+      display: flex;
+      justify-content: center;
+      padding: 0.35rem 0.4rem 0;
+      flex-shrink: 0;
+    }
+
+    .view-option {
+      background: transparent;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      margin: 0 -1px 0 0;
+      padding: 0.15rem 0.85rem;
+      font-size: 0.78rem;
+      color: var(--pico-muted-color, #666);
+      cursor: pointer;
+    }
+
+    .view-option:first-child {
+      border-radius: 999px 0 0 999px;
+    }
+
+    .view-option:last-child {
+      border-radius: 0 999px 999px 0;
+    }
+
+    .view-option.active {
+      background: var(--pico-primary-background, #0172ad);
+      border-color: var(--pico-primary-background, #0172ad);
+      color: var(--pico-primary-inverse, #fff);
+    }
+
+    .grid-area {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 0 0.5rem 0.5rem;
+    }
+
+    .grid-header {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.25rem 0;
+      flex-shrink: 0;
+    }
+
+    .grid-title {
+      min-width: 9rem;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+
+    .overdue-chip {
+      margin-left: auto;
+      border: 1px solid var(--mbr-cal-overdue, var(--pico-del-color, #c62828));
+      border-radius: 999px;
+      background: transparent;
+      color: var(--mbr-cal-overdue, var(--pico-del-color, #c62828));
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.1rem 0.6rem;
+      cursor: pointer;
+    }
+
+    .overdue-chip:hover {
+      background: color-mix(in srgb, var(--mbr-cal-overdue, #c62828) 12%, transparent);
+    }
+
+    .grid-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .day-popover {
+      position: fixed;
+      z-index: 1002;
+      width: min(26rem, calc(100vw - 16px));
+      max-height: min(60vh, 28rem);
+      display: flex;
+      flex-direction: column;
+      background: var(--pico-card-background-color, #fff);
+      border: 1px solid var(--pico-muted-border-color, #ddd);
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+
+    .day-popover-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.4rem 0.4rem 0.3rem 0.75rem;
+      border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+      font-size: 0.85rem;
+    }
+
+    .day-popover-list {
+      overflow-y: auto;
+      padding: 0.25rem 0.5rem 0.5rem;
+    }
+
+    .day-popover-note {
+      margin: -0.15rem 0 0.3rem 2.6rem;
+      font-size: 0.7rem;
+      color: var(--pico-muted-color, #888);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
     .results-meta {
       padding: 0.3rem 0.75rem;
       font-size: 0.72rem;
@@ -1878,6 +2366,7 @@ export class MbrTasksPanelElement extends LitElement {
     }
 
     .mbr-task-due,
+    .mbr-task-scheduled,
     .mbr-task-completed {
       background: var(--mbr-task-chip-bg, rgba(115, 130, 140, 0.1));
       color: var(--mbr-task-chip-color, var(--pico-muted-color, #5c6b73));
@@ -1978,7 +2467,8 @@ export class MbrTasksPanelElement extends LitElement {
         background: var(--pico-card-background-color, #f8f9fa);
       }
 
-      .results-pane {
+      .results-pane,
+      .results-pane.grid {
         width: 100%;
         max-width: none;
         border-right: none;

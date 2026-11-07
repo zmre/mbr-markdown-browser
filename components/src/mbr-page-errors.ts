@@ -70,6 +70,19 @@ interface SlideSettingProblem {
 }
 
 /**
+ * Two notes name the same calendar period (`daily/2026-10-31.md` and
+ * `archive/20261031.md`); this page lost it to `kept` (the first by URL) and
+ * is left out of periodic navigation.
+ */
+interface PeriodicDuplicateError {
+  type: 'periodic_duplicate';
+  /** Canonical period key, e.g. `2026-10-31` or `2026-W44`. */
+  period: string;
+  /** URL of the note that is the periodic note for `period`. */
+  kept: string;
+}
+
+/**
  * A parent/child (or other inverse-pair) loop in the typed relationships. The
  * genealogy chart cannot lay out a cyclic hierarchy, so one of the closing
  * edges is discarded — see `breakHierarchicalCycles` in
@@ -119,6 +132,7 @@ type ServerPageError =
   | FrontmatterParseError
   | ContactDataProblem
   | SlideSettingProblem
+  | PeriodicDuplicateError
   | UnplayableMediaError
   | RelationshipCycleError
   | AmbiguousNameError;
@@ -165,6 +179,7 @@ const ERROR_LABELS: ReadonlyArray<
   ],
   ['contact_data_problem', 'unreadable contact field', 'unreadable contact fields'],
   ['slide_setting_problem', 'ignored slide setting', 'ignored slide settings'],
+  ['periodic_duplicate', 'duplicate periodic note', 'duplicate periodic notes'],
   ['unplayable_media', 'unplayable media file', 'unplayable media files'],
   [
     'runtime_media_error',
@@ -472,6 +487,32 @@ export class MbrPageErrorsElement extends LitElement {
     `;
   }
 
+  private _renderPeriodicDuplicateGroup(): TemplateResult | typeof nothing {
+    const items = this._errors.filter(
+      (e): e is PeriodicDuplicateError => e.type === 'periodic_duplicate'
+    );
+    if (items.length === 0) return nothing;
+
+    return html`
+      <section class="error-group">
+        <h3>Duplicate periodic notes (${items.length})</h3>
+        <ul>
+          ${items.map(
+            (e) => html`<li>
+              <code class="target">${e.period}</code>
+              <span class="text">
+                — another note names this period too, and
+                <a class="target" href=${e.kept}>${e.kept}</a>
+                is the one periodic navigation uses. Rename or move one of
+                them.
+              </span>
+            </li>`
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
   private _renderContactGroup(): TemplateResult | typeof nothing {
     const items = this._errors.filter(
       (e): e is ContactDataProblem => e.type === 'contact_data_problem'
@@ -686,6 +727,7 @@ export class MbrPageErrorsElement extends LitElement {
           ${this._renderFrontmatterGroup()}
           ${this._renderContactGroup()}
           ${this._renderSlideSettingGroup()}
+          ${this._renderPeriodicDuplicateGroup()}
           ${this._renderRelationshipCycleGroup()}
           ${this._renderAmbiguousEndpointGroup()}
           ${this._renderAmbiguousWikilinkGroup()}

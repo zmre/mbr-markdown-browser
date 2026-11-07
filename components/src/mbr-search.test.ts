@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import './mbr-search.js'
 import type { MbrSearchElement, SearchRequestBody } from './mbr-search.js'
 import { searchFolderFor, setSearchExtrasImporter } from './mbr-search.js'
+import { todayKey } from './calendar/note-date.js'
 
 // The lazy chunk, imported directly (happy-dom cannot import a runtime URL).
 setSearchExtrasImporter(() => import('./search-extras/index.js'))
@@ -245,7 +246,8 @@ describe('MbrSearchElement', () => {
   //   scope: SearchScope (lowercase: metadata|content|all),
   //   filetype: Option<String> (#[serde(default)]; "markdown"|"md"|"all"),
   //   folder: Option<String> (#[serde(default)]),
-  //   folder_scope: FolderScope (#[serde(default)]; lowercase: current|everywhere).
+  //   folder_scope: FolderScope (#[serde(default)]; lowercase: current|everywhere),
+  //   today: Option<NaiveDate> (#[serde(default)]; YYYY-MM-DD, the reader's date).
   // The struct has NO deny_unknown_fields, so a misspelled key here would be
   // silently ignored by the server and fall back to the Rust default — which is
   // why these assertions pin the exact key set, not just the values.
@@ -256,7 +258,7 @@ describe('MbrSearchElement', () => {
       typeQuery(el, 'needle')
     })
 
-    it('sends exactly q/limit/scope/folder_scope by default', async () => {
+    it('sends exactly q/limit/scope/folder_scope/today by default', async () => {
       await selectScope(el, 'all')
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -270,6 +272,7 @@ describe('MbrSearchElement', () => {
         limit: 20,
         scope: 'all',
         folder_scope: 'everywhere',
+        today: todayKey(),
       })
       // No `folder` / `filetype` keys at all when they are not applicable.
       expect(Object.keys(lastBody()).sort()).toEqual([
@@ -277,6 +280,7 @@ describe('MbrSearchElement', () => {
         'limit',
         'q',
         'scope',
+        'today',
       ])
     })
 
@@ -287,6 +291,7 @@ describe('MbrSearchElement', () => {
         limit: 20,
         scope: 'metadata',
         folder_scope: 'everywhere',
+        today: todayKey(),
       })
     })
 
@@ -297,6 +302,7 @@ describe('MbrSearchElement', () => {
         limit: 20,
         scope: 'content',
         folder_scope: 'everywhere',
+        today: todayKey(),
       })
     })
 
@@ -311,6 +317,7 @@ describe('MbrSearchElement', () => {
         scope: 'all',
         folder_scope: 'current',
         folder: '/docs/guide/',
+        today: todayKey(),
       })
     })
 
@@ -354,6 +361,7 @@ describe('MbrSearchElement', () => {
         scope: 'all',
         folder_scope: 'everywhere',
         filetype: 'all',
+        today: todayKey(),
       })
     })
 
@@ -376,6 +384,7 @@ describe('MbrSearchElement', () => {
         folder_scope: 'current',
         folder: '/notes/',
         filetype: 'all',
+        today: todayKey(),
       })
     })
   })
@@ -1010,5 +1019,203 @@ describe('MbrSearchElement note types and folder picker', () => {
     el.shadowRoot!.querySelector<HTMLElement>('.results-container')!.click()
     await picker().updateComplete
     expect(picker().isOpen).toBe(false)
+  })
+})
+
+// ============================================================================
+// Date facets (design/calendar.md §6): the When select, the matched-date
+// label, and static-mode filtering against site.json.
+// ============================================================================
+describe('MbrSearchElement date facets', () => {
+  let el: MbrSearchElement
+
+  afterEach(() => {
+    el?.remove()
+    globalThis.fetch = originalFetch
+    delete window.__MBR_CONFIG__
+    vi.restoreAllMocks()
+  })
+
+  function whenSelect(): HTMLSelectElement {
+    const node = el.shadowRoot!.querySelector<HTMLSelectElement>('.when-select')
+    expect(node, 'the When select renders once the chunk is loaded').not.toBeNull()
+    return node!
+  }
+
+  async function chooseWhen(value: string): Promise<void> {
+    const select = whenSelect()
+    select.value = value
+    select.dispatchEvent(new Event('change'))
+    await flush()
+    await el.updateComplete
+  }
+
+  describe('server mode', () => {
+    beforeEach(async () => {
+      fetchMock = vi.fn().mockResolvedValue(okResponse())
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+      setConfig(true)
+      el = await mount()
+      await vi.waitFor(() => expect(handle(el)._extras).not.toBeNull())
+      await el.updateComplete
+    })
+
+    it('offers Any time, the presets and Custom…', () => {
+      expect([...whenSelect().options].map((o) => o.textContent?.trim())).toEqual([
+        'Any time',
+        'Today',
+        'Last 7 days',
+        'Last 30 days',
+        'Last 3 months',
+        'Last 12 months',
+        'This year',
+        'Custom…',
+      ])
+      expect(whenSelect().value).toBe('')
+    })
+
+    it('a preset writes a when: facet, replacing one, and sends today', async () => {
+      typeQuery(el, 'standup')
+      await chooseWhen('-7d')
+      expect(handle(el)._query).toBe('standup when:-7d')
+      expect(lastBody()).toMatchObject({ q: 'standup when:-7d', today: todayKey() })
+
+      await chooseWhen('this-year')
+      expect(handle(el)._query).toBe('standup when:this-year')
+      expect(whenSelect().value).toBe('this-year')
+
+      await chooseWhen('')
+      expect(handle(el)._query).toBe('standup')
+    })
+
+    it('reflects a hand-typed when: token', async () => {
+      typeQuery(el, 'plan when:-30d')
+      await el.updateComplete
+      expect(whenSelect().value).toBe('-30d')
+      typeQuery(el, 'plan when:2026-W44')
+      await el.updateComplete
+      expect(whenSelect().value).toBe('custom')
+    })
+
+    it('Custom… writes when:A..B from two dates', async () => {
+      typeQuery(el, 'plan')
+      await chooseWhen('custom')
+      const inputs = el.shadowRoot!.querySelectorAll<HTMLInputElement>('.when-custom input[type="date"]')
+      expect(inputs.length).toBe(2)
+      inputs[0].value = '2026-10-01'
+      inputs[0].dispatchEvent(new Event('change'))
+      await flush()
+      expect(handle(el)._query).toBe('plan when:2026-10-01..')
+      inputs[1].value = '2026-10-15'
+      inputs[1].dispatchEvent(new Event('change'))
+      await flush()
+      await el.updateComplete
+      expect(handle(el)._query).toBe('plan when:2026-10-01..2026-10-15')
+      expect(lastBody().q).toBe('plan when:2026-10-01..2026-10-15')
+      expect(whenSelect().value).toBe('custom')
+    })
+
+    it('labels a result with the date it matched on', async () => {
+      fetchMock.mockResolvedValue(
+        okResponse({
+          results: [
+            {
+              url_path: '/daily/2026-10-31/',
+              title: null,
+              description: null,
+              tags: null,
+              score: 100,
+              snippet: null,
+              is_content_match: false,
+              filetype: 'markdown',
+              matched_date: { date: '2026-10-31', field: 'modified' },
+            },
+          ],
+        })
+      )
+      typeQuery(el, 'when:-30d')
+      await selectScope(el, 'all')
+      await el.updateComplete
+      const label = el.shadowRoot!.querySelector('.result-date')
+      expect(label?.textContent).toMatch(/^modified .*2026/)
+    })
+  })
+
+  describe('static mode', () => {
+    const today = todayKey()
+    const files = [
+      { url_path: '/daily/2026-10-31/', created: 0, modified: 0, calendar: { date: '2026-10-31', source: 'filename' } },
+      { url_path: '/notes/a b/', created: 0, modified: 0, calendar: { date: '2026-10-20', source: 'frontmatter' }, frontmatter: { title: 'A B' } },
+      { url_path: '/old/', created: 0, modified: 0, calendar: { date: '2020-01-01', source: 'frontmatter' } },
+      { url_path: '/today/', created: Math.floor(Date.now() / 1000), modified: 0 },
+    ]
+
+    function pagefindData(url: string) {
+      return () => Promise.resolve({ url, excerpt: `<mark>${url}</mark>`, meta: { title: url } })
+    }
+
+    beforeEach(async () => {
+      setConfig(false)
+      el = await mount()
+      ;(el as unknown as { _siteFiles: () => Promise<unknown[]> })._siteFiles = () => Promise.resolve(files)
+    })
+
+    it('a date-only query filters site.json, newest first, without Pagefind', async () => {
+      const search = vi.fn()
+      handle(el)._pagefind = { init: () => Promise.resolve(), options: () => Promise.resolve(), search }
+      typeQuery(el, 'date:2026-10')
+      await handle(el)._performPagefindSearch()
+      expect(search).not.toHaveBeenCalled()
+      expect(handle(el)._results.map((r) => r.url_path)).toEqual(['/daily/2026-10-31/', '/notes/a b/'])
+      expect(handle(el)._results[1].title).toBe('A B')
+      expect(handle(el)._totalMatches).toBe(2)
+    })
+
+    it('birthtime dates use the reader’s local date', async () => {
+      handle(el)._pagefind = { init: () => Promise.resolve(), options: () => Promise.resolve(), search: vi.fn() }
+      typeQuery(el, `date:${today}`)
+      await handle(el)._performPagefindSearch()
+      expect(handle(el)._results.map((r) => r.url_path)).toEqual(['/today/'])
+    })
+
+    it('strips date facets before Pagefind and post-filters its results', async () => {
+      const search = vi.fn().mockResolvedValue({
+        results: [
+          { id: '0', data: pagefindData('/old/') },
+          { id: '1', data: pagefindData('/notes/a%20b/') },
+          { id: '2', data: pagefindData('/unknown/') },
+          { id: '3', data: pagefindData('/daily/2026-10-31/') },
+        ],
+      })
+      handle(el)._pagefind = { init: () => Promise.resolve(), options: () => Promise.resolve(), search }
+      typeQuery(el, 'standup when:2026-10 type:x')
+      await handle(el)._performPagefindSearch()
+      expect(search).toHaveBeenCalledWith('standup type:x')
+      // Pagefind's order is kept; only notes dated in October 2026 remain.
+      expect(handle(el)._results.map((r) => r.url_path)).toEqual(['/notes/a%20b/', '/daily/2026-10-31/'])
+      expect(handle(el)._totalMatches).toBe(2)
+    })
+
+    it('exposes the result set as a session snapshot', async () => {
+      handle(el)._pagefind = { init: () => Promise.resolve(), options: () => Promise.resolve(), search: vi.fn() }
+      typeQuery(el, 'date:2026-10')
+      await handle(el)._performPagefindSearch()
+      const session = el.session
+      expect(session.query).toBe('date:2026-10')
+      expect(session.totalMatches).toBe(2)
+      expect(session.results.map((r) => [r.url_path, r.matched_date?.date])).toEqual([
+        ['/daily/2026-10-31/', '2026-10-31'],
+        ['/notes/a b/', '2026-10-20'],
+      ])
+    })
+
+    it('a query without date facets goes to Pagefind unchanged', async () => {
+      const search = vi.fn().mockResolvedValue({ results: [{ id: '0', data: pagefindData('/old/') }] })
+      handle(el)._pagefind = { init: () => Promise.resolve(), options: () => Promise.resolve(), search }
+      typeQuery(el, 'date:draft plan')
+      await handle(el)._performPagefindSearch()
+      expect(search).toHaveBeenCalledWith('date:draft plan')
+      expect(handle(el)._results.map((r) => r.url_path)).toEqual(['/old/'])
+    })
   })
 })

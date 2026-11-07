@@ -393,12 +393,28 @@ pub(crate) fn task_annotations_html(annotations: &Annotations) -> String {
     if let Some(due) = annotations.due {
         push_task_time(&mut html, "mbr-task-due", due, annotations.due_has_time);
     }
+    if let Some(scheduled) = annotations.scheduled {
+        push_task_time(
+            &mut html,
+            "mbr-task-scheduled",
+            scheduled,
+            annotations.scheduled_has_time,
+        );
+    }
     if let Some(done) = annotations.done {
         push_task_time(
             &mut html,
             "mbr-task-completed",
             done,
             annotations.done_has_time,
+        );
+    }
+    if let Some(canceled_on) = annotations.canceled_on {
+        push_task_time(
+            &mut html,
+            "mbr-task-canceled-on",
+            canceled_on.and_time(chrono::NaiveTime::MIN),
+            false,
         );
     }
     if let Some(moved_to) = annotations.moved_to {
@@ -433,6 +449,11 @@ const fn task_priority_chip(priority: TaskPriority) -> Option<(&'static str, &'s
 }
 
 /// Appends one `<time>` chip.
+///
+/// The chip is the same whatever notation the date was written in (`@due`,
+/// `📅`, `[due:: …]`, `DEADLINE:`): the kind is told by the class, whose icon
+/// `theme.css` draws as a mask. The source's emoji is not repeated in the
+/// label, since a colour emoji is exactly what those masks replaced.
 ///
 /// The visible label deliberately omits the year: a chip reading "Aug 5" is
 /// legible at a glance, and the unabbreviated value is already in `datetime`
@@ -1552,8 +1573,12 @@ mod tests {
             tags: vec!["work".to_string(), "ops".to_string()],
             due: chrono::NaiveDate::from_ymd_opt(2026, 8, 5).and_then(|d| d.and_hms_opt(15, 0, 0)),
             due_has_time: true,
+            scheduled: chrono::NaiveDate::from_ymd_opt(2026, 8, 3)
+                .and_then(|d| d.and_hms_opt(9, 30, 0)),
+            scheduled_has_time: true,
             done: chrono::NaiveDate::from_ymd_opt(2026, 8, 4).and_then(|d| d.and_hms_opt(0, 0, 0)),
             done_has_time: false,
+            canceled_on: chrono::NaiveDate::from_ymd_opt(2026, 8, 6),
             moved_to: chrono::NaiveDate::from_ymd_opt(2026, 9, 1),
         };
         assert_eq!(
@@ -1564,7 +1589,9 @@ mod tests {
                 r#" <span class="mbr-task-tag">#work</span>"#,
                 r#" <span class="mbr-task-tag">#ops</span>"#,
                 r#" <time class="mbr-task-due" datetime="2026-08-05T15:00">Aug 5, 3:00 PM</time>"#,
+                r#" <time class="mbr-task-scheduled" datetime="2026-08-03T09:30">Aug 3, 9:30 AM</time>"#,
                 r#" <time class="mbr-task-completed" datetime="2026-08-04">Aug 4</time>"#,
+                r#" <time class="mbr-task-canceled-on" datetime="2026-08-06">Aug 6</time>"#,
                 r#" <time class="mbr-task-moved" datetime="2026-09-01">Sep 1</time>"#
             )
         );

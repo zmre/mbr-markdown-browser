@@ -74,6 +74,21 @@ pub const FLASHCARDS_JS: &[u8] = include_bytes!("../templates/components-js/mbr-
 /// the deck so reading a note never fetches ts-fsrs.
 pub const FLASHCARDS_READING_JS: &[u8] =
     include_bytes!("../templates/components-js/mbr-flashcards-reading.min.js");
+/// Calendar chunk: the daily-note companion (mini month, day agenda, notes
+/// from this day), the agenda time chips and the calendar overlay (month /
+/// week / list grids), lazy-loaded by `<mbr-calendar>` at idle on periodic
+/// notes and notes with time-prefixed bullets, else on `C`, `c` or a browse /
+/// search calendar button. Ships in static builds: everything it draws comes from `site.json` and
+/// the pages themselves (only the later task markers need a server).
+pub const CALENDAR_JS: &[u8] = include_bytes!("../templates/components-js/mbr-calendar.min.js");
+
+/// QuickLook's day calendar (design/calendar.md §4.7): a self-contained IIFE
+/// that mbr-ffi's `quicklook.rs` inlines into a preview of a dated note with
+/// time bullets. **QuickLook only**: not in [`DEFAULT_FILES`], so it is neither
+/// served under `/.mbr/*` nor copied into static builds (pages there load the
+/// calendar chunk instead).
+pub const QUICKLOOK_CALENDAR_JS: &[u8] =
+    include_bytes!("../templates/components-js/mbr-quicklook-calendar.min.js");
 
 pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.2.0.min.js");
 
@@ -117,6 +132,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         FLASHCARDS_READING_JS,
         JS,
     ),
+    ("/components/mbr-calendar.min.js", CALENDAR_JS, JS),
     ("/hljs.dark.css", hljs::HLJS_DARK_CSS, CSS),
     ("/hljs.atom-one-dark.css", hljs::HLJS_ATOM_ONE_DARK_CSS, CSS),
     ("/hljs.js", hljs::HLJS_JS, JS),

@@ -1,5 +1,6 @@
 import type { UserConfig } from 'vite'
 import { resolve } from 'node:path'
+import { minifyLitLiterals, stripPureAnnotations } from './vite-plugins/minify-lit-literals'
 
 // Separate build for the task-browser panel chunk (`mbr-tasks.min.js`).
 //
@@ -18,7 +19,10 @@ import { resolve } from 'node:path'
 // `emptyOutDir: false` so this build appends to the same output directory
 // without wiping the bundles produced by the earlier `vite build` steps.
 // `minify: 'terser'` because rolldown-vite does not ship esbuild.
+// `minifyLitLiterals` / `stripPureAnnotations` (vite-plugins/): Lit template
+// whitespace and the pure annotations a final asset never needs.
 export default {
+  plugins: [minifyLitLiterals(), stripPureAnnotations()],
   build: {
     outDir: '../crates/mbr-core/templates/components-js',
     emptyOutDir: false,

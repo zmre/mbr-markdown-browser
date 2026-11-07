@@ -429,6 +429,27 @@ function describeReadFailure(status: number): ToggleFailure {
   }
 }
 
+/** Told after every successful {@link toggleTask}; see {@link onTaskWritten}. */
+const writeListeners = new Set<() => void>()
+
+/**
+ * Subscribe to successful task writes from this page (the document's
+ * checkboxes, the task panel, anything else through {@link toggleTask}).
+ * Returns the unsubscribe function.
+ *
+ * For state derived from the task index that a write makes stale and that
+ * nothing re-renders: the calendar companion's day markers drop their
+ * per-month cache on it (`calendar/task-markers.ts`).
+ */
+export function onTaskWritten(listener: () => void): () => void {
+  writeListeners.add(listener)
+  return () => writeListeners.delete(listener)
+}
+
+function announceTaskWritten(): void {
+  for (const listener of writeListeners) listener()
+}
+
 /**
  * Set one task's status.
  *
@@ -504,6 +525,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     if (typeof body.text !== 'string') throw new Error('no text in the response')
     read.lines[target.line - 1] = body.text
     noteSourceHash(path, typeof body.hash === 'string' ? body.hash : null)
+    announceTaskWritten()
     return { ok: true, text: body.text }
   } catch {
     // A response we cannot parse says nothing about the write, which the
@@ -511,6 +533,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     // stop checking the page's version, which moved to one we never learned.
     lineCache.delete(path)
     noteSourceHash(path, null)
+    announceTaskWritten()
     return { ok: true }
   }
 }

@@ -8,7 +8,19 @@ import { trackVisualViewport } from './visual-viewport.js'
 import type { MbrMediaBrowserElement } from './mbr-media-browser.js'
 import { isMacPlatform, isPresentationPlaying } from './mbr-keys.js'
 import { ICON_BUTTON_CSS, KBD_CSS } from './controls.ts'
-import { ICON_SM, icon, iconImage, iconSearch, iconX } from './icons.ts'
+import { ICON_SM, icon, iconCalendarDays, iconImage, iconSearch, iconX } from './icons.ts'
+import { calendarOverlayAvailable, openCalendarOverlay, searchScope } from './calendar/open-overlay.js'
+import type { MarkdownFile } from './sorting.js'
+import { todayKey } from './calendar/note-date.js'
+import {
+  filterByDate,
+  formatMatchedDate,
+  matchDateFacets,
+  splitDateFacets,
+  type DateFacet,
+  type DatedFile,
+  type MatchedDate,
+} from './calendar/date-facets.js'
 
 // Dynamically import the media browser component when needed
 const loadMediaBrowser = () => import('./mbr-media-browser.js')
@@ -24,7 +36,7 @@ interface MbrConfig {
 /**
  * Search result from the API (unified format for both server and Pagefind).
  */
-interface SearchResult {
+export interface SearchResult {
   url_path: string;
   title: string | null;
   description: string | null;
@@ -34,6 +46,8 @@ interface SearchResult {
   snippetHtml: string | null; // HTML snippet with <mark> highlights (from Pagefind)
   is_content_match: boolean;
   filetype: string;
+  /** The date the first date facet matched on; only with a date facet. */
+  matched_date?: MatchedDate | null;
 }
 
 /**
@@ -117,6 +131,72 @@ export interface SearchRequestBody {
   folder?: string;
   /** Only sent when non-markdown files should be included. */
   filetype?: 'all';
+  /**
+   * The reader's local date (`YYYY-MM-DD`), always sent: relative date facets
+   * (`when:-7d`) resolve against it, and only the browser knows it.
+   */
+  today: string;
+}
+
+/** A `site.json` markdown entry, as static-mode date filtering reads it. */
+type SiteFile = DatedFile & { frontmatter?: Record<string, unknown> | null };
+
+/**
+ * Most Pagefind results a static search with a date facet inspects for ones
+ * that pass it. Pagefind cannot filter by date, so each candidate costs a
+ * fragment load; past this many, the result count is a lower bound.
+ */
+const STATIC_DATE_SCAN_LIMIT = 200;
+
+/** Results a search shows. */
+const RESULT_LIMIT = 20;
+
+/** A frontmatter string field, or `null`. */
+function frontmatterString(file: SiteFile, key: string): string | null {
+  const value = file.frontmatter?.[key];
+  return typeof value === 'string' ? value : null;
+}
+
+/** A static-mode result for a note found by its date alone. */
+function siteFileResult(file: SiteFile, matched: MatchedDate, score: number): SearchResult {
+  return {
+    url_path: file.url_path,
+    title: frontmatterString(file, 'title'),
+    description: frontmatterString(file, 'description'),
+    tags: null,
+    score,
+    snippet: null,
+    snippetHtml: null,
+    is_content_match: false,
+    filetype: 'markdown',
+    matched_date: matched,
+  };
+}
+
+/** A Pagefind result in the unified shape. */
+function pagefindToResult(data: PagefindResultData, score: number, matched: MatchedDate | null): SearchResult {
+  return {
+    url_path: data.url,
+    title: data.meta?.title || null,
+    description: null,
+    tags: null,
+    score, // Higher rank = higher score
+    snippet: null,
+    snippetHtml: data.excerpt || null, // Pagefind provides HTML with <mark> tags
+    is_content_match: true, // Pagefind searches content
+    filetype: 'markdown', // Pagefind indexes HTML from markdown
+    matched_date: matched,
+  };
+}
+
+/**
+ * The `site.json` path of a Pagefind result URL (`/notes/a%20b/` →
+ * `/notes/a b/`): Pagefind runs with `baseUrl: "/"` and serves encoded URLs,
+ * while `url_path` is stored decoded.
+ */
+function sitePathOf(url: string): string {
+  const path = url.replace(/[?#].*$/, '').replace(/index\.html$/, '');
+  return safeDecodePath(path.startsWith('/') ? path : '/' + path);
 }
 
 /**
@@ -272,6 +352,16 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   @state()
   private _noteTypes: Array<{ type: string; count: number }> = [];
 
+  /**
+   * "Custom…" chosen in the When select before any range is entered (the
+   * query has no `when:` facet yet, so the select could not otherwise show it).
+   */
+  @state()
+  private _whenCustom = false;
+
+  /** site.json markdown entries by `url_path`, for static date filtering. */
+  private _siteIndex: { source: unknown; byPath: Map<string, SiteFile> } | null = null;
+
   /** Loaded `mbr-search-extras` chunk, once the modal has opened. */
   private _extras: SearchExtrasModule | null = null;
 
@@ -371,6 +461,21 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   /** Close the search modal, clearing the query and any in-flight search. */
   public close(): void {
     this._closeSearch();
+  }
+
+  /**
+   * The search on screen: its query, the results shown (at most one page,
+   * each with `matched_date` when the query has a date facet) and how many
+   * matched in all. A snapshot for handing the result set to another view
+   * without searching again; a full date-only set can be rebuilt from
+   * site.json with `calendar/date-facets.ts`.
+   */
+  public get session(): {
+    readonly query: string;
+    readonly results: readonly SearchResult[];
+    readonly totalMatches: number;
+  } {
+    return { query: this._query, results: this._results, totalMatches: this._totalMatches };
   }
 
   /**
@@ -481,8 +586,12 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
    */
   private _loadSiteFacets(): void {
     void Promise.all([loadSearchExtras(), siteNav.catch(() => null)]).then(([extras, data]) => {
+      // The When select needs only the chunk, not site.json.
+      if (extras && !this._extras) {
+        this._extras = extras;
+        this.requestUpdate();
+      }
       if (!extras || !data || data === this._facetSource) return;
-      this._extras = extras;
       this._facetSource = data;
       const { folders, types } = extras.deriveSearchFacets(data);
       this._folders = folders;
@@ -498,6 +607,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   private _closeSearch() {
     this._isOpen = false;
+    this._whenCustom = false;
     this._stopViewportTracking?.();
     this._stopViewportTracking = null;
     this._query = '';
@@ -705,6 +815,46 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     if (this._query.length >= 2) this._performSearch();
   }
 
+  /**
+   * The When select: write its preset as the query's `when:` facet (replacing
+   * any), or remove it for "Any time". "Custom…" changes nothing until a date
+   * is entered. Content scope is widened as for a note type.
+   */
+  private _handleWhenChange(e: Event): void {
+    if (!this._extras) return;
+    const value = (e.target as HTMLSelectElement).value;
+    this._whenCustom = value === this._extras.WHEN_CUSTOM;
+    if (this._whenCustom) {
+      this.updateComplete.then(() =>
+        this.shadowRoot?.querySelector<HTMLInputElement>('.when-custom input')?.focus()
+      );
+      return;
+    }
+    this._applyWhen(value || null);
+  }
+
+  /** A "Custom…" date input changed: write `when:A..B` from both. */
+  private _handleWhenCustomInput(): void {
+    if (!this._extras) return;
+    const inputs = this.shadowRoot?.querySelectorAll<HTMLInputElement>('.when-custom input');
+    const from = inputs?.[0]?.value ?? '';
+    const to = inputs?.[1]?.value ?? '';
+    this._applyWhen(this._extras.whenCustomValue(from, to));
+  }
+
+  private _applyWhen(value: string | null): void {
+    if (!this._extras) return;
+    this._query = this._extras.withFacet(this._query, 'when', value);
+    if (value && this._scope === 'content') this._scope = 'all';
+    this._selectedIndex = -1;
+    if (this._query.length >= 2) {
+      this._performSearch();
+    } else {
+      this._setResults([]);
+      this._totalMatches = 0;
+    }
+  }
+
   private _handleFolderScopeChange(e: Event) {
     const target = e.target as HTMLInputElement;
     this._folderScope = target.checked ? 'current' : 'everywhere';
@@ -771,9 +921,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       // Build search request with folder context
       const searchBody: SearchRequestBody = {
         q: query,
-        limit: 20,
+        limit: RESULT_LIMIT,
         scope: this._scope,
         folder_scope: this._folderScope,
+        today: todayKey(),
       };
 
       // Add folder path when searching current folder
@@ -824,6 +975,12 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
   /**
    * Perform search using Pagefind (static mode).
+   *
+   * Pagefind has no facets, so date facets (`when:-7d`, …) are taken out of
+   * the query and applied here against site.json: with only date facets the
+   * site index is filtered directly (newest first, as the server orders a
+   * date-only query); with text too, Pagefind's results are filtered,
+   * inspecting at most {@link STATIC_DATE_SCAN_LIMIT} of them.
    */
   private async _performPagefindSearch() {
     const startTime = performance.now();
@@ -836,6 +993,19 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     this._error = null;
 
     try {
+      const { text, facets } = splitDateFacets(query, todayKey());
+      if (facets.length > 0 && !text) {
+        const files = await this._siteFiles();
+        if (isStale()) return;
+        const hits = filterByDate(files, facets);
+        this._totalMatches = hits.length;
+        this._setResults(
+          hits.slice(0, RESULT_LIMIT).map((hit, i) => siteFileResult(hit.file, hit.matched, hits.length - i))
+        );
+        this._durationMs = Math.round(performance.now() - startTime);
+        return;
+      }
+
       const pagefind = await this._loadPagefind();
       if (isStale()) return;
       if (!pagefind) {
@@ -845,31 +1015,19 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       }
 
       // Perform the search against the captured query, not the live one
-      const searchResponse = await pagefind.search(query);
+      const searchResponse = await pagefind.search(facets.length > 0 ? text : query);
       if (isStale()) return;
 
-      // Load data for the first 20 results
-      const resultPromises = searchResponse.results.slice(0, 20).map(r => r.data());
-      const resultData = await Promise.all(resultPromises);
+      const { results, total } =
+        facets.length > 0
+          ? await this._dateFilteredPagefind(searchResponse.results, facets, isStale)
+          : await this._pagefindPage(searchResponse.results);
       // All state writes happen after the last await so a superseded run cannot
       // leave _totalMatches describing one query and _results another.
       if (isStale()) return;
 
-      this._totalMatches = searchResponse.results.length;
-
-      // Map Pagefind results to our format
-      this._setResults(resultData.map((data, index): SearchResult => ({
-        url_path: data.url,
-        title: data.meta?.title || null,
-        description: null,
-        tags: null,
-        score: searchResponse.results.length - index, // Higher rank = higher score
-        snippet: null,
-        snippetHtml: data.excerpt || null, // Pagefind provides HTML with <mark> tags
-        is_content_match: true, // Pagefind searches content
-        filetype: 'markdown', // Pagefind indexes HTML from markdown
-      })));
-
+      this._totalMatches = total;
+      this._setResults(results);
       this._durationMs = Math.round(performance.now() - startTime);
     } catch (err) {
       if (isStale()) return;
@@ -881,6 +1039,69 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         this._isLoading = false;
       }
     }
+  }
+
+  /** The first page of Pagefind results in the unified shape. */
+  private async _pagefindPage(found: PagefindResult[]): Promise<{ results: SearchResult[]; total: number }> {
+    const resultData = await Promise.all(found.slice(0, RESULT_LIMIT).map((r) => r.data()));
+    return {
+      results: resultData.map((data, index) => pagefindToResult(data, found.length - index, null)),
+      total: found.length,
+    };
+  }
+
+  /**
+   * Pagefind results that pass the date facets, looked up in site.json by
+   * URL, loading fragments a page at a time until a page of hits is found or
+   * {@link STATIC_DATE_SCAN_LIMIT} have been inspected. `total` counts the
+   * hits found, so it is a lower bound when the scan stopped early.
+   */
+  private async _dateFilteredPagefind(
+    found: PagefindResult[],
+    facets: readonly DateFacet[],
+    isStale: () => boolean
+  ): Promise<{ results: SearchResult[]; total: number }> {
+    const byPath = await this._sitePaths();
+    const candidates = found.slice(0, STATIC_DATE_SCAN_LIMIT);
+    const hits: SearchResult[] = [];
+    for (let i = 0; i < candidates.length && hits.length < RESULT_LIMIT && !isStale(); i += RESULT_LIMIT) {
+      const page = await Promise.all(candidates.slice(i, i + RESULT_LIMIT).map((r) => r.data()));
+      for (const data of page) {
+        const file = byPath.get(sitePathOf(data.url));
+        const matched = file ? matchDateFacets(file, facets) : null;
+        if (matched && hits.length < RESULT_LIMIT) {
+          hits.push(pagefindToResult(data, candidates.length - hits.length, matched));
+        }
+      }
+    }
+    return { results: hits, total: hits.length };
+  }
+
+  /** site.json's markdown entries (static date filtering). A test seam. */
+  private async _siteFiles(): Promise<SiteFile[]> {
+    const data = await siteNav.catch(() => null);
+    return Array.isArray(data?.markdown_files) ? (data.markdown_files as SiteFile[]) : [];
+  }
+
+  /**
+   * "Show in calendar" (design/calendar.md §6.4): the calendar overlay over
+   * this result set, plotted by note date. No new search: a date-only query
+   * is rebuilt in full from site.json, any other is the results on screen.
+   */
+  private _showInCalendar = async (): Promise<void> => {
+    const files = (await this._siteFiles()) as unknown as MarkdownFile[];
+    const scope = searchScope(this.session, files, todayKey());
+    this._closeSearch();
+    openCalendarOverlay(scope);
+  };
+
+  /** site.json's markdown entries by `url_path`, built once per payload. */
+  private async _sitePaths(): Promise<Map<string, SiteFile>> {
+    const files = await this._siteFiles();
+    if (this._siteIndex?.source !== files) {
+      this._siteIndex = { source: files, byPath: new Map(files.map((f) => [f.url_path, f])) };
+    }
+    return this._siteIndex.byPath;
   }
 
   private _renderResult(result: SearchResult, index: number) {
@@ -895,6 +1116,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       >
         <div class="result-header">
           <span class="result-title">${title}</span>
+          ${result.matched_date
+            ? html`<span class="result-date">${formatMatchedDate(result.matched_date)}</span>`
+            : nothing}
           ${result.filetype && result.filetype !== 'markdown'
             ? html`<span class="result-type">${result.filetype}</span>`
             : nothing}
@@ -913,6 +1137,47 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
           </div>
         ` : nothing}
       </a>
+    `;
+  }
+
+  /** What the When select shows: the query's `when:` facet, or "Custom…". */
+  private _whenValue(): string {
+    const extras = this._extras;
+    if (!extras) return '';
+    const value = extras.whenSelectValue(this._query);
+    return value === extras.WHEN_ANY && this._whenCustom ? extras.WHEN_CUSTOM : value;
+  }
+
+  /**
+   * The When select (design/calendar.md §6.3). Its presets come from the lazy
+   * search-extras chunk, so it appears once that has loaded; until then a
+   * `when:` facet can still be typed.
+   */
+  private _renderWhenSelect() {
+    const extras = this._extras;
+    if (!extras) return nothing;
+    const value = this._whenValue();
+    return html`
+      <select class="when-select" aria-label="When" title="When" @change=${this._handleWhenChange}>
+        <option value=${extras.WHEN_ANY} ?selected=${value === extras.WHEN_ANY}>Any time</option>
+        ${extras.WHEN_PRESETS.map((p) => html`
+          <option value=${p.value} ?selected=${value === p.value}>${p.label}</option>
+        `)}
+        <option value=${extras.WHEN_CUSTOM} ?selected=${value === extras.WHEN_CUSTOM}>Custom…</option>
+      </select>
+    `;
+  }
+
+  /** "Custom…": two dates, written to the query as `when:A..B`. */
+  private _renderWhenCustom() {
+    const extras = this._extras;
+    if (!extras || this._whenValue() !== extras.WHEN_CUSTOM) return nothing;
+    const { from, to } = extras.whenCustomRange(this._query);
+    return html`
+      <div class="when-custom">
+        <label>From <input type="date" .value=${from} @change=${this._handleWhenCustomInput} /></label>
+        <label>To <input type="date" .value=${to} @change=${this._handleWhenCustomInput} /></label>
+      </div>
     `;
   }
 
@@ -983,7 +1248,9 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 ` : nothing}
               </select>
             ` : nothing}
+            ${showScopeSelector ? this._renderWhenSelect() : nothing}
           </div>
+          ${showScopeSelector ? this._renderWhenCustom() : nothing}
 
           ${showScopeSelector ? html`
             <div class="search-options">
@@ -1018,7 +1285,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
             ${this._results.length > 0 ? html`
               <div class="results-meta">
-                ${this._totalMatches} result${this._totalMatches !== 1 ? 's' : ''} in ${this._durationMs}ms
+                <span>${this._totalMatches} result${this._totalMatches !== 1 ? 's' : ''} in ${this._durationMs}ms</span>
+                ${calendarOverlayAvailable() ? html`<button class="show-calendar mbr-icon-btn sm labeled" @click=${this._showInCalendar} title="Show these results in the calendar">
+                  ${icon(iconCalendarDays, { size: ICON_SM })}<span>Show in calendar</span>
+                </button>` : nothing}
               </div>
               <div class="results-list">
                 ${this._results.map((r, i) => this._renderResult(r, i))}
@@ -1034,7 +1304,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
                 ` : html`
                   <p>Type at least 2 characters to search</p>
                   ${showScopeSelector ? html`
-                    <p class="hint-facets">Tip: Use <code>field:value</code> for faceted search (e.g., <code>tags:rust</code> or <code>category:guide</code>)</p>
+                    <p class="hint-facets">Tip: Use <code>field:value</code> for faceted search (e.g., <code>tags:rust</code> or <code>category:guide</code>), and <code>when:</code>, <code>date:</code>, <code>created:</code> or <code>modified:</code> for dates (e.g., <code>when:-7d</code> or <code>date:2026-10</code>)</p>
                   ` : nothing}
                 `}
               </div>
@@ -1301,6 +1571,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     }
 
     .results-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
       padding: 0.25rem 0.5rem;
       font-size: 0.75rem;
       color: var(--pico-muted-color, #999);
@@ -1344,6 +1618,40 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
       white-space: nowrap;
     }
 
+    .when-select {
+      max-width: 9rem;
+      padding: 0.25rem 0.5rem;
+      border: 1px solid var(--pico-muted-border-color, #ccc);
+      border-radius: 4px;
+      background: var(--pico-background-color, #fff);
+      font-size: 0.75rem;
+      color: var(--pico-color, #333);
+      cursor: pointer;
+    }
+    .when-custom {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+      font-size: 0.8rem;
+      color: var(--pico-muted-color, #666);
+    }
+    .when-custom input {
+      margin: 0 0 0 0.25rem;
+      padding: 0.125rem 0.375rem;
+      width: auto;
+      height: auto;
+      font-size: 0.8rem;
+    }
+    .result-date {
+      flex-shrink: 0;
+      margin-inline-start: auto;
+      color: var(--pico-muted-color, #666);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
     .result-type {
       flex-shrink: 0;
       padding: 0.0625rem 0.375rem;
@@ -1474,6 +1782,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     @media (max-width: 600px) {
       .footer-hint {
         display: none;
+      }
+      /* 16px stops iOS zooming the page when a date field takes focus. */
+      .when-custom input {
+        font-size: 16px;
       }
     }
 

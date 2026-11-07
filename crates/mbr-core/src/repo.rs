@@ -123,6 +123,10 @@ pub struct Repo {
     /// Configured tag sources for frontmatter extraction.
     #[serde(skip)]
     tag_sources: Vec<TagSource>,
+    /// The `[calendar]` rules every note's [`MarkdownInfo::calendar`] is
+    /// resolved with ([`Repo::with_calendar`]; the defaults otherwise).
+    #[serde(skip)]
+    calendar: Arc<crate::calendar::CalendarRules>,
     /// Whether text extraction has been performed for searchable files.
     #[serde(skip)]
     text_extracted: Arc<AtomicBool>,
@@ -252,6 +256,12 @@ pub struct MarkdownInfo {
     /// attribute covers both; see [`crate::contact::is_public_frontmatter_key`].
     #[serde(serialize_with = "crate::contact::serialize_public_frontmatter")]
     pub frontmatter: Option<crate::markdown::SimpleMetadata>,
+    /// The note's calendar date and, for a periodic note, its period
+    /// ([`crate::calendar::CalendarRules::resolve`]), computed with the
+    /// frontmatter. Omitted from `site.json` when the note has neither a
+    /// filename nor a frontmatter date, so undated notes cost nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<crate::calendar::NoteCalendar>,
     /// Typed relationships declared in frontmatter (unresolved endpoints).
     /// Skipped in serialization — resolved relationships are exposed via the
     /// relationship index in site.json/links.json instead.
@@ -285,6 +295,16 @@ impl OtherFileInfo {
             StaticFileKind::Text => "text",
             StaticFileKind::Other => "other",
         }
+    }
+
+    /// Birthtime (unix seconds), once basic metadata has been read.
+    pub fn created(&self) -> Option<u64> {
+        self.metadata.created
+    }
+
+    /// Modification time (unix seconds), once basic metadata has been read.
+    pub fn modified(&self) -> Option<u64> {
+        self.metadata.modified
     }
 
     /// Returns true if this file type is searchable (has extractable text).
@@ -719,6 +739,41 @@ impl Repo {
         )
         .with_explicit_hidden_dirs(&c.explicit_hidden_dirs)
         .with_symlink_mounts(!c.no_symlink_mounts)
+        .with_calendar(&c.calendar)
+    }
+
+    /// Resolves notes' calendar data with the repository's `[calendar]`
+    /// table instead of the defaults. Call before scanning (or restoring):
+    /// the rules are part of the snapshot fingerprint.
+    #[must_use]
+    pub fn with_calendar(mut self, calendar: &crate::calendar::CalendarConfig) -> Self {
+        self.calendar = Arc::new(crate::calendar::CalendarRules::new(calendar));
+        self
+    }
+
+    /// The calendar rules notes are resolved with.
+    pub fn calendar_rules(&self) -> &crate::calendar::CalendarRules {
+        &self.calendar
+    }
+
+    /// Every periodic note, by kind and period, built in one pass over the
+    /// index (only periodic notes are copied). Callers memoize it: the server
+    /// beside its `site.json` body, the static build once.
+    pub fn periodic_index(&self) -> crate::calendar::PeriodicIndex {
+        let pin = self.markdown_files.pin();
+        let no_frontmatter = crate::markdown::SimpleMetadata::new();
+        crate::calendar::PeriodicIndex::build(pin.iter().filter_map(|(_, info)| {
+            let period = info.calendar.as_ref()?.period?;
+            Some(crate::calendar::PeriodicEntry {
+                period,
+                url_path: info.url_path.clone(),
+                raw_path: crate::url_path::path_to_url(&info.raw_path),
+                title: get_page_title(
+                    info.frontmatter.as_ref().unwrap_or(&no_frontmatter),
+                    &info.raw_path,
+                ),
+            })
+        }))
     }
 
     /// Turns read-only symlink mounts off (`enabled == false`): the
@@ -868,6 +923,7 @@ impl Repo {
             )),
             wikilink_index: Arc::new(WikilinkIndex::new()),
             tag_sources: tag_sources.to_vec(),
+            calendar: Arc::new(crate::calendar::CalendarRules::default()),
             text_extracted: Arc::new(AtomicBool::new(false)),
             media_populated: Arc::new(AtomicBool::new(false)),
             media_population_started: Arc::new(AtomicBool::new(false)),
@@ -1190,6 +1246,7 @@ impl Repo {
                         created,
                         modified,
                         frontmatter: None,
+                        calendar: None,
                         relationships: Vec::new(),
                     };
                     markdown.push((key, entry.path, mdfile));
@@ -1276,12 +1333,20 @@ impl Repo {
                     }
 
                     MarkdownInfo {
+                        calendar: self
+                            .calendar
+                            .resolve(&mddetails.raw_path, Some(&frontmatter)),
                         frontmatter: Some(frontmatter),
                         relationships,
                         ..mddetails
                     }
                 } else {
-                    mddetails
+                    // Unread (not downloaded, unreadable): the filename can
+                    // still date it.
+                    MarkdownInfo {
+                        calendar: self.calendar.resolve(&mddetails.raw_path, None),
+                        ..mddetails
+                    }
                 };
                 self.markdown_files.pin().insert(key, details);
             },
@@ -1751,8 +1816,10 @@ impl Repo {
                             }
                         }
 
+                        let raw_path = self.relative_to_root(abs_path);
                         let info = MarkdownInfo {
-                            raw_path: self.relative_to_root(abs_path),
+                            calendar: self.calendar.resolve(&raw_path, frontmatter.as_ref()),
+                            raw_path,
                             url_path: url,
                             created,
                             modified,
@@ -1790,8 +1857,10 @@ impl Repo {
                             Some(fm) => (Some(fm.metadata), fm.relationships),
                             None => (None, Vec::new()),
                         };
+                        let raw_path = self.relative_to_root(abs_path);
                         let info = MarkdownInfo {
-                            raw_path: self.relative_to_root(abs_path),
+                            calendar: self.calendar.resolve(&raw_path, frontmatter.as_ref()),
+                            raw_path,
                             url_path: url,
                             created,
                             modified,
@@ -3229,6 +3298,75 @@ mod tests {
         assert_eq!(text.as_deref(), Some("plain text body"));
     }
 
+    /// The scan resolves each note's calendar data with the repository's
+    /// rules, a surgical update recomputes it with the note, and the periodic
+    /// index is built from it.
+    #[test]
+    fn test_calendar_data_is_resolved_by_scan_and_surgical_updates() {
+        use crate::calendar::{CalendarConfig, Period, PeriodKind};
+        use crate::change_event::ChangeEventType;
+        let vault = Arc::new(
+            crate::vault::MemVault::new()
+                .with_file("daily/2026-10-30.md", "---\ntitle: Friday\n---\n")
+                .with_file("daily/2026-11-02.md", "# Monday\n")
+                .with_file("archive/20261102.md", "# Copy\n")
+                .with_file("books/1984.md", "# A book\n")
+                .with_file("post.md", "---\ndate: 2026-01-02\n---\n"),
+        );
+        let repo = Repo::init_with_vault(
+            vault.clone(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        )
+        .with_calendar(&CalendarConfig {
+            periods: vec![PeriodKind::Day, PeriodKind::Week],
+            ..CalendarConfig::default()
+        });
+        repo.scan_all().expect("scan");
+        let calendar = |rel: &str| {
+            let key = repo.canonical_root.join(rel);
+            repo.markdown_files.pin().get(&key).and_then(|i| i.calendar)
+        };
+        let day = |s: &str| Period::parse_key(s).unwrap();
+        assert_eq!(
+            calendar("daily/2026-10-30.md").unwrap().period,
+            Some(day("2026-10-30"))
+        );
+        assert_eq!(calendar("books/1984.md"), None, "years are not configured");
+        assert_eq!(calendar("post.md").unwrap().date.to_string(), "2026-01-02");
+
+        let index = repo.periodic_index();
+        assert_eq!(index.get(&day("2026-10-30")).unwrap().title, "Friday");
+        assert_eq!(
+            index.get(&day("2026-11-02")).unwrap().url_path,
+            "/archive/20261102/",
+            "first by url_path wins"
+        );
+        assert!(index.duplicate_of("/daily/2026-11-02/").is_some());
+
+        vault.insert_file("post.md", "---\ndate: 2025-05-05\n---\n");
+        repo.invalidate_file(
+            &repo.canonical_root.join("post.md"),
+            &ChangeEventType::Modified,
+        );
+        assert_eq!(calendar("post.md").unwrap().date.to_string(), "2025-05-05");
+
+        vault.insert_file("weekly/2026-W44.md", "# Week\n");
+        repo.invalidate_file(
+            &repo.canonical_root.join("weekly").join("2026-W44.md"),
+            &ChangeEventType::Created,
+        );
+        assert_eq!(
+            calendar("weekly/2026-W44.md").unwrap().period,
+            Period::week(2026, 44)
+        );
+    }
+
     /// Watcher-driven invalidation reads the changed file through the vault.
     #[test]
     fn test_mem_vault_invalidate_file_reads_through_the_vault() {
@@ -3537,6 +3675,7 @@ mod tests {
                         created: 1,
                         modified: 2,
                         frontmatter: None,
+                        calendar: None,
                         relationships: Vec::new(),
                     },
                 );

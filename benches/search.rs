@@ -55,6 +55,7 @@ fn bench_search_metadata(c: &mut Criterion) {
         filetype: None,
         folder_scope: Default::default(),
         folder: None,
+        today: None,
     };
 
     group.bench_function("metadata_500_files", |b| {
@@ -68,6 +69,7 @@ fn bench_search_metadata(c: &mut Criterion) {
         filetype: None,
         folder_scope: Default::default(),
         folder: None,
+        today: None,
     };
 
     group.bench_function("faceted_500_files", |b| {
@@ -82,6 +84,7 @@ fn bench_search_metadata(c: &mut Criterion) {
         filetype: None,
         folder_scope: Default::default(),
         folder: None,
+        today: None,
     };
 
     group.bench_function("content_500_files", |b| {

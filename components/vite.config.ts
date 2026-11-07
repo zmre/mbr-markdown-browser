@@ -1,6 +1,7 @@
 import type { UserConfig } from 'vite'
 import { resolve } from 'node:path'
 import { existsSync } from 'node:fs'
+import { minifyLitLiterals, stripPureAnnotations } from './vite-plugins/minify-lit-literals'
 
 export default {
   server: {
@@ -13,6 +14,10 @@ export default {
     exclude: ['/.mbr/pagefind/pagefind.js'],
   },
   plugins: [
+    // Collapses whitespace in the Lit templates' static text, and drops the
+    // pure annotations a final asset never needs (vite-plugins/).
+    minifyLitLiterals(),
+    stripPureAnnotations(),
     {
       name: 'mbr-external-pagefind',
       enforce: 'pre',

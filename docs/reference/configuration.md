@@ -31,7 +31,8 @@ override its settings from the outside.
 
 An environment variable is the option's name in upper case with the `MBR_`
 prefix (`edit_enabled` → `MBR_EDIT_ENABLED`). A double underscore reaches into
-a table: `[slides] transition` is `MBR_SLIDES__TRANSITION`. Because of that, a
+a table: `[slides] transition` is `MBR_SLIDES__TRANSITION`, `[calendar] enabled`
+is `MBR_CALENDAR__ENABLED`. Because of that, a
 `__` in an `MBR_*` name always means a nested key.
 
 ## Configuration File
@@ -290,7 +291,7 @@ the index is built by reading live files, so static builds never expose it —
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
-| `tasks_stamp_done` | bool | `true` | Maintain the `@done(...)` annotation when a task is toggled through `POST /.mbr/task`. Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+| `tasks_stamp_done` | bool | `true` | Maintain a done stamp when a task is toggled through `POST /.mbr/task`, written in the line's own notation: ` ✅ YYYY-MM-DD` on an Obsidian Tasks emoji line, ` [completion:: YYYY-MM-DD]` on a Dataview line, else `@done(...)` (see [Tasks](../markdown/tasks.md)). Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
 | `tasks_default_include` | string | `"tasks"` | Where the panel's **Show** filter starts: `"tasks"`, `"markers"` or `"all"`. Set with `MBR_TASKS_DEFAULT_INCLUDE`; there is no CLI flag. |
 | `tasks_ignore_globs` | array | `[]` | Glob patterns whose matching files contribute nothing to the task browser. Set with `MBR_TASKS_IGNORE_GLOBS='["templates/**"]'`; there is no CLI flag. |
 
@@ -375,24 +376,26 @@ Two things are worth pinning down:
 A pattern that does not compile aborts startup with an error naming it, rather
 than being quietly skipped and indexing the folder you meant to exclude.
 
-**`@done(...)` stamping (`tasks_stamp_done`):**
+**Done stamping (`tasks_stamp_done`):**
 
 When you check a box (editing must be enabled — see
-[Editing Settings](#editing-settings)), mbr appends the completion time to the
-line in the format its own parser reads back:
+[Editing Settings](#editing-settings)), mbr appends the completion date to the
+line, in the notation the line already uses so a plugin-managed vault never
+gets a foreign one:
 
 ```markdown
-- [ ] write the report !!                            ← before
-- [x] write the report !! @done(2026-08-04 14:32)    ← after
+- [x] write the report !! @done(2026-08-04 14:32)      ← mbr's own notation
+- [x] pay the invoice 📅 2026-08-05 ✅ 2026-08-04      ← Obsidian Tasks emoji line
+- [x] renew the passport [completion:: 2026-08-04]    ← Dataview line
 ```
 
-Reopening or canceling the task removes that annotation again, and completing an
+Reopening or canceling the task removes that stamp again, and completing an
 already-completed task does **not** add a second one or re-date the first. The
-timestamp is local wall-clock time, matching the naive/local dates `@due(...)`
-uses.
+`@done(...)` timestamp is local wall-clock time, matching the naive/local dates
+`@due(...)` uses. See [Tasks](../markdown/tasks.md) for the full table.
 
 Set `tasks_stamp_done = false` to have the endpoint rewrite nothing but the
-marker byte, leaving any `@done(...)` exactly as its author wrote it. Either way
+marker byte, leaving any done stamp exactly as its author wrote it. Either way
 mbr never writes to a markdown file unless you ask it to.
 
 **Cost when unused:** none. The index is built lazily on the first task query
@@ -776,6 +779,53 @@ The settings reach the page as `window.__MBR_CONFIG__.slides` (this table) and
 `window.__MBR_CONFIG__.slidesPage` (the note's map); `<mbr-slides>` merges
 them when the deck starts.
 
+### Calendar Settings
+
+The `[calendar]` table configures calendar-aware browsing: which notes are
+[periodic notes](../markdown/calendar.md#periodic-notes) (daily, weekly,
+monthly, quarterly and yearly notes, recognized by file name), which
+frontmatter fields [date a note](../markdown/calendar.md#note-dates), and the
+calendar UI. Every key is optional; a repository without the table gets the
+defaults below. Applies in every mode, static builds included.
+
+| Option | Values | Default | Meaning |
+|--------|--------|---------|---------|
+| `enabled` | bool | `true` | Master switch for periodic navigation (the bar at the top of a periodic note and the `d` / `[` / `]` keys) and the calendar views. Off, notes still get a date (`calendar.date` in `site.json`), but no note is periodic. |
+| `periods` | array of `day`, `week`, `month`, `quarter`, `year` | all five | Which file-name forms make a note periodic. A note named `1984.md` is a year note unless `year` is left out (or `periodic_folders` excludes it). |
+| `periodic_folders` | array of repository-relative folders | `[]` (anywhere) | Restrict periodic detection to these folders and their subfolders. |
+| `date_fields` | array of frontmatter keys | `["date", "created"]` | Frontmatter fields consulted, in order, when the file name carries no date. Dot keys reach nested maps (`taxonomy.published`). |
+| `week_start` | `locale`, `monday`, `sunday`, `saturday` | `locale` | First column of every calendar grid. `locale` follows the reader's locale (Sunday for `en-US`, Monday for most others). |
+| `week_numbers` | bool | on if the repository has week notes | Show the ISO week-number column in calendar grids. |
+| `companion` | `auto`, `on-demand`, `off` | `auto` | The [daily-note companion](../markdown/calendar/#the-daily-note-companion): `auto` docks it as a right column on day notes (from 1280px wide, 1440px with the docked sidebar) and offers it as a drawer elsewhere; `on-demand` only as a drawer (`C` or the calendar button); `off` not at all. |
+| `agenda_chips` | bool | `true` | Draw a subtle time chip on [agenda entries](../markdown/calendar/#agenda-entries), list items that start with a time (`- 09:30 Standup`), and mark the current and next entry on today's day note. |
+
+```toml
+# .mbr/config.toml
+[calendar]
+periods = ["day", "week", "month"]
+periodic_folders = ["journal"]
+date_fields = ["date", "published"]
+week_start = "monday"
+```
+
+A note that fails the `periods` / `periodic_folders` filter is not periodic,
+but a **day** file name (`2026-10-31.md`) still dates it; other period names
+outside the filter (`1984.md`) do not.
+
+The values are checked at startup: an unknown key (`perods`) or a value outside
+its set (`periods = ["fortnight"]`) stops mbr with a configuration error, like
+any other option. The table is part of the iOS app's saved-index fingerprint,
+so changing it rescans.
+
+**Environment variables:** one key at a time with a double underscore,
+`MBR_CALENDAR__ENABLED=false`, `MBR_CALENDAR__PERIODS='["day","week"]'`; or the
+whole table, `MBR_CALENDAR='{enabled=false}'`. There are no CLI flags.
+
+The table reaches the page as `window.__MBR_CONFIG__.calendar` (snake_case, as
+written here). `week_start`, `week_numbers`, `companion` and `agenda_chips` are
+read by the calendar UI in the browser; `periods`, `periodic_folders` and
+`date_fields` are applied by mbr when it scans the repository.
+
 ### Review Settings
 
 Every block-level element on a served page carries
@@ -928,6 +978,7 @@ The endpoint detects these issue types:
 | `slide_setting_problem` | An entry of the note's [`slides:` frontmatter map](../markdown/slides.md#deck-settings) that the deck ignores — an unknown key or a value outside its set. The rest of the map still applies; the ignored key keeps the repository's setting. Carries `field` (e.g. `slides.transition`) and `message`. A `slides.background_image` that does not resolve is reported as `broken_media_reference`. |
 | `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../markdown/contacts/). |
 | `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
+| `periodic_duplicate` | Two notes name the same [calendar period](../markdown/calendar.md#periodic-notes) (`daily/2026-10-31.md` and `archive/20261031.md`). The first by URL is the periodic note; this one is left out of periodic navigation. Carries `period` (the canonical key) and `kept` (the other note's URL). Reported on the note that lost; a static build logs it as a `WARN` line. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
 | `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |
 | `ambiguous_wikilink` | A body `[[Wikilink]]` named a title/stem shared by several notes. Reported on the page containing the link. |

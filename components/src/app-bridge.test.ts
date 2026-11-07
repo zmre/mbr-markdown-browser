@@ -12,7 +12,11 @@ import {
   postEditorState,
   postPageState,
   postSlidesState,
+  resetDayNotes,
+  watchDayNotes,
 } from './app-bridge.ts'
+import { setPeriodicNavDeps } from './calendar/periodic-nav.ts'
+import type { PeriodicSource } from './calendar/periodic.ts'
 import { EDITOR_STATE_EVENT } from './mbr-editor.ts'
 import { SLIDES_STATE_EVENT } from './mbr-slides.ts'
 // The Swift side of the bridge and theme.css, as text (vitest.config.ts reads
@@ -41,6 +45,9 @@ describe('app bridge contract (referenced from Swift)', () => {
       'links-out',
       'links-in',
       'tasks',
+      'today',
+      'calendar',
+      'companion',
       'flashcards',
       'slides',
       'new',
@@ -50,7 +57,10 @@ describe('app bridge contract (referenced from Swift)', () => {
 
   it('matches the Swift side literally', () => {
     for (const action of APP_ACTIONS) {
-      expect(appBridgeSwift, `AppBridge.swift names "${action}"`).toContain(`"${action}"`)
+      // As an enum case's raw value, not merely a string somewhere in the file.
+      expect(appBridgeSwift, `AppBridge.swift has a case = "${action}"`).toMatch(
+        new RegExp(`\\bcase \\w+ = "${action}"`),
+      )
     }
     expect(appBridgeSwift).toContain(`"${APP_MESSAGE_HANDLER}"`)
     expect(appBridgeSwift).toContain('window.mbrApp')
@@ -85,6 +95,10 @@ function installPage(
     tasks?: boolean
     headings?: boolean
     links?: boolean
+    /** Adds a `<mbr-calendar>` stub with these gates. */
+    calendar?: { overlayAvailable?: boolean; isDocked?: boolean }
+    /** The `[calendar]` config table (`companion = "off"` etc.). */
+    calendarConfig?: Record<string, unknown>
   } = {},
 ): {
   opened: string[]
@@ -129,7 +143,23 @@ function installPage(
     hasPageLinks: options.links ?? false,
     open: (tab: string) => opened.push(`mbr-fuzzy-nav:${tab}`),
   })
-  window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, tasksEnabled: options.tasks ?? false }
+  if (options.calendar) {
+    stub('mbr-calendar', {
+      overlayAvailable: options.calendar.overlayAvailable ?? true,
+      isDocked: options.calendar.isDocked ?? false,
+      openOverlay: (scope: { label: string; pagePath?: string }) => {
+        opened.push(`mbr-calendar:overlay:${scope.label}`)
+        return true
+      },
+      toggleCompanion: () => opened.push('mbr-calendar:companion'),
+    })
+  }
+  window.__MBR_CONFIG__ = {
+    serverMode: true,
+    guiMode: false,
+    tasksEnabled: options.tasks ?? false,
+    calendar: options.calendarConfig,
+  }
   return { opened }
 }
 
@@ -140,14 +170,28 @@ describe('available actions follow the page', () => {
     window.__MBR_CONFIG__ = undefined
   })
 
+  beforeEach(() => resetDayNotes())
+
   it('lists only what works: no edit, tasks, deck or slides on a plain read-only page', () => {
     installPage()
     expect(availableActions()).toEqual(['browse', 'search', 'info'])
   })
 
-  it('adds edit, contents, links, tasks, flashcards and slides when the page has them', () => {
-    installPage({ canEdit: true, canCreate: true, tasks: true, deck: true, slides: true, headings: true, links: true })
+  it('adds edit, contents, links, tasks, calendar, flashcards and slides when the page has them', async () => {
+    setPeriodicNavDeps({ loadFiles: () => Promise.resolve(DAY_NOTES) })
+    await watchDayNotes()
+    installPage({
+      canEdit: true,
+      canCreate: true,
+      tasks: true,
+      deck: true,
+      slides: true,
+      headings: true,
+      links: true,
+      calendar: {},
+    })
     expect(availableActions()).toEqual([...APP_ACTIONS])
+    setPeriodicNavDeps(null)
   })
 
   it('offers contents only with headings and links only on a note page', () => {
@@ -202,6 +246,123 @@ describe('available actions follow the page', () => {
     expect(openAppAction('edit')).toBe(false)
     expect(openAppAction('nope')).toBe(false)
     expect(opened).toEqual(['mbr-search'])
+  })
+})
+
+const DAY_NOTES: PeriodicSource[] = [
+  { url_path: '/daily/2026-10-30/', calendar: { period: '2026-10-30' } },
+  { url_path: '/daily/2026-10-31/', calendar: { period: '2026-10-31' } },
+]
+
+describe('calendar actions (design/calendar.md §9.1)', () => {
+  let navigate: ReturnType<typeof vi.fn<(url: string) => void>>
+
+  beforeEach(() => {
+    resetDayNotes()
+    navigate = vi.fn<(url: string) => void>()
+  })
+  afterEach(() => {
+    setPeriodicNavDeps(null)
+    resetDayNotes()
+    document.body.innerHTML = ''
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  const withFiles = (files: PeriodicSource[]): void =>
+    setPeriodicNavDeps({ loadFiles: () => Promise.resolve(files), navigate })
+
+  it('offers none of them without <mbr-calendar> (calendar off)', async () => {
+    withFiles(DAY_NOTES)
+    await watchDayNotes()
+    installPage()
+    const actions = availableActions()
+    expect(actions).not.toContain('today')
+    expect(actions).not.toContain('calendar')
+    expect(actions).not.toContain('companion')
+  })
+
+  it('lists them after tasks, in the spec order', async () => {
+    withFiles(DAY_NOTES)
+    await watchDayNotes()
+    installPage({ tasks: true, calendar: {} })
+    expect(availableActions()).toEqual(['browse', 'search', 'info', 'tasks', 'today', 'calendar', 'companion'])
+  })
+
+  it('offers today only once the site index shows a day note', async () => {
+    withFiles(DAY_NOTES)
+    installPage({ calendar: {} })
+    // Not known yet: not listed.
+    expect(availableActions()).not.toContain('today')
+    const onKnown = vi.fn()
+    await watchDayNotes(onKnown)
+    expect(onKnown).toHaveBeenCalledOnce()
+    expect(availableActions()).toContain('today')
+  })
+
+  it('does not offer today on a site without day notes, or when the index fails', async () => {
+    withFiles([{ url_path: '/weekly/2026-W44/', calendar: { period: '2026-W44' } }])
+    installPage({ calendar: {} })
+    await watchDayNotes()
+    expect(availableActions()).not.toContain('today')
+    setPeriodicNavDeps({ loadFiles: () => Promise.reject(new Error('offline')), navigate })
+    await watchDayNotes()
+    expect(availableActions()).not.toContain('today')
+    expect(openAppAction('today')).toBe(false)
+  })
+
+  it('today opens the latest day note through openTodayDailyNote', async () => {
+    withFiles(DAY_NOTES)
+    await watchDayNotes()
+    installPage({ calendar: {} })
+    expect(openAppAction('today')).toBe(true)
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/daily/2026-10-31/'))
+  })
+
+  it('calendar opens the overlay over all notes, only when it is available', () => {
+    const { opened } = installPage({ calendar: {} })
+    expect(availableActions()).toContain('calendar')
+    expect(openAppAction('calendar')).toBe(true)
+    expect(opened).toEqual(['mbr-calendar:overlay:All notes'])
+    document.body.innerHTML = ''
+    const off = installPage({ calendar: { overlayAvailable: false } })
+    expect(availableActions()).not.toContain('calendar')
+    expect(openAppAction('calendar')).toBe(false)
+    expect(off.opened).toEqual([])
+  })
+
+  it('companion toggles the day panel, not while docked or with companion = "off"', () => {
+    const { opened } = installPage({ calendar: {} })
+    expect(openAppAction('companion')).toBe(true)
+    expect(opened).toEqual(['mbr-calendar:companion'])
+    document.body.innerHTML = ''
+    installPage({ calendar: { isDocked: true } })
+    expect(availableActions()).not.toContain('companion')
+    expect(openAppAction('companion')).toBe(false)
+    document.body.innerHTML = ''
+    installPage({ calendar: {}, calendarConfig: { companion: 'off' } })
+    expect(availableActions()).not.toContain('companion')
+    // The other two stay.
+    expect(availableActions()).toContain('calendar')
+  })
+
+  it('in the app, re-posts the page once day notes are known', async () => {
+    const postMessage = vi.fn()
+    window.webkit = { messageHandlers: { mbrApp: { postMessage } } }
+    window.__MBR_EMBEDDED__ = true
+    try {
+      withFiles(DAY_NOTES)
+      installPage({ calendar: {} })
+      installAppBridge()
+      await vi.waitFor(() => {
+        const last = postMessage.mock.lastCall?.[0] as { actions?: string[] } | undefined
+        expect(last?.actions).toContain('today')
+      })
+      expect(postMessage.mock.calls[0][0].actions).not.toContain('today')
+    } finally {
+      window.__MBR_EMBEDDED__ = undefined
+      window.mbrApp = undefined
+      window.webkit = undefined
+    }
   })
 })
 

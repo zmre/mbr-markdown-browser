@@ -1,0 +1,120 @@
+[
+  {
+    "name": "owner calendar section",
+    "markdown": "## Calendar\n\n- 09:00 - 09:15 Standup\n  - Employees, Bob Wall, Patrick Walsh\n  - Slack call / Google Hangout\n- 10:30 - 11:00 Bob / Patrick 1:1\n  - Patrick Walsh, Bob Wall\n  - Hangouts\n- 14:00 - 15:00 Things we did / Rev team demos / experiment results / kudos\n",
+    "entries": 3,
+    "html": "<section>\n<h2 id=\"calendar\">Calendar</h2>\n<ul>\n<li>09:00 - 09:15 Standup\n<ul>\n<li>Employees, Bob Wall, Patrick Walsh</li>\n<li>Slack call / Google Hangout</li>\n</ul>\n</li>\n<li>10:30 - 11:00 Bob / Patrick 1:1\n<ul>\n<li>Patrick Walsh, Bob Wall</li>\n<li>Hangouts</li>\n</ul>\n</li>\n<li>14:00 - 15:00 Things we did / Rev team demos / experiment results / kudos</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "day planner tasks",
+    "markdown": "- [ ] 10:00 - 10:30 Wake up\n- [x] 11:00 Done thing\n- [-] 12:00 Dropped\n",
+    "entries": 3,
+    "html": "<section>\n<ul>\n<li><input type=\"checkbox\" class=\"mbr-task-check\" id=\"mbr-task-1\" data-mbr-task-line=\"1\" data-mbr-task-status=\"open\" disabled><span class=\"mbr-task-text\">10:00 - 10:30 Wake up</span></li>\n<li><input type=\"checkbox\" class=\"mbr-task-check\" id=\"mbr-task-2\" data-mbr-task-line=\"2\" data-mbr-task-status=\"done\" checked disabled><span class=\"mbr-task-text\">11:00 Done thing</span></li>\n<li><input type=\"checkbox\" class=\"mbr-task-check\" id=\"mbr-task-3\" data-mbr-task-line=\"3\" data-mbr-task-status=\"canceled\" disabled><span class=\"mbr-task-text mbr-task-canceled\">12:00 Dropped</span></li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "task with leading priority",
+    "markdown": "- [ ] !! 10:00 Urgent call\n",
+    "html": "<section>\n<ul>\n<li><input type=\"checkbox\" class=\"mbr-task-check\" id=\"mbr-task-1\" data-mbr-task-line=\"1\" data-mbr-task-status=\"open\" disabled><span class=\"mbr-task-text\">10:00 Urgent call</span> <span class=\"mbr-task-pri mbr-task-pri-high\" role=\"img\" aria-label=\"High priority\" title=\"High priority\"></span></li>\n</ul>\n</section>\n",
+    "entries": 1
+  },
+  {
+    "name": "noteplan forms",
+    "markdown": "- at 3pm Call the bank\n- 5:00pm-6pm Gym\n- noon Lunch with Sam\n",
+    "entries": 3,
+    "html": "<section>\n<ul>\n<li>at 3pm Call the bank</li>\n<li>5:00pm-6pm Gym</li>\n<li>noon Lunch with Sam</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "inline markup in the time",
+    "markdown": "- **09:00** - 10:00 *Deep* work\n",
+    "entries": 1,
+    "html": "<section>\n<ul>\n<li><strong>09:00</strong> - 10:00 <em>Deep</em> work</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "loose item reads its first paragraph",
+    "markdown": "- 9am Breakfast\n\n  17:00 is not the start\n\n- Notes\n\n  18:00 not first either\n",
+    "entries": 1,
+    "html": "<section>\n<ul>\n<li>\n<p>9am Breakfast</p>\n<p>17:00 is not the start</p>\n</li>\n<li>\n<p>Notes</p>\n<p>18:00 not first either</p>\n</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "ordered list",
+    "markdown": "1. 13:00 Lunch\n2. Not one\n",
+    "entries": 1,
+    "html": "<section>\n<ol>\n<li>13:00 Lunch</li>\n<li>Not one</li>\n</ol>\n</section>\n"
+  },
+  {
+    "name": "top-level item indented two spaces",
+    "markdown": "  - 09:00 Indented but top-level\n",
+    "entries": 1,
+    "html": "<section>\n<ul>\n<li>09:00 Indented but top-level</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "negatives",
+    "markdown": "- 2026 goals\n- 10 reasons to stay\n- 1:1 with Bob\n- Standup at 09:00\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<ul>\n<li>2026 goals</li>\n<li>10 reasons to stay</li>\n<li>1:1 with Bob</li>\n<li>Standup at 09:00</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "nested time line is a detail",
+    "markdown": "- Projects\n  - 09:00 Nested is a detail\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<ul>\n<li>Projects\n<ul>\n<li>09:00 Nested is a detail</li>\n</ul>\n</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "quoted list",
+    "markdown": "> - 09:00 Quoted\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<blockquote>\n<ul>\n<li>09:00 Quoted</li>\n</ul>\n</blockquote>\n</section>\n"
+  },
+  {
+    "name": "fenced list",
+    "markdown": "```\n- 09:00 Fenced\n```\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<pre><code>- 09:00 Fenced\n</code></pre>\n</section>\n"
+  },
+  {
+    "name": "indented code",
+    "markdown": "Text\n\n    - 09:00 Indented code\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<p>Text</p>\n<pre><code>- 09:00 Indented code\n</code></pre>\n</section>\n"
+  },
+  {
+    "name": "frontmatter list",
+    "markdown": "---\nagenda:\n- 09:00 yaml\n---\n\n# Note\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<h1 id=\"note\">Note</h1>\n</section>\n"
+  },
+  {
+    "name": "definition list",
+    "markdown": "Term\n: - 09:00 In a definition\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<dl>\n<dt tabindex=\"0\">Term</dt>\n<dd>\n<ul>\n<li>09:00 In a definition</li>\n</ul>\n</dd>\n</dl>\n</section>\n"
+  },
+  {
+    "name": "prose only",
+    "markdown": "# Day\n\nWe met at 09:00 and again at noon.\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<h1 id=\"day\">Day</h1>\n<p>We met at 09:00 and again at noon.</p>\n</section>\n"
+  },
+  {
+    "name": "prefilter passes, no title",
+    "markdown": "- 9:00\n- 10:30am-ish maybe\n",
+    "entries": 0,
+    "prefilter": true,
+    "html": "<section>\n<ul>\n<li>9:00</li>\n<li>10:30am-ish maybe</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "raw html list",
+    "markdown": "<ul><li>09:00 Raw HTML</li></ul>\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<ul><li>09:00 Raw HTML</li></ul>\n</section>\n"
+  }
+]

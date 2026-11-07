@@ -46,6 +46,7 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         flashcards_concentric_threshold: 0.7,
         flashcards_progress_indicators: true,
         slides: mbr::slides::SlideSettings::default(),
+        calendar: mbr::calendar::CalendarConfig::default(),
         title_prefix: String::new(),
         title_suffix: String::new(),
         mark_incomplete: true,
@@ -2289,6 +2290,48 @@ async fn test_search_with_facet() {
         "Should not find 'recipe' in results: {:?}",
         results
     );
+}
+
+/// `when:-30d` resolves against the request's `today`, not the server clock,
+/// and a date-facet-only query reports the matched date.
+#[tokio::test]
+async fn test_search_date_facet_with_explicit_today() {
+    let repo = TestRepo::new();
+    repo.create_markdown("daily/2026-10-31.md", "# Saturday\n\nNotes.");
+    let mut frontmatter = HashMap::new();
+    frontmatter.insert("date", "2025-01-01");
+    repo.create_markdown_with_frontmatter("old.md", &frontmatter, "Old note.");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // Every fixture was written after 2026-11-05, so only the daily note's
+    // filename date can fall in the 30 days up to it.
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "when:-30d", "today": "2026-11-05"}"#,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["url_path"], "/daily/2026-10-31/");
+    assert_eq!(
+        results[0]["matched_date"],
+        serde_json::json!({"date": "2026-10-31", "field": "date"})
+    );
+
+    // A month earlier: the same query matches nothing.
+    let response = server
+        .post_json(
+            "/.mbr/search",
+            r#"{"q": "when:-30d", "today": "2026-10-15", "filetype": "all"}"#,
+        )
+        .await;
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["results"], serde_json::json!([]), "{body}");
 }
 
 #[tokio::test]
@@ -9047,6 +9090,123 @@ async fn test_tasks_endpoint_calendar_mode_buckets_by_due_date() {
     assert!(dated["url_path"].is_null());
 }
 
+/// `mode: "grid"` (design/calendar.md §8.1): tasks placed on the days of a
+/// range, the undated tasks of the range's day notes counted (never placed),
+/// and the overdue count before the range. Dates are pinned far from today.
+#[tokio::test]
+async fn test_tasks_endpoint_grid_mode_places_tasks_on_days() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "projects/plan.md",
+        concat!(
+            "- [ ] ancient @due(2001-01-01)\n",
+            "- [ ] 09:00 kickoff @due(2999-12-29)\n",
+            "- [x] shipped @due(2999-12-01) @done(2999-12-29)\n",
+            "- [ ] planned ⏳ 2999-12-30\n",
+            "- [-] canceled @due(2999-12-29)\n",
+            "- [ ] outside @due(2999-12-31)\n",
+        ),
+    );
+    repo.create_markdown(
+        "daily/2999-12-30.md",
+        "# Day\n\n- [ ] undated one\n- [ ] undated two\n- [x] undated done\n",
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let body = tasks_query(
+        &server,
+        r#"{"mode": "grid", "from": "2999-12-28", "to": "2999-12-30", "statuses": ["open", "done"]}"#,
+    )
+    .await;
+    assert!(body.get("groups").is_none(), "the grid replaces `groups`");
+    assert_eq!(body["from"], "2999-12-28");
+    assert_eq!(body["to"], "2999-12-30");
+    let days = body["days"].as_object().expect("days object");
+    assert_eq!(
+        days.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["2999-12-29", "2999-12-30"]
+    );
+    let texts = |date: &str| -> Vec<String> {
+        days[date]["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|t| t["text"].as_str().expect("text").to_string())
+            .collect()
+    };
+    // Open before done; the canceled task is never placed.
+    assert_eq!(texts("2999-12-29"), vec!["09:00 kickoff", "shipped"]);
+    assert_eq!(texts("2999-12-30"), vec!["planned"]);
+    let kickoff = &days["2999-12-29"]["tasks"][0];
+    assert_eq!(kickoff["placed_by"], "due");
+    assert_eq!(kickoff["time"], "09:00");
+    assert_eq!(kickoff["path"], "projects/plan.md");
+    assert_eq!(kickoff["note"], "plan");
+    assert_eq!(days["2999-12-29"]["tasks"][1]["placed_by"], "done");
+    assert_eq!(days["2999-12-30"]["tasks"][0]["placed_by"], "scheduled");
+    assert_eq!(
+        (
+            days["2999-12-29"]["open"].clone(),
+            days["2999-12-29"]["done"].clone()
+        ),
+        (serde_json::json!(1), serde_json::json!(1))
+    );
+    assert_eq!(days["2999-12-29"]["overdue"], false);
+    assert_eq!(
+        body["undated_in_day_notes"],
+        serde_json::json!({"2999-12-30": 2})
+    );
+    assert_eq!(body["overdue_before_range"], 1);
+    assert_eq!(body["total_matches"], 3);
+    assert!(body["folders"].is_array());
+
+    // The list modes keep their exact wire shape.
+    let calendar = tasks_query(&server, r#"{"mode": "calendar", "from": "2999-12-28"}"#).await;
+    let mut keys: Vec<&str> = calendar
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "duration_ms",
+            "folders",
+            "groups",
+            "scan_in_progress",
+            "total_matches"
+        ]
+    );
+    let hit = &calendar["groups"][0]["tasks"][0];
+    assert!(hit.get("placed_by").is_none() && hit.get("note").is_none());
+}
+
+/// A grid request wider than 62 days is cut, and the response says so.
+#[tokio::test]
+async fn test_tasks_endpoint_grid_mode_clamps_the_range() {
+    let repo = task_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let body = tasks_query(
+        &server,
+        r#"{"mode": "grid", "from": "2026-12-31", "to": "2026-01-01"}"#,
+    )
+    .await;
+    assert_eq!(body["from"], "2026-01-01");
+    assert_eq!(body["to"], "2026-03-03");
+
+    let bad = server
+        .post_json("/.mbr/tasks", r#"{"mode": "grid", "from": "2026-02-30"}"#)
+        .await;
+    assert!(
+        bad.status().is_client_error(),
+        "an impossible date is refused, not guessed at"
+    );
+}
+
 /// The watcher must keep the task index fresh once it has been built, the same
 /// way it keeps links.json fresh (see
 /// `test_links_json_refreshes_after_watcher_sees_external_edit`).
@@ -9356,6 +9516,59 @@ async fn test_task_toggle_happy_path_stamps_and_writes_exact_bytes() {
     .await;
     assert_eq!(reopen.status(), 200);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), TOGGLE_SOURCE);
+}
+
+/// A line written in the Obsidian Tasks emoji format is stamped `✅ <date>`,
+/// not `@done(...)`, so mbr never writes a foreign notation into a vault the
+/// plugin manages — and reopening removes the emoji stamp again.
+#[tokio::test]
+async fn test_task_toggle_stamps_an_emoji_line_in_its_own_notation() {
+    const SOURCE: &str = "# Notes\n\n- [ ] file taxes ⏫ 📅 2026-10-31\n";
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("notes.md", SOURCE);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let resp = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 3,
+            "expected": "- [ ] file taxes ⏫ 📅 2026-10-31", "to": "done",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON response");
+    let text = json["text"].as_str().expect("text").to_string();
+
+    let (head, date) = text
+        .rsplit_once(" ✅ ")
+        .unwrap_or_else(|| panic!("no emoji stamp in {text}"));
+    assert_eq!(head, "- [x] file taxes ⏫ 📅 2026-10-31");
+    assert!(
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok(),
+        "stamp is a bare date: {text}"
+    );
+    assert!(!text.contains("@done"), "{text}");
+    let parsed = mbr::tasks::parse_task_line(&text, 3).expect("still a task");
+    assert_eq!(parsed.text, "file taxes");
+    assert!(parsed.done.is_some() && !parsed.done_has_time);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("# Notes\n\n{text}\n")
+    );
+
+    let reopen = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "notes.md", "line": 3, "expected": text, "to": "open",
+        }),
+    )
+    .await;
+    assert_eq!(reopen.status(), 200);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), SOURCE);
 }
 
 #[tokio::test]
@@ -10865,4 +11078,152 @@ async fn test_symlink_mounts_can_be_switched_off() {
     assert_eq!(server.get("/.env").await.status(), 404);
     let media = server.get_text("/.mbr/media.json").await;
     assert!(!media.contains("clip.mp4"), "{media}");
+}
+
+// ==================== Periodic notes (calendar) ====================
+
+/// Tera escapes `/` in attribute values as `&#x2F;`; browsers decode it, so
+/// the tests compare the decoded form.
+fn decode_slashes(html: &str) -> String {
+    html.replace("&#x2F;", "/")
+}
+
+fn periodic_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown("daily/2026-10-30.md", "# Friday\n");
+    repo.create_markdown("daily/2026-10-31.md", "# Saturday\n");
+    // A gap (Sunday) the navigation skips.
+    repo.create_markdown("daily/2026-11-02.md", "# Monday\n");
+    repo.create_markdown("weekly/2026-W44.md", "# Week 44\n");
+    repo.create_markdown("2026-10.md", "# October\n");
+    // Names the same day as `daily/2026-10-31.md` and sorts after it.
+    repo.create_markdown("zz/2026_10_31.md", "# A copy\n");
+    repo.create_markdown("meetings/2026-10-31 Acme sync.md", "# Sync\n");
+    repo.create_markdown("plain.md", "# Undated\n");
+    repo
+}
+
+#[tokio::test]
+async fn test_periodic_note_has_calendar_nav() {
+    let repo = periodic_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let html = decode_slashes(&server.get_text("/daily/2026-10-31/").await);
+    assert_html_contains(&html, r#"class="mbr-calendar-nav""#);
+    assert_html_contains(&html, r#"rel="prev" href="/daily/2026-10-30/""#);
+    assert_html_contains(&html, r#"rel="next" href="/daily/2026-11-02/""#);
+    assert_html_contains(
+        &html,
+        r#"<time datetime="2026-10-31">Saturday, October 31, 2026</time>"#,
+    );
+    assert_html_contains(&html, r#"href="/weekly/2026-W44/""#);
+    assert_html_contains(&html, r#"href="/2026-10/""#);
+    assert_html_contains(&html, r#"calendar: {"enabled":true"#);
+
+    // Not periodic: a prefix-dated meeting note and an undated note.
+    let meeting = server.get_text("/meetings/2026-10-31%20Acme%20sync/").await;
+    assert_html_not_contains(&meeting, r#"class="mbr-calendar-nav""#);
+    let plain = server.get_text("/plain/").await;
+    assert_html_not_contains(&plain, r#"class="mbr-calendar-nav""#);
+    // The config is on every page, for the `d` key.
+    assert_html_contains(&plain, r#"calendar: {"enabled":true"#);
+
+    // `companion = "auto"` (the default) reserves the right column on the
+    // day note only; the trigger element is on every page.
+    assert_html_contains(&html, r#"<body class="mbr-has-companion">"#);
+    assert_html_contains(&plain, "<mbr-calendar></mbr-calendar>");
+    assert_html_not_contains(&plain, "mbr-has-companion");
+    assert_html_not_contains(&meeting, "mbr-has-companion");
+    let week = server.get_text("/weekly/2026-W44/").await;
+    assert_html_not_contains(&week, "mbr-has-companion");
+}
+
+#[tokio::test]
+async fn test_site_json_contains_calendar() {
+    let repo = periodic_repo();
+    let server = TestServer::start(&repo).await;
+    let site: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+    let files = site["markdown_files"].as_array().unwrap();
+    let calendar_of = |url: &str| {
+        files
+            .iter()
+            .find(|f| f["url_path"] == url)
+            .unwrap_or_else(|| panic!("{url} in site.json"))
+            .get("calendar")
+            .cloned()
+    };
+    assert_eq!(
+        calendar_of("/daily/2026-10-31/"),
+        Some(
+            serde_json::json!({"date": "2026-10-31", "source": "filename", "period": "2026-10-31"})
+        )
+    );
+    assert_eq!(
+        calendar_of("/weekly/2026-W44/"),
+        Some(serde_json::json!({"date": "2026-10-26", "source": "filename", "period": "2026-W44"}))
+    );
+    assert_eq!(
+        calendar_of("/meetings/2026-10-31 Acme sync/"),
+        Some(serde_json::json!({"date": "2026-10-31", "source": "filename"}))
+    );
+    assert_eq!(
+        calendar_of("/plain/"),
+        None,
+        "undated notes carry no calendar key"
+    );
+}
+
+#[tokio::test]
+async fn test_periodic_duplicate_is_a_page_error() {
+    let repo = periodic_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let errors: serde_json::Value = server
+        .get("/zz/2026_10_31/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let duplicates: Vec<_> = errors["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "periodic_duplicate")
+        .collect();
+    assert_eq!(
+        duplicates,
+        [
+            &serde_json::json!({"type": "periodic_duplicate", "period": "2026-10-31", "kept": "/daily/2026-10-31/"})
+        ]
+    );
+
+    let winner: serde_json::Value = server
+        .get("/daily/2026-10-31/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !winner["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "periodic_duplicate"),
+        "{winner}"
+    );
+}
+
+#[tokio::test]
+async fn test_calendar_disabled_drops_the_nav() {
+    let repo = periodic_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.calendar.enabled = false;
+    })
+    .await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/daily/2026-10-31/").await;
+    assert_html_not_contains(&html, r#"class="mbr-calendar-nav""#);
+    assert_html_contains(&html, r#""enabled":false"#);
 }

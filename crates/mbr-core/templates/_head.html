@@ -26,6 +26,8 @@
       // - slides / slidesPage: deck settings from config.toml's [slides] and
       //   from the note's `slides:` frontmatter (markdown pages only; `{}`
       //   elsewhere). mbr-slides.ts merges them over its built-in defaults
+      // - calendar: config.toml's [calendar] table (periodic notes, the d / [ / ]
+      //   keys, later the companion); `{}` on pages rendered without it
       window.__MBR_CONFIG__ = {
         serverMode: {% if server_mode %}true{% else %}false{% endif %},
         guiMode: {% if gui_mode %}true{% else %}false{% endif %},
@@ -41,6 +43,13 @@
         flashcardsProgressIndicators: {{ flashcards_progress_indicators | default(value=true) }},
         slides: {{ slides_config | default(value="{}") | safe }},
         slidesPage: {{ slides_page | default(value="{}") | safe }},
+        calendar: {{ calendar_config | default(value="{}") | safe }},
         repoId: "{{ repo_id | default(value='') | safe }}"
       };
     </script>
+    {% if calendar_enabled %}<script>
+      // Pre-paint: the reader dismissed the docked daily-note companion (✕ or
+      // C). Applied before first paint so theme.css never reserves the column
+      // only to collapse it. Written by components/src/calendar/companion-pref.ts.
+      try { if (localStorage.getItem("mbr_calendar_companion_hidden") === "1") document.documentElement.classList.add("mbr-companion-hidden") } catch (e) {}
+    </script>{% endif %}

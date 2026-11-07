@@ -1,5 +1,6 @@
 import { buildFolderTree, type FolderNode, type MarkdownFile } from './sorting.js';
 import type { IncludeFilter } from './tasks/types.js';
+import { calendarConfigFrom, type CalendarConfig } from './calendar/config.js';
 
 /**
  * Tag source configuration for linking tag values.
@@ -41,6 +42,11 @@ declare global {
        */
       slides?: unknown;
       slidesPage?: unknown;
+      /**
+       * The `[calendar]` table (snake_case, as serialized). `unknown` until
+       * {@link getCalendarConfig} has validated it.
+       */
+      calendar?: unknown;
       repoId?: string;
     };
   }
@@ -93,6 +99,14 @@ export function getSlideSettingSources(): { config: unknown; page: unknown } {
     config: window.__MBR_CONFIG__?.slides ?? {},
     page: window.__MBR_CONFIG__?.slidesPage ?? {},
   };
+}
+
+/**
+ * The repository's `[calendar]` configuration, validated with defaults
+ * (`calendar/config.ts`). A lazy chunk gets this as a property.
+ */
+export function getCalendarConfig(): CalendarConfig {
+  return calendarConfigFrom(window.__MBR_CONFIG__?.calendar);
 }
 
 /**

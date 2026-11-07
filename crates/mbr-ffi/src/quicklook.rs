@@ -24,7 +24,9 @@
 //!
 //! [reply]: https://developer.apple.com/documentation/quicklook/qlpreviewreply
 
+use mbr_core::agenda;
 use mbr_core::assets;
+use mbr_core::calendar::{self, CalendarRules, DateSource};
 use mbr_core::config::{self, Config};
 use mbr_core::embedded_hljs;
 use mbr_core::embedded_pico;
@@ -350,12 +352,14 @@ pub fn render_preview_with_config(
         })?;
     let mut rendered = target.render_markdown(&source)?;
     let card = target.contact_card_context(&source, &mut rendered);
+    let day = target.day_calendar(&source, &rendered.frontmatter);
 
     render_quicklook_template(
         &rendered.html,
         rendered.frontmatter,
         rendered.headings,
         card,
+        day.as_ref(),
         &target.root_path,
         &target.base_dir_url(),
         &ql_config,
@@ -407,11 +411,14 @@ pub fn render_thumbnail(
     }
 
     let card = target.contact_card_context(&source, &mut rendered);
+    // Never a day calendar: a thumbnail is a snapshot of the page's top, and a
+    // timeline squeezed beside it would be unreadable at icon size.
     render_quicklook_template(
         &rendered.html,
         rendered.frontmatter,
         rendered.headings,
         card,
+        None,
         &target.root_path,
         &target.base_dir_url(),
         &THUMBNAIL_CONFIG,
@@ -538,6 +545,64 @@ impl QuickLookTarget {
         context
     }
 
+    /// The day calendar for this note (design/calendar.md §4.7), or `None`
+    /// when the preview should not carry one.
+    ///
+    /// The gate is cheap first: `[calendar] enabled`, then
+    /// [`agenda::may_have_agenda`] over the source, a superset of the agenda
+    /// grammar, so an ordinary note never pays for the date or the script.
+    /// The entries themselves are found in the browser, by the same
+    /// `agenda-parse.ts` the companion uses; a note that passes here but has
+    /// none draws nothing.
+    ///
+    /// The date is D1, with the repository's `[calendar]` rules: the filename
+    /// and frontmatter through [`CalendarRules::resolve`] (the scan's own
+    /// resolution, on the note's repository-relative path), else the file's
+    /// birthtime (mtime where there is none) through [`calendar::note_date`]
+    /// in the local zone, as the scan's `created` is read.
+    fn day_calendar(
+        &self,
+        source: &str,
+        frontmatter: &markdown::SimpleMetadata,
+    ) -> Option<DayCalendar> {
+        let settings = &self.config.calendar;
+        if !settings.enabled || !agenda::may_have_agenda(source) {
+            return None;
+        }
+        let resolved = CalendarRules::new(settings).resolve(&self.raw_path(), Some(frontmatter));
+        let (date, source) = match resolved {
+            Some(cal) => (
+                cal.date,
+                match cal.source {
+                    DateSource::Filename => DayDateSource::Filename,
+                    DateSource::Frontmatter => DayDateSource::Frontmatter,
+                },
+            ),
+            None => (
+                calendar::note_date(None, file_created_secs(&self.path)?, &chrono::Local)?,
+                DayDateSource::Birthtime,
+            ),
+        };
+        Some(DayCalendar {
+            date,
+            source,
+            week_start: settings.week_start,
+            week_numbers: settings.week_numbers,
+            agenda_chips: settings.agenda_chips,
+        })
+    }
+
+    /// The note's path relative to its repository root, as the scan names it
+    /// (`raw_path`), so periodic-folder rules apply as they do on the server.
+    /// Just the file name for a note outside its root.
+    fn raw_path(&self) -> PathBuf {
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let note = canonical(&self.path);
+        note.strip_prefix(canonical(&self.root_path))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| note.file_name().map(PathBuf::from).unwrap_or_default())
+    }
+
     /// Render `source` (this file's markdown, or the top of it) to HTML.
     ///
     /// Synchronous `render_str` rather than the async `render`: with oEmbed
@@ -580,8 +645,9 @@ impl QuickLookTarget {
                 transcode_enabled: false,
                 // No tag sources in QuickLook (no wikilink transformation).
                 valid_tag_sources: std::collections::HashSet::new(),
-                // Hardcoded off: a QuickLook preview is a static, scriptless
-                // panel with nothing to anchor a review selection to.
+                // Hardcoded off: a QuickLook preview is a static, read-only
+                // panel (its scripts only highlight, draw diagrams and the
+                // day calendar) with no review UI to anchor a selection to.
                 review: markdown::ReviewLines::Omit,
                 // Honor the user's mark_incomplete config (defaults to off in
                 // this preview).
@@ -598,6 +664,74 @@ impl QuickLookTarget {
             message: e.to_string(),
         })
     }
+}
+
+/// Where a [`DayCalendar`]'s date came from (D1), for the page and for tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DayDateSource {
+    Filename,
+    Frontmatter,
+    /// The file's birthtime, else its mtime: no filename or frontmatter date.
+    Birthtime,
+}
+
+impl DayDateSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Filename => "filename",
+            Self::Frontmatter => "frontmatter",
+            Self::Birthtime => "birthtime",
+        }
+    }
+}
+
+/// What the QuickLook day calendar script is told about the note: its date
+/// and the `[calendar]` settings that shape the drawing. Published as
+/// `window.__MBR_QUICKLOOK_CALENDAR__` ahead of the script
+/// (`components/src/quicklook-calendar/model.ts` reads it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DayCalendar {
+    date: chrono::NaiveDate,
+    source: DayDateSource,
+    week_start: calendar::WeekStart,
+    week_numbers: Option<bool>,
+    agenda_chips: bool,
+}
+
+/// The global the calendar script reads its [`DayCalendar`] from.
+const DAY_CALENDAR_GLOBAL: &str = "__MBR_QUICKLOOK_CALENDAR__";
+
+impl DayCalendar {
+    /// `window.__MBR_QUICKLOOK_CALENDAR__ = {…};`, safe inside a `<script>`.
+    fn script(&self) -> String {
+        let payload = serde_json::json!({
+            "date": self.date.format("%Y-%m-%d").to_string(),
+            "source": self.source.as_str(),
+            "week_start": self.week_start,
+            "week_numbers": self.week_numbers,
+            "agenda_chips": self.agenda_chips,
+        });
+        // `</` cannot end the script early once written `<\/`; nothing here
+        // holds one today, but the rule costs nothing.
+        let json = payload.to_string().replace("</", "<\\/");
+        format!("window.{DAY_CALENDAR_GLOBAL} = {json};\n")
+    }
+}
+
+/// Birthtime in unix seconds, else mtime: what the scan publishes as
+/// `created` (`vault::Entry::epoch_secs`).
+fn file_created_secs(path: &Path) -> Option<u64> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let secs = |t: std::time::SystemTime| {
+        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    };
+    metadata
+        .created()
+        .ok()
+        .and_then(secs)
+        .or_else(|| metadata.modified().ok().and_then(secs))
 }
 
 /// The longest prefix of `bytes` that ends at a line break, or all of `bytes`
@@ -760,6 +894,7 @@ fn render_text_preview(
         frontmatter,
         Vec::new(),     // no headings: a text preview has no table of contents
         HashMap::new(), // no contact card: a text file has no frontmatter
+        None,           // no day calendar: a text file has no agenda
         root_path,
         base_dir_url,
         ql_config,
@@ -1070,6 +1205,7 @@ fn render_quicklook_template(
     frontmatter: markdown::SimpleMetadata,
     headings: Vec<markdown::HeadingInfo>,
     card: HashMap<String, serde_json::Value>,
+    day: Option<&DayCalendar>,
     root_path: &Path,
     base_dir_url: &str,
     ql_config: &QuickLookConfig,
@@ -1123,7 +1259,7 @@ fn render_quicklook_template(
     let inline_css = build_inline_css(ql_config, &config.theme, &custom_theme, &custom_user_css);
 
     // Build inline JavaScript
-    let inline_js = build_inline_js(ql_config);
+    let inline_js = build_inline_js(ql_config, day);
 
     // Add frontmatter as JSON
     let frontmatter_json = serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string());
@@ -1203,7 +1339,11 @@ fn build_inline_css(
 }
 
 /// Build the inline JavaScript string.
-fn build_inline_js(config: &QuickLookConfig) -> String {
+///
+/// `day` adds the day calendar (its payload, then
+/// [`assets::QUICKLOOK_CALENDAR_JS`]); `None` for thumbnails and for every
+/// note [`QuickLookTarget::day_calendar`] turns away.
+fn build_inline_js(config: &QuickLookConfig, day: Option<&DayCalendar>) -> String {
     let mut js = String::with_capacity(JS_PREALLOC_BYTES);
 
     // Syntax highlighting - use embedded_hljs module
@@ -1249,6 +1389,13 @@ fn build_inline_js(config: &QuickLookConfig) -> String {
 
     // QuickLook-specific initialization
     js.push_str(QUICKLOOK_JS);
+
+    // The day calendar: a self-contained IIFE reading the payload above it.
+    if let Some(day) = day {
+        js.push_str(&day.script());
+        js.push_str(embedded_text(assets::QUICKLOOK_CALENDAR_JS));
+        js.push('\n');
+    }
 
     js
 }
@@ -1581,7 +1728,7 @@ mod tests {
     #[test]
     fn test_quicklook_js_includes_initialization() {
         let config = QuickLookConfig::default();
-        let js = build_inline_js(&config);
+        let js = build_inline_js(&config, None);
 
         // Should include initialization code
         assert!(js.contains("DOMContentLoaded"));
@@ -3322,6 +3469,254 @@ mod tests {
             if src.contains("images") || src.contains("cid:") {
                 eprintln!("src=\"{}\"", src);
             }
+        }
+    }
+
+    // ==================== Day calendar (design/calendar.md §4.7) ====================
+
+    const OWNER_DAY: &str =
+        "## Calendar\n\n- 09:00 - 09:15 Standup\n  - Bob Wall\n- 14:00 - 15:00 Demos\n";
+
+    /// A repository (marked by `.mbr/`, with `config_toml` when given) holding
+    /// `name` with `contents`; returns the tempdir and the note's path.
+    fn calendar_repo(
+        name: &str,
+        contents: &str,
+        config_toml: Option<&str>,
+    ) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".mbr")).expect("mkdir .mbr");
+        if let Some(toml) = config_toml {
+            std::fs::write(dir.path().join(".mbr/config.toml"), toml).expect("write config");
+        }
+        let path = dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, contents).expect("write note");
+        (dir, path.to_str().expect("utf-8 path").to_string())
+    }
+
+    /// The day-calendar payload a preview carries, or `None`.
+    fn calendar_payload(html: &str) -> Option<serde_json::Value> {
+        let prefix = format!("window.{DAY_CALENDAR_GLOBAL} = ");
+        let start = html.find(&prefix)? + prefix.len();
+        let end = start + html[start..].find(";\n")?;
+        Some(serde_json::from_str(&html[start..end]).expect("payload is JSON"))
+    }
+
+    /// Whether the calendar bundle itself was inlined.
+    fn has_calendar_script(html: &str) -> bool {
+        let bundle = embedded_text(assets::QUICKLOOK_CALENDAR_JS);
+        assert!(
+            bundle.contains("mbr-ql-cal"),
+            "mbr-quicklook-calendar.min.js is missing or empty: run `bun run build` in components/"
+        );
+        html.contains(bundle)
+    }
+
+    fn preview_of(path: &str) -> String {
+        render_preview_html(path.to_string()).expect("render")
+    }
+
+    #[test]
+    fn test_day_calendar_for_a_dated_note_with_time_bullets() {
+        let (_dir, path) = calendar_repo("daily/2026-11-03.md", OWNER_DAY, None);
+        let html = preview_of(&path);
+        let payload = calendar_payload(&html).expect("a payload");
+        assert_eq!(payload["date"], "2026-11-03");
+        assert_eq!(payload["source"], "filename");
+        assert_eq!(payload["week_start"], "locale");
+        assert_eq!(payload["agenda_chips"], true);
+        assert!(has_calendar_script(&html));
+        // The payload comes before the script that reads it.
+        assert!(
+            html.find(DAY_CALENDAR_GLOBAL)
+                < html.find(embedded_text(assets::QUICKLOOK_CALENDAR_JS))
+        );
+    }
+
+    #[test]
+    fn test_no_day_calendar_without_time_bullets() {
+        let (_dir, path) = calendar_repo(
+            "2026-11-03.md",
+            "# Day\n\nWe met at 09:00.\n\n- 2026 goals\n- 1:1 with Bob\n",
+            None,
+        );
+        let html = preview_of(&path);
+        assert_eq!(calendar_payload(&html), None);
+        assert!(!has_calendar_script(&html));
+    }
+
+    #[test]
+    fn test_thumbnails_never_get_the_day_calendar() {
+        let (_dir, path) = calendar_repo("2026-11-03.md", OWNER_DAY, None);
+        let ThumbnailDocument::Page { document } = render_thumbnail(path, None).expect("thumbnail")
+        else {
+            panic!("expected a page thumbnail");
+        };
+        assert_eq!(calendar_payload(&document.html), None);
+        assert!(!has_calendar_script(&document.html));
+    }
+
+    #[test]
+    fn test_day_calendar_date_from_frontmatter_date() {
+        let (_dir, path) = calendar_repo(
+            "standup.md",
+            &format!("---\ndate: 2026-10-05\ncreated: 2026-09-01\n---\n\n{OWNER_DAY}"),
+            None,
+        );
+        let payload = calendar_payload(&preview_of(&path)).expect("a payload");
+        assert_eq!(payload["date"], "2026-10-05");
+        assert_eq!(payload["source"], "frontmatter");
+    }
+
+    #[test]
+    fn test_day_calendar_date_from_frontmatter_created() {
+        let (_dir, path) = calendar_repo(
+            "standup.md",
+            &format!("---\ncreated: 2026-09-01T08:30:00+02:00\n---\n\n{OWNER_DAY}"),
+            None,
+        );
+        let payload = calendar_payload(&preview_of(&path)).expect("a payload");
+        assert_eq!(payload["date"], "2026-09-01");
+        assert_eq!(payload["source"], "frontmatter");
+    }
+
+    #[test]
+    fn test_day_calendar_filename_beats_frontmatter() {
+        let (_dir, path) = calendar_repo(
+            "2026-11-03 Acme sync.md",
+            &format!("---\ndate: 2026-10-05\n---\n\n{OWNER_DAY}"),
+            None,
+        );
+        let payload = calendar_payload(&preview_of(&path)).expect("a payload");
+        assert_eq!(payload["date"], "2026-11-03");
+        assert_eq!(payload["source"], "filename");
+    }
+
+    #[test]
+    fn test_day_calendar_date_from_birthtime() {
+        let (_dir, path) = calendar_repo("standup.md", OWNER_DAY, None);
+        let payload = calendar_payload(&preview_of(&path)).expect("a payload");
+        let created = file_created_secs(Path::new(&path)).expect("a file time");
+        let expected = calendar::note_date(None, created, &chrono::Local).expect("a date");
+        assert_eq!(payload["date"], expected.format("%Y-%m-%d").to_string());
+        assert_eq!(payload["source"], "birthtime");
+    }
+
+    #[test]
+    fn test_day_calendar_uses_the_repositorys_calendar_config() {
+        let config = "[calendar]\nweek_start = \"sunday\"\nweek_numbers = true\nagenda_chips = false\n\
+                      date_fields = [\"when\"]\n";
+        let (_dir, path) = calendar_repo(
+            "standup.md",
+            &format!("---\ndate: 2026-10-05\nwhen: 2026-08-14\n---\n\n{OWNER_DAY}"),
+            Some(config),
+        );
+        let payload = calendar_payload(&preview_of(&path)).expect("a payload");
+        assert_eq!(payload["date"], "2026-08-14");
+        assert_eq!(payload["week_start"], "sunday");
+        assert_eq!(payload["week_numbers"], true);
+        assert_eq!(payload["agenda_chips"], false);
+    }
+
+    #[test]
+    fn test_no_day_calendar_when_the_calendar_is_disabled() {
+        let (_dir, path) = calendar_repo(
+            "2026-11-03.md",
+            OWNER_DAY,
+            Some("[calendar]\nenabled = false\n"),
+        );
+        assert_eq!(calendar_payload(&preview_of(&path)), None);
+    }
+
+    #[test]
+    fn test_indented_quoted_and_fenced_time_lines_do_not_count() {
+        for body in [
+            "- Projects\n  - 09:00 Nested under a plain item\n",
+            "Text\n\n    - 09:00 Indented code\n",
+            "> - 09:00 Quoted\n",
+            "```\n- 09:00 Fenced\n```\n",
+            "~~~md\n- 09:00 Tilde fenced\n~~~\n",
+        ] {
+            let (_dir, path) = calendar_repo("2026-11-03.md", body, None);
+            let html = preview_of(&path);
+            assert_eq!(calendar_payload(&html), None, "{body:?}");
+            assert!(!has_calendar_script(&html), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn test_day_calendar_payload_cannot_close_its_script() {
+        let day = DayCalendar {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+            source: DayDateSource::Filename,
+            week_start: calendar::WeekStart::Locale,
+            week_numbers: None,
+            agenda_chips: true,
+        };
+        let script = day.script();
+        assert!(
+            script.starts_with("window.__MBR_QUICKLOOK_CALENDAR__ = {"),
+            "{script}"
+        );
+        assert!(!script.contains("</"), "{script}");
+        assert!(script.contains(r#""week_numbers":null"#), "{script}");
+    }
+
+    /// `tests/fixtures/agenda-prefilter-cases.json`: each case's markdown, the
+    /// HTML QuickLook renders for it (also read by the TS grammar's test,
+    /// `components/src/quicklook-calendar/prefilter-cases.test.ts`), how many
+    /// agenda entries the grammar finds there, and, where it must be exact,
+    /// the prefilter's answer. Holds `may_have_agenda` to being a superset of
+    /// the grammar over real renders. `MBR_UPDATE_AGENDA_CASES=1` rewrites the
+    /// stored HTML after a renderer change (review the diff).
+    #[test]
+    fn test_agenda_prefilter_is_a_superset_of_the_grammar() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/agenda-prefilter-cases.json");
+        let raw = std::fs::read_to_string(&fixture).expect("read the fixture");
+        let mut cases: Vec<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(&raw).expect("the fixture is a JSON array of objects");
+        let update = std::env::var_os("MBR_UPDATE_AGENDA_CASES").is_some();
+        let mut stale = Vec::new();
+
+        for case in &mut cases {
+            let name = case["name"].as_str().expect("name").to_string();
+            let markdown = case["markdown"].as_str().expect("markdown").to_string();
+            let (_dir, path) = calendar_repo("note.md", &markdown, None);
+            let target = QuickLookTarget::locate(&path, None).expect("locate");
+            let html = target.render_markdown(&markdown).expect("render").html;
+            if case["html"].as_str() != Some(html.as_str()) {
+                stale.push(name.clone());
+                case.insert("html".to_string(), html.into());
+            }
+
+            let accepted = agenda::may_have_agenda(&markdown);
+            let entries = case["entries"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{name}: entries"));
+            if entries > 0 {
+                assert!(
+                    accepted,
+                    "{name}: {entries} entries but the prefilter rejects it"
+                );
+            }
+            if let Some(expected) = case.get("prefilter").and_then(serde_json::Value::as_bool) {
+                assert_eq!(accepted, expected, "{name}: prefilter");
+            }
+        }
+
+        if update {
+            let mut text = serde_json::to_string_pretty(&cases).expect("serialize");
+            text.push('\n');
+            std::fs::write(&fixture, text).expect("write the fixture");
+        } else {
+            assert!(
+                stale.is_empty(),
+                "stored HTML differs from the render for {stale:?}; rerun with MBR_UPDATE_AGENDA_CASES=1 and review"
+            );
         }
     }
 }

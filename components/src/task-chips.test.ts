@@ -69,6 +69,45 @@ describe('doneChipFor', () => {
   })
 })
 
+describe('doneChipFor: compatible notations', () => {
+  it('reads the Obsidian Tasks done emoji `tasks::set_status` writes', () => {
+    expect(doneChipFor('- [x] ship it 📅 2026-10-31 ✅ 2026-08-04')).toEqual({
+      datetime: '2026-08-04',
+      label: 'Aug 4',
+    })
+    // A variation selector and no space are both Tasks spellings.
+    expect(doneChipFor('- [x] a ✅\u{FE0F}2026-08-04')?.datetime).toBe('2026-08-04')
+  })
+
+  it('reads Dataview completion fields in both bracket styles', () => {
+    expect(doneChipFor('- [x] a [completion:: 2026-08-04]')?.datetime).toBe('2026-08-04')
+    expect(doneChipFor('- [x] a (completion:: 2026-08-04T09:30)')).toEqual({
+      datetime: '2026-08-04T09:30',
+      label: 'Aug 4, 9:30 AM',
+    })
+  })
+
+  it('draws no done chip for the other dates on a line', () => {
+    expect(
+      doneChipFor('- [ ] a 📅 2026-10-31 ⏳ 2026-10-30 ❌ 2026-10-29 [due:: 2026-10-31]')
+    ).toBeNull()
+  })
+
+  it('takes the first done date in the line, whatever its notation', () => {
+    expect(doneChipFor('- [x] a ✅ 2026-13-01 [completion:: 2026-08-05] @done(2026-08-04)')?.datetime).toBe(
+      '2026-08-05'
+    )
+    expect(doneChipFor('- [x] a @done(2026-08-04) ✅ 2026-08-05')?.datetime).toBe('2026-08-04')
+  })
+
+  it('reads a payload the way the leftmost-first Rust scan does', () => {
+    // The `@done(` alternative claims the text first, so the inner field is
+    // not an annotation on the Rust side either.
+    expect(doneChipFor('- [x] a @done((completion:: 2026-08-04)')).toBeNull()
+    expect(doneChipFor('- [x] a [completion:: soon]')).toBeNull()
+  })
+})
+
 describe('syncDoneChip', () => {
   /**
    * One rendered task, exactly as `markdown.rs` assembles it: the checkbox,
@@ -132,6 +171,33 @@ describe('syncDoneChip', () => {
         ' <time class="mbr-task-completed" datetime="2026-08-04">Aug 4</time>' +
         ' <time class="mbr-task-moved" datetime="2026-09-01">Sep 1</time>'
     )
+  })
+
+  it('puts the completion chip between the scheduled and cancelled-date chips', () => {
+    const input = render(
+      ' <time class="mbr-task-due" datetime="2026-10-31">Oct 31</time>' +
+        ' <time class="mbr-task-scheduled" datetime="2026-10-30">Oct 30</time>' +
+        ' <time class="mbr-task-canceled-on" datetime="2026-10-29">Oct 29</time>'
+    )
+
+    syncDoneChip(input, '- [x] write the report 📅 2026-10-31 ⏳ 2026-10-30 ❌ 2026-10-29 ✅ 2026-08-04')
+
+    const classes = Array.from(input.parentElement!.querySelectorAll('time')).map((el) => el.className)
+    expect(classes).toEqual([
+      'mbr-task-due',
+      'mbr-task-scheduled',
+      'mbr-task-completed',
+      'mbr-task-canceled-on',
+    ])
+  })
+
+  it('removes an emoji or Dataview stamp\'s chip when the task is reopened', () => {
+    for (const line of ['- [ ] write the report 📅 2026-10-31', '- [ ] write the report [due:: 2026-10-31]']) {
+      const input = render(' <time class="mbr-task-completed" datetime="2026-08-04">Aug 4</time>')
+      syncDoneChip(input, line)
+      expect(input.parentElement!.querySelector('.mbr-task-completed')).toBeNull()
+      document.body.innerHTML = ''
+    }
   })
 
   it('removes the chip, and its space, when a task is reopened', () => {

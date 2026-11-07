@@ -108,6 +108,15 @@ describe('UNIT summarizePageErrors', () => {
     expect(summarizePageErrors([slide])).toBe('Detected 1 ignored slide setting.');
   });
 
+  it('names duplicate periodic notes', () => {
+    const duplicate = {
+      type: 'periodic_duplicate' as const,
+      period: '2026-10-31',
+      kept: '/daily/2026-10-31/',
+    };
+    expect(summarizePageErrors([duplicate])).toBe('Detected 1 duplicate periodic note.');
+  });
+
   it('returns an empty string when there is nothing to report', () => {
     expect(summarizePageErrors([])).toBe('');
   });
@@ -210,6 +219,16 @@ describe('<mbr-page-errors>', () => {
     window.__MBR_CONFIG__ = undefined
     globalThis.fetch = originalFetch
     clearPublishedPageErrors()
+  })
+
+  it('counts and draws a duplicate periodic note', async () => {
+    await mount([{ type: 'periodic_duplicate', period: '2026-10-31', kept: '/daily/2026-10-31/' }])
+    expect(count()).toBe(1)
+    const panel = await openPanel()
+    expect(panel).toMatch(/Duplicate periodic notes \(1\)/)
+    expect(panel).toMatch(/2026-10-31/)
+    const link = el.shadowRoot?.querySelector<HTMLAnchorElement>('a[href="/daily/2026-10-31/"]')
+    expect(link?.textContent).toBe('/daily/2026-10-31/')
   })
 
   it('stays hidden when the page has no problems', async () => {

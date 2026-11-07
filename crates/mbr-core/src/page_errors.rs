@@ -21,6 +21,8 @@
 //!    looked up here.
 //! 6. Ambiguous body wikilinks — a `[[Name]]` several notes answer to, detected
 //!    during the render (see `src/wikilink_index.rs`).
+//! 7. Duplicate periodic notes — two notes naming the same calendar period;
+//!    the loser is reported (see `calendar::PeriodicIndex`).
 //!
 //! Designed to be cheap: each validator is a pure function and is expected to
 //! run on-demand for a single page render. The module is never invoked from
@@ -109,6 +111,16 @@ pub enum PageError {
         field: String,
         /// What was wrong.
         message: String,
+    },
+    /// Two notes name the same calendar period (`daily/2026-10-31.md` and
+    /// `archive/20261031.md`). The first by `url_path` order is the periodic
+    /// note; this one, reported on its own page, is left out of periodic
+    /// navigation. See `calendar::PeriodicIndex`.
+    PeriodicDuplicate {
+        /// The canonical period key both notes name, e.g. `2026-10-31`.
+        period: String,
+        /// The `url_path` of the note that keeps the period.
+        kept: String,
     },
     /// A `[[Wikilink]]` in the body named a title/stem shared by several notes;
     /// mbr silently resolved it to one of them.
@@ -721,6 +733,15 @@ pub fn slide_setting_errors(problems: &[crate::slides::SlideSettingProblem]) -> 
             message: p.message.clone(),
         })
         .collect()
+}
+
+/// The [`PageError::PeriodicDuplicate`] for a note that lost its period
+/// to another (from [`crate::calendar::PeriodicIndex::duplicate_of`]).
+pub fn periodic_duplicate_error(duplicate: &crate::calendar::PeriodicDuplicate) -> PageError {
+    PageError::PeriodicDuplicate {
+        period: duplicate.period.key(),
+        kept: duplicate.kept.clone(),
+    }
 }
 
 /// Checks a deck's default background (`slides.background_image`, already
@@ -1536,6 +1557,22 @@ mod tests {
                 "field": "slides.transition",
                 "message": "unknown variant `spin`; ignored",
             }])
+        );
+    }
+
+    #[test]
+    fn periodic_duplicates_serialize_with_period_and_kept_note() {
+        let duplicate = crate::calendar::PeriodicDuplicate {
+            period: crate::calendar::Period::parse_key("2026-10-31").unwrap(),
+            kept: "/archive/20261031/".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(periodic_duplicate_error(&duplicate)).unwrap(),
+            serde_json::json!({
+                "type": "periodic_duplicate",
+                "period": "2026-10-31",
+                "kept": "/archive/20261031/",
+            })
         );
     }
 

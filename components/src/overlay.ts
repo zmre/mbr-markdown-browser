@@ -34,6 +34,7 @@ export const OVERLAY_TAGS = [
   'mbr-tasks',
   'mbr-review',
   'mbr-flashcards',
+  'mbr-calendar',
 ] as const satisfies readonly (keyof HTMLElementTagNameMap)[];
 
 /** Tag name of an element implementing {@link MbrOverlay}. */

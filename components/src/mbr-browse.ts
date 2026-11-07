@@ -1,10 +1,14 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav, resolveUrl, getCanonicalPath } from './shared.js'
+import { subscribeSiteNav, resolveUrl, getCanonicalPath, getCalendarConfig } from './shared.js'
 import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { DISCLOSURE_CSS, ICON_BUTTON_CSS } from './controls.ts'
-import { ICON_SM, icon, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
+import { ICON_SM, icon, iconCalendarDays, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
+import { CALENDAR_SECTION_CSS, calendarSectionModel, renderCalendarSection } from './calendar/browse-section.js'
+import { calendarOverlayAvailable, folderNodeFiles, openCalendarOverlay } from './calendar/open-overlay.js'
+import { todayKey } from './calendar/note-date.js'
+import { periodicIndexOf } from './calendar/periodic.js'
 import {
   type MarkdownFile,
   type SortField,
@@ -131,7 +135,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
   // === UI State ===
   @state()
-  private _expandedSections = new Set<string>(['notes']);
+  private _expandedSections = new Set<string>(['notes', 'calendar']);
 
   @state()
   private _expandedTags = new Set<string>();
@@ -877,6 +881,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         <div class="pane-content">
           ${this._isLoading ? this._renderLoading() :
         this._loadError ? this._renderError() : html`
+            ${this._renderCalendarSection()}
             ${this._renderRecentSection()}
             ${this._renderShortcutsSection()}
             ${this._renderTagsSection()}
@@ -886,6 +891,50 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         </div>
       </aside>
     `;
+  }
+
+  /**
+   * The "Calendar" section (design/calendar.md §5.6): today's and this
+   * week's… periodic notes, recent daily notes and the overlay. Only when the
+   * repository has periodic notes; shared with `<mbr-browse-single>`.
+   */
+  private _renderCalendarSection(): TemplateResult | typeof nothing {
+    if (!getCalendarConfig().enabled) return nothing;
+    const model = calendarSectionModel(periodicIndexOf(this._allFiles), todayKey(), navigator.language || 'en-US');
+    if (!model) return nothing;
+    const isExpanded = this._expandedSections.has('calendar');
+    return html`
+      <div class="nav-section">
+        <button class="section-header" @click=${() => this._toggleSection('calendar')} aria-expanded=${isExpanded}>
+          ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
+          <span class="section-title">Calendar</span>
+        </button>
+        ${isExpanded ? html`<div class="section-content">${renderCalendarSection(model, {
+          resolveUrl,
+          onOpenCalendar: calendarOverlayAvailable() ? () => this._openCalendar({ label: 'All notes' }) : undefined,
+        })}</div>` : nothing}
+      </div>
+    `;
+  }
+
+  /** Closes the navigator and opens the calendar overlay. */
+  private _openCalendar(scope: Parameters<typeof openCalendarOverlay>[0]) {
+    this.close();
+    openCalendarOverlay(scope);
+  }
+
+  /**
+   * The overlay scope of the current selection: its *full* note list, not the
+   * page of cards on screen; a folder with its subfolders.
+   */
+  public selectionCalendarScope(): Parameters<typeof openCalendarOverlay>[0] | null {
+    const sel = this._currentSelection;
+    if (!sel) return null;
+    const files = sel.type === 'folder' && this._selectedFolderNode
+      ? folderNodeFiles(this._selectedFolderNode)
+      : this._selectedFiles;
+    const kind = { folder: 'Folder: ', tag: 'Tag: ', frontmatter: '', recent: '', shortcuts: '' }[sel.type];
+    return { label: `${kind}${sel.label}`, files };
   }
 
   private _renderRecentSection(): TemplateResult {
@@ -1198,6 +1247,12 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
         <div class="pane-header">
           <h3>${this._currentSelection?.label || 'Files'}</h3>
           <span class="pane-count">${count}</span>
+          ${calendarOverlayAvailable() ? html`
+            <button class="mbr-icon-btn" @click=${() => { const scope = this.selectionCalendarScope(); if (scope) this._openCalendar(scope); }}
+              aria-label="Show in calendar" title="Show in calendar">
+              ${icon(iconCalendarDays)}
+            </button>
+          ` : nothing}
           <button class="close-button mbr-icon-btn" @click=${() => this._clearSelection()} aria-label="Close">
             ${icon(iconX)}
           </button>
@@ -1304,7 +1359,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, css`
+  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, CALENDAR_SECTION_CSS, css`
     :host {
       display: contents;
     }

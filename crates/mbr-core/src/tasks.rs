@@ -36,6 +36,42 @@
 //! Dates are naive and local: no timezone conversion, no UTC round-trip. A
 //! `@due(2026-08-05)` with no time is start-of-day.
 //!
+//! # Compatible notations (read-only)
+//!
+//! Vaults managed by other tools spell the same dates differently. These are
+//! read into the same fields and stripped from the display text exactly like
+//! `@due(...)`; nothing here ever *writes* them, except the one done stamp
+//! [`set_status`] maintains (see its docs).
+//!
+//! | Syntax                                         | Field                      |
+//! |------------------------------------------------|----------------------------|
+//! | `📅 YYYY-MM-DD` (also `📆`, `🗓`)                | [`Task::due`]              |
+//! | `⏳ YYYY-MM-DD` (also `⌛`)                      | [`Task::scheduled`]        |
+//! | `✅ YYYY-MM-DD`                                 | [`Task::done`]             |
+//! | `❌ YYYY-MM-DD`                                 | [`Annotations::canceled_on`] (status stays the checkbox's) |
+//! | `🛫 YYYY-MM-DD`, `➕ YYYY-MM-DD`                 | start / created: stripped, not read |
+//! | `🔺` / `⏫` `🔼` / `🔽` `⏬`                     | Urgent / High / Normal (see [`emoji_priority`]) |
+//! | `[due:: …]`, `(due:: …)`                        | [`Task::due`]              |
+//! | `[scheduled:: …]`                               | [`Task::scheduled`]        |
+//! | `[completion:: …]`                              | [`Task::done`]             |
+//! | `[cancelled:: …]`                               | [`Annotations::canceled_on`] |
+//! | `[created:: …]`, `[start:: …]`                  | stripped, not read         |
+//! | `SCHEDULED: <YYYY-MM-DD Fri>` (continuation)    | [`Task::scheduled`]        |
+//! | `DEADLINE: <YYYY-MM-DD Mon 09:00>` (continuation) | [`Task::due`]            |
+//!
+//! The first two rows are the Obsidian Tasks emoji format (an optional
+//! U+FE0F variation selector after the glyph is accepted); the next five are
+//! Dataview inline fields (keys lowercase, `[…]` or `(…)`, value in the
+//! `@due` datetime grammar or ISO `YYYY-MM-DDTHH:MM`). When one line carries
+//! several notations of one field, the **first in the line** wins, whatever
+//! its notation.
+//!
+//! The org / Logseq planning lines are recognised only on the lines directly
+//! after a checkbox task line (its paragraph's continuation lines), never on
+//! the task line itself and never after an incomplete marker: see
+//! [`parse_planning_line`]. Repeaters and warning periods (`+1w`, `.+1d`,
+//! `-2d`) are ignored. NotePlan's `>YYYY-MM-DD` stays [`Task::moved_to`].
+//!
 //! An annotation whose payload does not parse as a date is *not* an annotation.
 //! `@due(next tuesday)` stays in the display text verbatim rather than being
 //! silently swallowed — a user who mistypes a date should see their typo, not a
@@ -104,11 +140,51 @@ static TASK_LINE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("literal task-line regex is valid and cannot fail to compile")
 });
 
-/// `@due(...)` / `@done(...)`. The payload is captured loosely and validated by
-/// [`parse_datetime`], so an unparseable payload can be left in place verbatim.
-static DATE_ANNOTATION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@(?<kind>due|done)\((?<value>[^)]*)\)")
-        .expect("literal date-annotation regex is valid and cannot fail to compile")
+/// Every inline date annotation, in all three notations, as one alternation so
+/// that a single left-to-right pass sees them **in line order** — which is what
+/// makes "the first in the line wins" hold across notations without comparing
+/// offsets.
+///
+/// - `@due(...)` / `@done(...)`: the payload is captured loosely and validated
+///   by [`parse_datetime`], so an unparseable payload can be left in place
+///   verbatim.
+/// - Obsidian Tasks emoji (`📅 2026-10-31`): date only, as Tasks writes it. An
+///   optional U+FE0F variation selector may follow the glyph.
+/// - Dataview inline fields (`[due:: …]`, `(due:: …)`): lowercase keys only,
+///   which is how Tasks and Dataview write them.
+///
+/// Digits are spelled `[0-9]` rather than `\d`, which is Unicode-aware here and
+/// would admit digits `str::parse` then refuses.
+///
+/// Which field a match feeds, and whether its payload is a real date, is
+/// [`recognise`]'s job; this pattern only finds candidates.
+static INLINE_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"@(?<kind>due|done)\((?<value>[^)]*)\)",
+        r"|(?<emoji>📅|📆|🗓|⏳|⌛|✅|❌|🛫|➕)\x{FE0F}?[ \t]*(?<edate>[0-9]{4}-[0-9]{2}-[0-9]{2})",
+        r"|\[(?<bkey>due|scheduled|completion|cancelled|created|start)::(?<bvalue>[^\]]*)\]",
+        r"|\((?<pkey>due|scheduled|completion|cancelled|created|start)::(?<pvalue>[^)]*)\)",
+    ))
+    .expect("literal inline-date regex is valid and cannot fail to compile")
+});
+
+/// Any Dataview inline field, recognised or not (`[priority:: high]` counts).
+/// Only used to decide which notation a done stamp is written in; see
+/// [`stamp_notation`].
+static DATAVIEW_FIELD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\[(][A-Za-z][A-Za-z0-9_ -]*::")
+        .expect("literal dataview-field regex is valid and cannot fail to compile")
+});
+
+/// One org / Logseq planning entry: `SCHEDULED: <…>`, `DEADLINE: <…>` or
+/// `CLOSED: […]`. Active `<…>` and inactive `[…]` timestamps are both accepted
+/// for every keyword; the timestamp itself is validated by
+/// [`parse_org_timestamp`].
+static PLANNING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?<kw>SCHEDULED|DEADLINE|CLOSED):[ \t]*(?:<(?<active>[^<>]*)>|\[(?<inactive>[^\[\]]*)\])",
+    )
+    .expect("literal planning regex is valid and cannot fail to compile")
 });
 
 /// `YYYY-MM-DD`, optionally ` HH:MM` (24-hour) or ` HH:MM AM/PM`. The AM/PM
@@ -228,11 +304,19 @@ pub struct Task {
     pub marker_end: Option<u32>,
     /// Tags without the leading `#`, original case, de-duplicated.
     pub tags: Vec<String>,
-    /// `@due(...)`, start-of-day when no time was given.
+    /// `@due(...)` (or `📅`, `[due:: …]`, `DEADLINE:`), start-of-day when no
+    /// time was given.
     pub due: Option<NaiveDateTime>,
     /// Whether `due` carried an explicit time.
     pub due_has_time: bool,
-    /// `@done(...)`, start-of-day when no time was given.
+    /// `⏳`, `[scheduled:: …]` or a `SCHEDULED:` planning line: when the task
+    /// is planned to be worked on. Display and calendar placement only — it
+    /// never feeds the `due` filter or the due buckets.
+    pub scheduled: Option<NaiveDateTime>,
+    /// Whether `scheduled` carried an explicit time.
+    pub scheduled_has_time: bool,
+    /// `@done(...)` (or `✅`, `[completion:: …]`), start-of-day when no time was
+    /// given.
     pub done: Option<NaiveDateTime>,
     /// Whether `done` carried an explicit time.
     pub done_has_time: bool,
@@ -247,16 +331,128 @@ pub struct Annotations {
     pub priority: TaskPriority,
     /// Tags without the leading `#`, original case, de-duplicated.
     pub tags: Vec<String>,
-    /// `@due(...)`.
+    /// `@due(...)`, `📅 …`, `[due:: …]` or a `DEADLINE:` planning line.
     pub due: Option<NaiveDateTime>,
     /// Whether `due` carried an explicit time.
     pub due_has_time: bool,
-    /// `@done(...)`.
+    /// `⏳ …`, `[scheduled:: …]` or a `SCHEDULED:` planning line.
+    pub scheduled: Option<NaiveDateTime>,
+    /// Whether `scheduled` carried an explicit time.
+    pub scheduled_has_time: bool,
+    /// `@done(...)`, `✅ …` or `[completion:: …]`.
     pub done: Option<NaiveDateTime>,
     /// Whether `done` carried an explicit time.
     pub done_has_time: bool,
+    /// `❌ …` or `[cancelled:: …]`: the day a task was cancelled. Rendered as a
+    /// chip only; it is not on [`Task`], since the checkbox alone decides the
+    /// status and nothing downstream filters on it.
+    pub canceled_on: Option<NaiveDate>,
     /// Trailing `> YYYY-MM-DD`.
     pub moved_to: Option<NaiveDate>,
+}
+
+impl Annotations {
+    /// Records one recognised inline date. The first of each field wins, which,
+    /// fed in line order, is "the first in the line wins".
+    fn record(&mut self, found: InlineDate) {
+        match found.field {
+            DateField::Due => fill(&mut self.due, &mut self.due_has_time, found.at),
+            DateField::Scheduled => {
+                fill(&mut self.scheduled, &mut self.scheduled_has_time, found.at)
+            }
+            DateField::Done => fill(&mut self.done, &mut self.done_has_time, found.at),
+            DateField::Canceled => {
+                self.canceled_on.get_or_insert(found.at.0.date());
+            }
+            DateField::Ignored => {}
+        }
+    }
+
+    /// Folds in an org / Logseq planning line. Planning lines come *after* the
+    /// task line, so a date already found on the task line keeps winning.
+    pub(crate) fn absorb_planning(&mut self, planning: &Planning) {
+        planning.fill(
+            (&mut self.due, &mut self.due_has_time),
+            (&mut self.scheduled, &mut self.scheduled_has_time),
+        );
+    }
+}
+
+impl Task {
+    /// [`Annotations::absorb_planning`], for a task the scanner already built.
+    fn absorb_planning(&mut self, planning: &Planning) {
+        planning.fill(
+            (&mut self.due, &mut self.due_has_time),
+            (&mut self.scheduled, &mut self.scheduled_has_time),
+        );
+    }
+}
+
+/// Sets an empty date slot (and its has-time flag); a filled one is kept.
+fn fill(
+    slot: &mut Option<NaiveDateTime>,
+    has_time: &mut bool,
+    (value, value_has_time): (NaiveDateTime, bool),
+) {
+    if slot.is_none() {
+        *slot = Some(value);
+        *has_time = value_has_time;
+    }
+}
+
+/// Which [`Annotations`] field an inline date feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateField {
+    Due,
+    Scheduled,
+    Done,
+    Canceled,
+    /// Start and created dates: recognised (so stripped) but not read.
+    Ignored,
+}
+
+/// The spelling an inline date was written in. Decides how a done stamp is
+/// written back; see [`stamp_notation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notation {
+    /// `@due(...)` / `@done(...)`.
+    Mbr,
+    /// Obsidian Tasks emoji.
+    TasksEmoji,
+    /// Dataview inline fields.
+    Dataview,
+}
+
+/// One [`INLINE_DATE`] match whose payload really is a date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InlineDate {
+    field: DateField,
+    /// The datetime and whether it carried an explicit time.
+    at: (NaiveDateTime, bool),
+}
+
+/// An org / Logseq planning line's dates; see [`parse_planning_line`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Planning {
+    /// `SCHEDULED: <…>`, and whether it carried a time.
+    pub scheduled: Option<(NaiveDateTime, bool)>,
+    /// `DEADLINE: <…>` (the due date), and whether it carried a time.
+    pub deadline: Option<(NaiveDateTime, bool)>,
+}
+
+/// A date slot and its has-time flag, as [`Planning::fill`] takes them.
+type DateSlot<'a> = (&'a mut Option<NaiveDateTime>, &'a mut bool);
+
+impl Planning {
+    /// Fills whichever of the due and scheduled slots are still empty.
+    fn fill(&self, due: DateSlot<'_>, scheduled: DateSlot<'_>) {
+        if let Some(deadline) = self.deadline {
+            fill(due.0, due.1, deadline);
+        }
+        if let Some(at) = self.scheduled {
+            fill(scheduled.0, scheduled.1, at);
+        }
+    }
 }
 
 /// The compiled `incomplete_markers` rule: one shared answer to "is this an
@@ -531,6 +727,8 @@ pub fn parse_task_line(line: &str, line_number: u32) -> Option<Task> {
         tags: annotations.tags,
         due: annotations.due,
         due_has_time: annotations.due_has_time,
+        scheduled: annotations.scheduled,
+        scheduled_has_time: annotations.scheduled_has_time,
         done: annotations.done,
         done_has_time: annotations.done_has_time,
         moved_to: annotations.moved_to,
@@ -618,6 +816,8 @@ pub fn parse_marker_line(line: &str, line_number: u32, rule: &MarkerRule) -> Opt
         tags: Vec::new(),
         due: None,
         due_has_time: false,
+        scheduled: None,
+        scheduled_has_time: false,
         done: None,
         done_has_time: false,
         moved_to: None,
@@ -652,7 +852,7 @@ pub fn set_marker(line: &str, status: TaskStatus) -> Option<String> {
     Some(out)
 }
 
-/// Rewrites the marker of a task line *and* maintains its `@done(...)` stamp.
+/// Rewrites the marker of a task line *and* maintains its done stamp.
 ///
 /// `now` is the clock, passed in rather than read, so this stays a pure
 /// function of its inputs. `None` disables stamping entirely (the
@@ -662,13 +862,21 @@ pub fn set_marker(line: &str, status: TaskStatus) -> Option<String> {
 ///
 /// With a clock:
 ///
-/// - to [`TaskStatus::Done`], ` @done(<now>)` is appended — unless the line
-///   already carries a recognised one, so toggling done twice does not stamp
-///   twice;
-/// - away from `Done`, every recognised `@done(...)` is removed together with
-///   the whitespace in front of it.
+/// - to [`TaskStatus::Done`], a stamp is appended — unless the line already
+///   carries a recognised done date in any notation, so toggling done twice
+///   does not stamp twice;
+/// - away from `Done`, every recognised done date (`@done(...)`, `✅ …`,
+///   `[completion:: …]`, `(completion:: …)`) is removed together with the
+///   whitespace in front of it.
 ///
-/// A `@done(...)` whose payload is not a date is not an annotation (see
+/// The stamp is written **in the notation the line already uses**, so mbr
+/// never writes a foreign notation into a vault a plugin manages (see
+/// [`stamp_notation`]): ` ✅ YYYY-MM-DD` on a line with any Obsidian Tasks
+/// emoji, ` [completion:: YYYY-MM-DD]` on a line with a Dataview inline field,
+/// else ` @done(YYYY-MM-DD HH:MM)`. The first two are date-only because that is
+/// the format those tools write and read.
+///
+/// A done annotation whose payload is not a date is not an annotation (see
 /// [`strip_annotations`]) and is therefore neither recognised nor removed.
 ///
 /// Everything else survives byte for byte, including any line terminator — a
@@ -815,24 +1023,30 @@ pub(crate) fn split_line_terminator(line: &str) -> (&str, &str) {
     (content, &line[content.len()..])
 }
 
-/// Appends `@done(now)`, unless a recognised one is already there.
+/// Appends a done stamp in the line's own notation, unless a recognised done
+/// date is already there.
 fn with_done_stamp(content: &str, now: NaiveDateTime) -> String {
-    if done_annotations(content).next().is_some() {
+    if done_stamps(content).next().is_some() {
         return content.to_string();
     }
     // Trailing blanks would otherwise strand a widening gap in front of the
     // stamp every time a task is re-completed.
     let trimmed = content.trim_end_matches([' ', '\t']);
-    format!("{trimmed} @done({})", now.format(DONE_STAMP_FORMAT))
+    match stamp_notation(content) {
+        Notation::TasksEmoji => format!("{trimmed} ✅ {}", now.format("%Y-%m-%d")),
+        Notation::Dataview => format!("{trimmed} [completion:: {}]", now.format("%Y-%m-%d")),
+        Notation::Mbr => format!("{trimmed} @done({})", now.format(DONE_STAMP_FORMAT)),
+    }
 }
 
-/// Removes every recognised `@done(...)`, taking the whitespace in front of it
-/// so that un-completing a task does not leave a trailing space behind.
+/// Removes every recognised done date, in any notation, taking the whitespace
+/// in front of it so that un-completing a task does not leave a trailing space
+/// behind.
 fn without_done_stamp(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut copied = 0;
 
-    for range in done_annotations(content) {
+    for range in done_stamps(content) {
         let mut start = range.start;
         while start > copied && matches!(content.as_bytes()[start - 1], b' ' | b'\t') {
             start -= 1;
@@ -844,19 +1058,54 @@ fn without_done_stamp(content: &str) -> String {
     out
 }
 
-/// Byte ranges of every `@done(...)` in `text` whose payload really is a
-/// datetime.
+/// Byte ranges of every done date in `text` whose payload really is a date:
+/// `@done(...)`, `✅ …`, `[completion:: …]` and `(completion:: …)`.
 ///
 /// Shared by the add and remove paths so they cannot disagree about what a
 /// stamp is — the idempotence of [`set_status`] rests on exactly that.
-fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
-    DATE_ANNOTATION.captures_iter(text).filter_map(|caps| {
-        if group(&caps, "kind") != Some("done") {
-            return None;
-        }
-        group(&caps, "value").and_then(parse_datetime)?;
-        Some(caps.get(0)?.range())
+fn done_stamps(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    INLINE_DATE.captures_iter(text).filter_map(|caps| {
+        let found = recognise(&caps)?;
+        (found.field == DateField::Done).then(|| caps.get(0).map(|m| m.range()))?
     })
+}
+
+/// The notation a done stamp on this line is written in.
+///
+/// Obsidian Tasks emoji first (any of its glyphs, dated or not, priority
+/// included), then any Dataview inline field (recognised key or not), else
+/// mbr's own `@done(...)`. A line mixing the two plugin notations is a Tasks
+/// line: Tasks reads both, Dataview reads only its own.
+fn stamp_notation(content: &str) -> Notation {
+    if !content.is_ascii() && content.chars().any(is_tasks_emoji) {
+        Notation::TasksEmoji
+    } else if content.contains("::") && DATAVIEW_FIELD.is_match(content) {
+        Notation::Dataview
+    } else {
+        Notation::Mbr
+    }
+}
+
+/// Every glyph the Obsidian Tasks emoji format uses: dates, priorities and the
+/// `🔁` recurrence rule.
+const fn is_tasks_emoji(c: char) -> bool {
+    matches!(
+        c,
+        '📅' | '📆'
+            | '🗓'
+            | '⏳'
+            | '⌛'
+            | '✅'
+            | '❌'
+            | '🛫'
+            | '➕'
+            | '🔺'
+            | '⏫'
+            | '🔼'
+            | '🔽'
+            | '⏬'
+            | '🔁'
+    )
 }
 
 /// Scans a whole markdown source for task lines.
@@ -865,7 +1114,11 @@ fn done_annotations(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> 
 /// incomplete markers turned on.
 ///
 /// Line numbers are 1-based and count every physical line, including the ones
-/// skipped below. Lines are *not* treated as tasks when they fall inside:
+/// skipped below. Org / Logseq planning lines (`SCHEDULED: <…>`) directly
+/// after a checkbox task line are folded into that task (see
+/// [`parse_planning_line`]) and are never entries of their own — so a task's
+/// fields can depend on the lines after it, which [`parse_task_line`] alone
+/// cannot see. Lines are *not* treated as tasks when they fall inside:
 ///
 /// - YAML frontmatter at the top of the file;
 /// - a fenced code block (backtick or tilde, any fence length, info string or
@@ -906,8 +1159,8 @@ pub fn scan_source_tasks(source: &str) -> Vec<Task> {
 ///
 /// `- [ ] TODO: ship it` is a task and never also a marker, because
 /// [`parse_task_line`] answering first short-circuits the `or_else`. And since
-/// the whole thing sits inside a `filter_map`, a line can yield at most one
-/// entry — which is what makes "one entry per source line" hold by
+/// each line is visited once and pushes at most one entry, a line can yield at
+/// most one entry — which is what makes "one entry per source line" hold by
 /// construction, and with it the uniqueness of the `#mbr-marker-{line}` anchor
 /// the panel deep-links to.
 ///
@@ -941,24 +1194,44 @@ pub fn scan_source_tasks_with_markers(source: &str, markers: Option<&MarkerRule>
     // that trade because a spurious task from a code sample is visible and
     // harmless, while a silently missing subtask is neither. Covered by
     // `indented_code_inside_a_list_item_is_a_known_false_positive`.
-    source
-        .lines()
-        .enumerate()
-        .skip(skip)
-        .filter_map(|(index, line)| {
-            // Every non-frontmatter line must be classified, even ones that
-            // cannot be tasks, or the fence state machine loses track.
-            if blocks.classify(line) == LineKind::Code {
-                return None;
+    let mut found = Vec::new();
+    // Index in `found` of the checkbox task whose continuation lines may still
+    // carry org / Logseq planning lines: set by a checkbox line, kept by each
+    // planning line, cleared by anything else. This is the renderer's rule too
+    // (`markdown::close_task`): planning lines count only directly after the
+    // task line, before any other continuation text.
+    let mut planning_target: Option<usize> = None;
+
+    for (index, line) in source.lines().enumerate().skip(skip) {
+        // Every non-frontmatter line must be classified, even ones that
+        // cannot be tasks, or the fence state machine loses track.
+        if blocks.classify(line) == LineKind::Code {
+            planning_target = None;
+            continue;
+        }
+        if let Some(target) = planning_target
+            && let Some(planning) = parse_planning_line(line)
+        {
+            if let Some(task) = found.get_mut(target) {
+                Task::absorb_planning(task, &planning);
             }
-            let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
-            // See `# One entry per source line`: the `or_else` is the checkbox
-            // precedence rule, and the enclosing `filter_map` is the
-            // one-entry-per-line rule.
-            parse_task_line(line, number)
-                .or_else(|| markers.and_then(|rule| parse_marker_line(line, number, rule)))
-        })
-        .collect()
+            continue;
+        }
+        let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        // See `# One entry per source line`: the `or_else` is the checkbox
+        // precedence rule, and pushing at most one entry per iteration is the
+        // one-entry-per-line rule.
+        let entry = parse_task_line(line, number)
+            .or_else(|| markers.and_then(|rule| parse_marker_line(line, number, rule)));
+        // A marker gets no planning dates (they would put it in a calendar,
+        // which markers stay out of).
+        planning_target = entry
+            .as_ref()
+            .filter(|task| task.kind == TaskKind::Task)
+            .map(|_| found.len());
+        found.extend(entry);
+    }
+    found
 }
 
 /// Pulls every annotation out of a task's text.
@@ -1131,34 +1404,208 @@ fn match_task_line(line: &str) -> Option<(usize, &str)> {
     Some((marker_at, text))
 }
 
-/// Replaces every *valid* `@due(...)` / `@done(...)` with a space, recording the
-/// first of each kind. Invalid payloads are left exactly as written.
+/// Replaces every *valid* inline date annotation, in every notation, with a
+/// space, recording the first of each field. Invalid payloads are left exactly
+/// as written.
+///
+/// Repeats until nothing more is recognised: removing one annotation can join
+/// its neighbours into another (`📅 @due(2026-01-01)2026-10-31` leaves
+/// `📅  2026-10-31`), and the display text must not keep a recognised one. Each
+/// repeat replaces a match of at least ten bytes with one, so this terminates;
+/// a line with no annotation pays one scan, a line with some pays one more.
 fn strip_date_annotations(text: &str, annotations: &mut Annotations) -> String {
-    if !text.contains('@') {
+    // Every alternative needs an `@`, a `::` or a non-ASCII glyph, and these
+    // byte searches are far cheaper than the regex on the prose most task
+    // lines are.
+    if !(text.contains('@') || text.contains("::") || !text.is_ascii()) {
         return text.to_string();
     }
-    DATE_ANNOTATION
-        .replace_all(text, |caps: &Captures| {
-            let Some((parsed, has_time)) = group(caps, "value").and_then(parse_datetime) else {
+    let mut current = text.to_string();
+    loop {
+        let mut changed = false;
+        let next = INLINE_DATE.replace_all(&current, |caps: &Captures| {
+            let Some(found) = recognise(caps) else {
                 // Not a date, so not an annotation: keep the user's text.
                 return caps[0].to_string();
             };
-            match group(caps, "kind") {
-                Some("due") if annotations.due.is_none() => {
-                    annotations.due = Some(parsed);
-                    annotations.due_has_time = has_time;
-                }
-                Some("done") if annotations.done.is_none() => {
-                    annotations.done = Some(parsed);
-                    annotations.done_has_time = has_time;
-                }
-                // A repeat of a kind we already have: still an annotation, so it
-                // is still stripped; first one wins.
-                _ => {}
-            }
+            changed = true;
+            // A repeat of a field we already have is still an annotation, so it
+            // is still stripped; `record` keeps the first.
+            annotations.record(found);
             " ".to_string()
-        })
-        .into_owned()
+        });
+        if !changed {
+            return current;
+        }
+        current = next.into_owned();
+    }
+}
+
+/// Decides what one [`INLINE_DATE`] match is: which field it feeds and its
+/// value, or `None` when its payload is not a date (and so it is prose).
+fn recognise(caps: &Captures<'_>) -> Option<InlineDate> {
+    if let Some(kind) = group(caps, "kind") {
+        let field = if kind == "due" {
+            DateField::Due
+        } else {
+            DateField::Done
+        };
+        let at = parse_datetime(group(caps, "value")?)?;
+        return Some(InlineDate { field, at });
+    }
+    if let Some(emoji) = group(caps, "emoji") {
+        let field = match emoji {
+            "📅" | "📆" | "🗓" => DateField::Due,
+            "⏳" | "⌛" => DateField::Scheduled,
+            "✅" => DateField::Done,
+            "❌" => DateField::Canceled,
+            _ => DateField::Ignored,
+        };
+        let date = NaiveDate::parse_from_str(group(caps, "edate")?, "%Y-%m-%d").ok()?;
+        return Some(InlineDate {
+            field,
+            at: (date.and_time(NaiveTime::MIN), false),
+        });
+    }
+    let (key, value) = group(caps, "bkey")
+        .zip(group(caps, "bvalue"))
+        .or_else(|| group(caps, "pkey").zip(group(caps, "pvalue")))?;
+    let field = match key {
+        "due" => DateField::Due,
+        "scheduled" => DateField::Scheduled,
+        "completion" => DateField::Done,
+        "cancelled" => DateField::Canceled,
+        _ => DateField::Ignored,
+    };
+    Some(InlineDate {
+        field,
+        at: parse_dataview_datetime(value)?,
+    })
+}
+
+/// A Dataview field value: the `@due` grammar ([`parse_datetime`]), plus the
+/// ISO spelling `YYYY-MM-DDTHH:MM` Dataview itself writes for a datetime.
+fn parse_dataview_datetime(value: &str) -> Option<(NaiveDateTime, bool)> {
+    let value = value.trim();
+    // An ASCII `T` at byte 10 means bytes 10 and 11 are both char boundaries.
+    if value.as_bytes().get(10) == Some(&b'T') {
+        return parse_datetime(&format!("{} {}", &value[..10], &value[11..]));
+    }
+    parse_datetime(value)
+}
+
+/// Parses an org / Logseq **planning line** — a continuation line of a task
+/// that holds nothing but `SCHEDULED: <…>`, `DEADLINE: <…>` and `CLOSED: […]`
+/// entries — or returns `None` for any other line.
+///
+/// `SCHEDULED` is the scheduled date and `DEADLINE` the due date. `CLOSED` is
+/// recognised so that org's usual `CLOSED: […] SCHEDULED: <…>` line still
+/// counts, but its timestamp is not read: mbr's toggle maintains a done stamp
+/// on the task line only, and a done date it could neither add nor remove
+/// would outlive every reopen.
+///
+/// A timestamp is `YYYY-MM-DD`, then optionally a day name (any language), a
+/// time `HH:MM` (a range `HH:MM-HH:MM` keeps its start), and repeaters or
+/// warning periods (`+1w`, `++1d`, `.+1m`, `-2d`), which are ignored. Anything
+/// else — or any text besides the entries — makes the line not a planning
+/// line, so a sentence that mentions `DEADLINE:` stays prose.
+///
+/// # Examples
+///
+/// ```
+/// use mbr_core::tasks::parse_planning_line;
+///
+/// let planning = parse_planning_line("  SCHEDULED: <2026-10-31 Sat> DEADLINE: <2026-11-02 Mon 09:00 +1w>").unwrap();
+/// assert!(planning.scheduled.is_some_and(|(_, has_time)| !has_time));
+/// assert!(planning.deadline.is_some_and(|(_, has_time)| has_time));
+///
+/// assert!(parse_planning_line("the DEADLINE: <2026-10-31> moved").is_none());
+/// ```
+pub fn parse_planning_line(line: &str) -> Option<Planning> {
+    let content = split_line_terminator(line).0;
+    // Every planning line starts with one of the three keywords; nearly every
+    // continuation line does not, and this is cheaper than the regex.
+    let first = content.trim_start_matches([' ', '\t']).as_bytes().first();
+    if !matches!(first, Some(b'S' | b'D' | b'C')) {
+        return None;
+    }
+    let is_blank = |gap: &str| gap.trim_matches([' ', '\t']).is_empty();
+
+    let mut planning = Planning::default();
+    let mut cursor = 0;
+    for caps in PLANNING.captures_iter(content) {
+        let whole = caps.get(0)?;
+        if !is_blank(&content[cursor..whole.start()]) {
+            return None;
+        }
+        let stamp =
+            parse_org_timestamp(group(&caps, "active").or_else(|| group(&caps, "inactive"))?)?;
+        match group(&caps, "kw") {
+            Some("SCHEDULED") => {
+                planning.scheduled.get_or_insert(stamp);
+            }
+            Some("DEADLINE") => {
+                planning.deadline.get_or_insert(stamp);
+            }
+            // `CLOSED`: recognised, deliberately not read (see above).
+            _ => {}
+        }
+        cursor = whole.end();
+    }
+    (cursor > 0 && is_blank(&content[cursor..])).then_some(planning)
+}
+
+/// The inside of an org timestamp; see [`parse_planning_line`] for the grammar.
+fn parse_org_timestamp(stamp: &str) -> Option<(NaiveDateTime, bool)> {
+    let mut tokens = stamp.split_whitespace();
+    let date = tokens.next()?;
+    if date.len() != 10 || !date.is_ascii() {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let mut time = None;
+
+    for token in tokens {
+        if token.chars().all(|c| c.is_alphabetic() || c == '.') {
+            // A day name: `Fri`, `ven.`, `Fr`.
+            continue;
+        }
+        if is_org_repeater(token) {
+            continue;
+        }
+        if time.is_some() {
+            return None;
+        }
+        // A range keeps its start: `09:00-10:30`.
+        let start = token.split_once('-').map_or(token, |(start, _)| start);
+        time = Some(parse_clock(start)?);
+    }
+    Some(match time {
+        Some(clock) => (date.and_time(clock), true),
+        None => (date.and_time(NaiveTime::MIN), false),
+    })
+}
+
+/// `+1w`, `++2d`, `.+1m`, and the warning periods `-2d` / `--2d`.
+fn is_org_repeater(token: &str) -> bool {
+    let unit = token.trim_start_matches(['+', '-', '.']);
+    let prefix = &token[..token.len() - unit.len()];
+    matches!(prefix, "+" | "++" | ".+" | "-" | "--")
+        && unit.len() > 1
+        && unit
+            .strip_suffix(['h', 'd', 'w', 'm', 'y'])
+            .is_some_and(|count| count.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `H:MM` or `HH:MM`, 24-hour.
+fn parse_clock(text: &str) -> Option<NaiveTime> {
+    let (hour, minute) = text.split_once(':')?;
+    let ascii_digits =
+        |s: &str| !s.is_empty() && s.len() <= 2 && s.bytes().all(|b| b.is_ascii_digit());
+    if !ascii_digits(hour) || minute.len() != 2 || !ascii_digits(minute) {
+        return None;
+    }
+    NaiveTime::from_hms_opt(hour.parse().ok()?, minute.parse().ok()?, 0)
 }
 
 /// Strips trailing `> YYYY-MM-DD` / `< YYYY-MM-DD` markers, recording the `>`
@@ -1247,26 +1694,51 @@ fn collapse_whitespace(text: &str, mut keep: impl FnMut(&str) -> bool) -> String
     display
 }
 
-/// Collapses whitespace to single spaces and lifts out `!!` / `!!!` priority
-/// markers in the same pass.
+/// Collapses whitespace to single spaces and lifts out priority markers in the
+/// same pass: `!!` / `!!!`, and the Obsidian Tasks priority emoji (see
+/// [`emoji_priority`]).
 ///
 /// Splitting on whitespace *is* the "whitespace-delimited on both sides" rule:
 /// `wow!!` and `a!!b` are single tokens that are not equal to `!!`, so they never
 /// register as priorities.
 fn collapse_taking_priority(text: &str) -> (String, TaskPriority) {
     let mut priority = TaskPriority::Normal;
-    let display = collapse_whitespace(text, |token| match token {
-        "!!!" => {
-            priority = priority.max(TaskPriority::Urgent);
-            false
-        }
-        "!!" => {
-            priority = priority.max(TaskPriority::High);
-            false
-        }
-        _ => true,
+    let display = collapse_whitespace(text, |token| {
+        let level = match token {
+            "!!!" => TaskPriority::Urgent,
+            "!!" => TaskPriority::High,
+            _ => match emoji_priority(token) {
+                Some(level) => level,
+                None => return true,
+            },
+        };
+        priority = priority.max(level);
+        false
     });
     (display, priority)
+}
+
+/// The mbr priority an Obsidian Tasks priority emoji maps onto, or `None` when
+/// `token` is not one. An optional U+FE0F variation selector is accepted.
+///
+/// Tasks has six levels (highest, high, medium, none, low, lowest) and mbr
+/// three, so the mapping folds them:
+///
+/// | Tasks          | mbr      |
+/// |----------------|----------|
+/// | `🔺` highest   | `Urgent` (as `!!!`) |
+/// | `⏫` high      | `High` (as `!!`)    |
+/// | `🔼` medium    | `High` (as `!!`): it ranks above an unmarked task |
+/// | `🔽` low, `⏬` lowest | `Normal`: mbr has no level below the default |
+///
+/// Every one of them is stripped from the display text, `🔽`/`⏬` included.
+fn emoji_priority(token: &str) -> Option<TaskPriority> {
+    match token.strip_suffix('\u{FE0F}').unwrap_or(token) {
+        "🔺" => Some(TaskPriority::Urgent),
+        "⏫" | "🔼" => Some(TaskPriority::High),
+        "🔽" | "⏬" => Some(TaskPriority::Normal),
+        _ => None,
+    }
 }
 
 /// Parses `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` or `YYYY-MM-DD HH:MM AM/PM`.
@@ -1763,6 +2235,8 @@ mod tests {
                 tags: vec![],
                 due: Some(dt(2026, 8, 5, 0, 0)),
                 due_has_time: false,
+                scheduled: None,
+                scheduled_has_time: false,
                 done: None,
                 done_has_time: false,
                 moved_to: None,
@@ -1784,6 +2258,8 @@ mod tests {
                 tags: vec![],
                 due: None,
                 due_has_time: false,
+                scheduled: None,
+                scheduled_has_time: false,
                 done: Some(dt(2026, 8, 4, 12, 11)),
                 done_has_time: true,
                 moved_to: None,
@@ -1805,6 +2281,8 @@ mod tests {
                 tags: vec!["hotlist".to_string(), "work".to_string()],
                 due: Some(dt(2026, 8, 4, 15, 0)),
                 due_has_time: true,
+                scheduled: None,
+                scheduled_has_time: false,
                 done: None,
                 done_has_time: false,
                 moved_to: None,
@@ -2938,6 +3416,339 @@ mod tests {
         assert_eq!(found[0].text, "TK real");
     }
 
+    // ---- compatible notations (Obsidian Tasks, Dataview, org/Logseq) --------
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDateTime {
+        dt(y, m, d, 0, 0)
+    }
+
+    #[test]
+    fn tasks_emoji_dates_are_read_and_stripped() {
+        let task =
+            parse("- [ ] ship it 📅 2026-10-31 ⏳ 2026-10-30 🛫 2026-10-01 ➕ 2026-09-01 #work");
+        assert_eq!(task.text, "ship it");
+        assert_eq!(task.due, Some(day(2026, 10, 31)));
+        assert!(!task.due_has_time);
+        assert_eq!(task.scheduled, Some(day(2026, 10, 30)));
+        assert!(!task.scheduled_has_time);
+        assert_eq!(task.done, None);
+        assert_eq!(task.tags, ["work"]);
+    }
+
+    #[test]
+    fn tasks_emoji_done_and_cancelled_dates() {
+        let done = parse("- [x] ship it ✅ 2026-11-01");
+        assert_eq!(done.text, "ship it");
+        assert_eq!(done.done, Some(day(2026, 11, 1)));
+        assert!(!done.done_has_time);
+
+        let (text, ann) = strip_annotations("drop it ❌ 2026-11-02");
+        assert_eq!(text, "drop it");
+        assert_eq!(ann.canceled_on, NaiveDate::from_ymd_opt(2026, 11, 2));
+        // The cancelled date never decides the status: the checkbox does.
+        assert_eq!(
+            parse("- [ ] drop it ❌ 2026-11-02").status,
+            TaskStatus::Open
+        );
+    }
+
+    #[test]
+    fn tasks_emoji_alternates_spacing_and_variation_selectors() {
+        for line in [
+            "- [ ] a 📆 2026-10-31",
+            "- [ ] a 🗓 2026-10-31",
+            "- [ ] a 🗓\u{FE0F} 2026-10-31",
+            "- [ ] a 📅2026-10-31",
+            "- [ ] a 📅\t 2026-10-31",
+        ] {
+            let task = parse(line);
+            assert_eq!(task.due, Some(day(2026, 10, 31)), "{line:?}");
+            assert_eq!(task.text, "a", "{line:?}");
+        }
+        assert_eq!(
+            parse("- [ ] a ⌛ 2026-10-30").scheduled,
+            Some(day(2026, 10, 30))
+        );
+    }
+
+    #[test]
+    fn a_tasks_emoji_without_a_real_date_is_prose() {
+        for line in ["- [ ] a 📅 2026-13-45", "- [ ] a 📅 soon", "- [ ] great ✅"] {
+            let task = parse(line);
+            assert_eq!(task.due, None, "{line:?}");
+            assert_eq!(task.done, None, "{line:?}");
+            assert_eq!(task.text, line.trim_start_matches("- [ ] "), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn tasks_priority_emoji_map_onto_mbr_levels_and_are_stripped() {
+        for (emoji, expected) in [
+            ("🔺", TaskPriority::Urgent),
+            ("⏫", TaskPriority::High),
+            ("🔼", TaskPriority::High),
+            ("🔽", TaskPriority::Normal),
+            ("⏬", TaskPriority::Normal),
+            ("⏫\u{FE0F}", TaskPriority::High),
+        ] {
+            let task = parse(&format!("- [ ] call {emoji} bob"));
+            assert_eq!(task.priority, expected, "{emoji:?}");
+            assert_eq!(task.text, "call bob", "{emoji:?}");
+        }
+        // Highest wins across both spellings.
+        assert_eq!(parse("- [ ] x !! 🔺").priority, TaskPriority::Urgent);
+        assert_eq!(parse("- [ ] x !!! 🔽").priority, TaskPriority::Urgent);
+        // Glued to a word, an emoji is prose, like `wow!!`.
+        assert_eq!(parse("- [ ] x🔺").text, "x🔺");
+    }
+
+    #[test]
+    fn dataview_fields_are_read_and_stripped() {
+        let task = parse(
+            "- [x] ship [due:: 2026-10-31] (scheduled:: 2026-10-30T09:30) \
+             [completion:: 2026-11-01] [created:: 2026-09-01] (start:: 2026-10-01)",
+        );
+        assert_eq!(task.text, "ship");
+        assert_eq!(task.due, Some(day(2026, 10, 31)));
+        assert_eq!(task.scheduled, Some(dt(2026, 10, 30, 9, 30)));
+        assert!(task.scheduled_has_time);
+        assert_eq!(task.done, Some(day(2026, 11, 1)));
+
+        let (_, ann) = strip_annotations("x [cancelled:: 2026-11-02]");
+        assert_eq!(ann.canceled_on, NaiveDate::from_ymd_opt(2026, 11, 2));
+    }
+
+    #[test]
+    fn dataview_fields_mbr_does_not_read_or_cannot_parse_stay_prose() {
+        for line in [
+            "- [ ] a [priority:: high]",
+            "- [ ] a [due:: tomorrow]",
+            "- [ ] a [Due:: 2026-10-31]",
+            "- [ ] a [due:: 2026-10-31)",
+        ] {
+            let task = parse(line);
+            assert_eq!(task.due, None, "{line:?}");
+            assert_eq!(task.text, line.trim_start_matches("- [ ] "), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_due_in_the_line_wins_whatever_its_notation() {
+        for (line, expected) in [
+            ("- [ ] a 📅 2026-10-31 @due(2026-11-01)", day(2026, 10, 31)),
+            ("- [ ] a @due(2026-11-01) 📅 2026-10-31", day(2026, 11, 1)),
+            ("- [ ] a [due:: 2026-12-01] 📅 2026-10-31", day(2026, 12, 1)),
+            ("- [ ] a 📅 2026-13-01 [due:: 2026-12-01]", day(2026, 12, 1)),
+        ] {
+            let task = parse(line);
+            assert_eq!(task.due, Some(expected), "{line:?}");
+            assert_eq!(
+                task.text,
+                if line.contains("2026-13") {
+                    "a 📅 2026-13-01"
+                } else {
+                    "a"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn removing_an_annotation_cannot_reveal_a_new_one_in_the_display_text() {
+        let task = parse("- [ ] a 📅 @due(2026-01-01)2026-10-31");
+        assert_eq!(task.text, "a");
+        assert_eq!(task.due, Some(day(2026, 1, 1)));
+    }
+
+    #[test]
+    fn planning_lines_parse() {
+        let planning = |line: &str| parse_planning_line(line).expect(line);
+        assert_eq!(
+            planning("SCHEDULED: <2026-10-31 Sat>").scheduled,
+            Some((day(2026, 10, 31), false))
+        );
+        assert_eq!(
+            planning("  DEADLINE: <2026-11-02 Mon 09:00>").deadline,
+            Some((dt(2026, 11, 2, 9, 0), true))
+        );
+        let both = planning(
+            "\tDEADLINE: <2026-11-02 Mon> SCHEDULED: <2026-10-31 Sat 9:05-10:00 +1w -2d>\r\n",
+        );
+        assert_eq!(both.deadline, Some((day(2026, 11, 2), false)));
+        assert_eq!(both.scheduled, Some((dt(2026, 10, 31, 9, 5), true)));
+        // Repeaters of every shape, a non-English day name, no day name.
+        for line in [
+            "SCHEDULED: <2026-10-31 ven. .+1d>",
+            "SCHEDULED: <2026-10-31 ++2w>",
+            "SCHEDULED: <2026-10-31>",
+            "SCHEDULED: [2026-10-31 Sat]",
+        ] {
+            assert_eq!(
+                planning(line).scheduled,
+                Some((day(2026, 10, 31), false)),
+                "{line:?}"
+            );
+        }
+        // CLOSED is understood, so the line counts, but it is not read.
+        let closed = planning("CLOSED: [2026-10-30 Fri 17:00] SCHEDULED: <2026-10-31 Sat>");
+        assert_eq!(closed.scheduled, Some((day(2026, 10, 31), false)));
+        assert_eq!(closed.deadline, None);
+    }
+
+    #[test]
+    fn lines_that_are_not_planning_lines() {
+        for line in [
+            "",
+            "Ship it",
+            "SCHEDULED:",
+            "SCHEDULED: 2026-10-31",
+            "SCHEDULED: <tomorrow>",
+            "SCHEDULED: <2026-13-31>",
+            "SCHEDULED: <2026-10-31 25:00>",
+            "SCHEDULED: <2026-10-31 9:00 10:00>",
+            "SCHEDULED: <2026-10-31 +w>",
+            "SCHEDULED: <2026-10-31> and then",
+            "the DEADLINE: <2026-10-31> moved",
+            "scheduled: <2026-10-31>",
+            "- [ ] SCHEDULED: <2026-10-31>",
+        ] {
+            assert_eq!(parse_planning_line(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn scan_folds_planning_lines_into_the_task_above() {
+        let source = "\
+- [ ] ship it
+  SCHEDULED: <2026-10-31 Sat>
+  DEADLINE: <2026-11-02 Mon 09:00 +1w>
+- [ ] next
+";
+        let tasks = scan_source_tasks(source);
+        assert_eq!(tasks.len(), 2, "planning lines are not entries: {tasks:?}");
+        assert_eq!(tasks[0].text, "ship it");
+        assert_eq!(tasks[0].scheduled, Some(day(2026, 10, 31)));
+        assert_eq!(tasks[0].due, Some(dt(2026, 11, 2, 9, 0)));
+        assert!(tasks[0].due_has_time);
+        assert_eq!((tasks[1].line, tasks[1].due), (4, None));
+    }
+
+    #[test]
+    fn scan_only_folds_planning_lines_directly_after_a_checkbox() {
+        let rule = rule(DEFAULT_MARKERS);
+        let source = "\
+- [ ] blank line between
+
+  SCHEDULED: <2026-10-31>
+- [ ] prose first
+  more words
+  SCHEDULED: <2026-10-31>
+- [ ] task-line due wins @due(2026-12-01)
+  DEADLINE: <2026-10-31>
+TODO marker line
+  SCHEDULED: <2026-10-31>
+- [ ] fenced
+```
+SCHEDULED: <2026-10-31>
+```
+- [ ] lazy continuation
+SCHEDULED: <2026-10-29>
+";
+        let found = scan_source_tasks_with_markers(source, Some(&rule));
+        let by_text = |text: &str| {
+            found
+                .iter()
+                .find(|t| t.text.starts_with(text))
+                .unwrap_or_else(|| panic!("{text} missing from {found:?}"))
+        };
+        assert_eq!(by_text("blank line").scheduled, None);
+        assert_eq!(by_text("prose first").scheduled, None);
+        assert_eq!(by_text("task-line due wins").due, Some(day(2026, 12, 1)));
+        assert_eq!(by_text("TODO marker").scheduled, None);
+        assert_eq!(by_text("fenced").scheduled, None);
+        assert_eq!(
+            by_text("lazy continuation").scheduled,
+            Some(day(2026, 10, 29))
+        );
+    }
+
+    fn stamped_with(line: &str) -> String {
+        set_status(line, TaskStatus::Done, Some(stamp())).expect("task line")
+    }
+
+    #[test]
+    fn a_done_stamp_is_written_in_the_lines_own_notation() {
+        for (line, expected) in [
+            (
+                "- [ ] a 📅 2026-10-31",
+                "- [x] a 📅 2026-10-31 ✅ 2026-08-04",
+            ),
+            ("- [ ] a ⏫", "- [x] a ⏫ ✅ 2026-08-04"),
+            (
+                "- [ ] a 🔁 every week",
+                "- [x] a 🔁 every week ✅ 2026-08-04",
+            ),
+            (
+                "- [ ] a [due:: 2026-10-31]",
+                "- [x] a [due:: 2026-10-31] [completion:: 2026-08-04]",
+            ),
+            (
+                "- [ ] a (priority:: high)",
+                "- [x] a (priority:: high) [completion:: 2026-08-04]",
+            ),
+            (
+                "- [ ] a [due:: 2026-10-31] 📅 2026-10-31",
+                "- [x] a [due:: 2026-10-31] 📅 2026-10-31 ✅ 2026-08-04",
+            ),
+            (
+                "- [ ] a @due(2026-10-31)",
+                "- [x] a @due(2026-10-31) @done(2026-08-04 14:32)",
+            ),
+            ("- [ ] café", "- [x] café @done(2026-08-04 14:32)"),
+        ] {
+            assert_eq!(stamped_with(line), expected, "{line:?}");
+            let reread = parse_task_line(expected, 1).expect("still a task");
+            assert!(reread.done.is_some(), "stamp unreadable in {expected:?}");
+        }
+    }
+
+    #[test]
+    fn any_existing_done_date_counts_as_already_stamped() {
+        for line in [
+            "- [x] a ✅ 2026-08-01",
+            "- [x] a [completion:: 2026-08-01]",
+            "- [x] a (completion:: 2026-08-01)",
+            "- [x] a 📅 2026-10-31 @done(2026-08-01)",
+        ] {
+            assert_eq!(stamped_with(line), line, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn reopening_removes_a_done_date_in_any_notation() {
+        for (line, expected) in [
+            (
+                "- [x] a 📅 2026-10-31 ✅ 2026-08-01",
+                "- [ ] a 📅 2026-10-31",
+            ),
+            ("- [x] a ✅ 2026-08-01 #work", "- [ ] a #work"),
+            ("- [x] a [completion:: 2026-08-01]", "- [ ] a"),
+            (
+                "- [x] a (completion:: 2026-08-01) [due:: 2026-10-31]",
+                "- [ ] a [due:: 2026-10-31]",
+            ),
+            ("- [x] a ✅ 2026-08-01 @done(2026-08-01)", "- [ ] a"),
+            // Not a date, so not a stamp: left alone.
+            ("- [x] a ✅ yesterday", "- [ ] a ✅ yesterday"),
+        ] {
+            assert_eq!(
+                set_status(line, TaskStatus::Open, Some(stamp())).as_deref(),
+                Some(expected),
+                "{line:?}"
+            );
+        }
+    }
+
     // ---- property tests ------------------------------------------------------
 
     /// A small alphabet that can actually spell annotations, so the invariants
@@ -3073,10 +3884,9 @@ mod tests {
         fn display_text_keeps_no_recognised_annotation(s in taskish_text()) {
             let line = format!("- [ ] {s}");
             if let Some(task) = parse_task_line(&line, 1) {
-                for caps in DATE_ANNOTATION.captures_iter(&task.text) {
-                    let value = group(&caps, "value").unwrap_or("");
+                for caps in INLINE_DATE.captures_iter(&task.text) {
                     prop_assert!(
-                        parse_datetime(value).is_none(),
+                        recognise(&caps).is_none(),
                         "recognised annotation survived in {:?}",
                         task.text
                     );
@@ -3174,7 +3984,7 @@ mod tests {
             let content = format!("{indent}{bullet} [ ] {body}");
             let line = format!("{}{terminator}", content.trim_end());
             prop_assume!(parse_task_line(&line, 1).is_some());
-            prop_assume!(done_annotations(&line).next().is_none());
+            prop_assume!(done_stamps(&line).next().is_none());
 
             let now = dt(2026, 8, 4, 14, 32);
             let done = set_status(&line, TaskStatus::Done, Some(now)).expect("task line");
@@ -3250,6 +4060,185 @@ mod tests {
                 let reparsed = parse_task_line(line, task.line);
                 prop_assert_eq!(reparsed.as_ref(), Some(&task));
             }
+        }
+    }
+
+    /// An alphabet that can spell every compatible notation. No `#`: a tag
+    /// stripped from inside an unparseable `@due( #x 2026-…)` payload can turn
+    /// it into a valid one, a known gap of the tag pass that predates these
+    /// notations and is out of scope here.
+    fn compat_taskish_text() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop::sample::select(vec![
+                "a",
+                " ",
+                "\t",
+                "@",
+                "(",
+                ")",
+                "[",
+                "]",
+                "::",
+                ":",
+                "-",
+                "due",
+                "done",
+                "scheduled",
+                "completion",
+                "cancelled",
+                "created",
+                "start",
+                "2026",
+                "10",
+                "31",
+                "2026-10-31",
+                "2026-13-01",
+                "T09:30",
+                " 09:30",
+                "📅",
+                "⏳",
+                "✅",
+                "❌",
+                "🛫",
+                "➕",
+                "🗓",
+                "\u{FE0F}",
+                "🔺",
+                "⏫",
+                "🔼",
+                "🔽",
+                "⏬",
+                "!!",
+                "SCHEDULED:",
+                "DEADLINE:",
+                "<",
+                ">",
+                "Fri",
+                "+1w",
+            ]),
+            0..40,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    proptest! {
+        /// The widened grammar is fed whatever is on disk, and it must not panic
+        /// on any of it — including planning lines after a task.
+        #[test]
+        fn compat_parsing_never_panics(s in compat_taskish_text(), t in compat_taskish_text()) {
+            let _ = parse_task_line(&format!("- [ ] {s}"), 1);
+            let _ = parse_planning_line(&s);
+            let _ = scan_source_tasks(&format!("- [ ] {s}\n{t}\n  {s}\n"));
+            let _ = set_status(&format!("- [ ] {s}"), TaskStatus::Done, Some(dt(2026, 8, 4, 14, 32)));
+            let _ = set_status(&format!("- [x] {s}"), TaskStatus::Open, Some(dt(2026, 8, 4, 14, 32)));
+        }
+
+        #[test]
+        fn planning_parsing_never_panics_on_arbitrary_input(s in ".*") {
+            let _ = parse_planning_line(&s);
+            let _ = scan_source_tasks(&format!("- [ ] x\n{s}"));
+        }
+
+        /// No recognised annotation, in any notation, survives into the
+        /// display text, and neither does a standalone priority emoji.
+        #[test]
+        fn display_text_keeps_no_recognised_compat_annotation(s in compat_taskish_text()) {
+            let line = format!("- [ ] {s}");
+            if let Some(task) = parse_task_line(&line, 1) {
+                for caps in INLINE_DATE.captures_iter(&task.text) {
+                    prop_assert!(
+                        recognise(&caps).is_none(),
+                        "recognised annotation survived in {:?}",
+                        task.text
+                    );
+                }
+                prop_assert!(
+                    !task.text.split_whitespace().any(|t| emoji_priority(t).is_some()),
+                    "standalone priority emoji survived in {:?}",
+                    task.text
+                );
+            }
+        }
+
+        /// Constructed annotations in every notation are recognised, stripped,
+        /// and the first one of a field in the line wins.
+        #[test]
+        fn constructed_compat_annotations_are_always_read(
+            body in "[a-z ]{0,16}",
+            month in 1u32..=12,
+            day_of in 1u32..=28,
+            due_style in 0usize..4,
+            scheduled_style in 0usize..3,
+        ) {
+            let date = format!("2026-{month:02}-{day_of:02}");
+            let due = [
+                format!("📅 {date}"),
+                format!("[due:: {date}]"),
+                format!("(due:: {date})"),
+                format!("@due({date})"),
+            ][due_style].clone();
+            let scheduled = [
+                format!("⏳ {date}"),
+                format!("[scheduled:: {date}]"),
+                format!("(scheduled:: {date})"),
+            ][scheduled_style].clone();
+            // A later due in another notation never displaces the first.
+            let line = format!("- [ ] {body} {due} {scheduled} 📅 2027-01-01 🔼");
+            let task = parse_task_line(&line, 1).expect("constructed line is a task");
+            prop_assert_eq!(task.due, Some(day(2026, month, day_of)));
+            prop_assert_eq!(task.scheduled, Some(day(2026, month, day_of)));
+            prop_assert_eq!(task.priority, TaskPriority::High);
+            prop_assert_eq!(task.text, body.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+
+        /// Completing and reopening restores the line exactly, in every
+        /// notation, and the stamp written is the line's own notation.
+        #[test]
+        fn stamping_round_trips_in_every_notation(
+            body in "[a-z ]{0,20}",
+            notation in 0usize..3,
+            terminator in prop::sample::select(vec!["", "\n", "\r\n"]),
+            reopen_as in prop::sample::select(vec![TaskStatus::Open, TaskStatus::Canceled]),
+        ) {
+            let seed = ["📅 2026-10-31", "[due:: 2026-10-31]", "@due(2026-10-31)"][notation];
+            let content = format!("- [ ] {body} {seed}");
+            let line = format!("{}{terminator}", content.trim_end());
+
+            let now = dt(2026, 8, 4, 14, 32);
+            let done = set_status(&line, TaskStatus::Done, Some(now)).expect("task line");
+            let expected_stamp = ["✅ 2026-08-04", "[completion:: 2026-08-04]", "@done(2026-08-04 14:32)"][notation];
+            prop_assert!(done.trim_end().ends_with(expected_stamp), "{:?}", done);
+            let reread = parse_task_line(&done, 1).and_then(|t| t.done);
+            prop_assert_eq!(reread.map(|d| d.date()), Some(now.date()));
+            // Idempotent.
+            prop_assert_eq!(&set_status(&done, TaskStatus::Done, Some(now)).expect("task"), &done);
+
+            let reopened = set_status(&done, reopen_as, Some(now)).expect("task line");
+            prop_assert_eq!(reopened, set_marker(&line, reopen_as).expect("task line"));
+        }
+
+        /// Constructed planning lines always parse, whatever their decoration.
+        #[test]
+        fn constructed_planning_lines_always_parse(
+            indent in "[ \t]{0,4}",
+            month in 1u32..=12,
+            day_of in 1u32..=28,
+            hour in 0u32..24,
+            minute in 0u32..60,
+            with_time in any::<bool>(),
+            repeater in prop::sample::select(vec!["", " +1w", " .+1d", " ++2m", " -3d"]),
+            keyword in prop::sample::select(vec!["SCHEDULED", "DEADLINE"]),
+        ) {
+            let time = if with_time { format!(" {hour:02}:{minute:02}") } else { String::new() };
+            let line = format!("{indent}{keyword}: <2026-{month:02}-{day_of:02} Fri{time}{repeater}>");
+            let planning = parse_planning_line(&line).expect("constructed planning line");
+            let expected = if with_time {
+                (dt(2026, month, day_of, hour, minute), true)
+            } else {
+                (day(2026, month, day_of), false)
+            };
+            let got = if keyword == "SCHEDULED" { planning.scheduled } else { planning.deadline };
+            prop_assert_eq!(got, Some(expected));
         }
     }
 }

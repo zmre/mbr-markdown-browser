@@ -16,6 +16,8 @@ import './mbr-find-bar.js'
 import './mbr-tasks.js'
 import './mbr-review.js'
 import './mbr-flashcards.js'
+import './mbr-calendar.js'
+import { setCalendarChunkImporter } from './calendar-chunk.js'
 import { setTasksChunkImporter } from './mbr-tasks.js'
 import { setReviewChunkImporter } from './mbr-review.js'
 import { setFlashcardsChunkImporter } from './mbr-flashcards.js'
@@ -157,6 +159,8 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
       return document.createElement('mbr-flashcards')
     },
   },
+  // The companion drawer (not docked: no `mbr-has-companion` body class).
+  { tag: 'mbr-calendar', create: () => document.createElement('mbr-calendar') },
 ]
 
 describe('isModalOpen', () => {
@@ -173,6 +177,8 @@ describe('isModalOpen', () => {
     setReviewChunkImporter(() => Promise.resolve({}))
     // <mbr-flashcards> likewise, for its deck chunk.
     setFlashcardsChunkImporter(() => Promise.resolve({}))
+    // <mbr-calendar> likewise, for the companion chunk.
+    setCalendarChunkImporter(() => Promise.resolve({ enhancePage: () => ({ entries: [], dispose: () => {} }) }))
     // <mbr-fuzzy-nav>.open() kicks off a links.json fetch; keep it well-formed
     // so the modal can render without the shared cache seeing garbage.
     vi.stubGlobal(
