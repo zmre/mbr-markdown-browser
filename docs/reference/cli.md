@@ -88,6 +88,11 @@ Supported media types are detected by file extension:
 | `--help` | Print help message | |
 | `--version` | Print version | |
 
+Flags keep winning after a running server reloads `.mbr/config.toml` (on save,
+or Cmd/Ctrl+R in the GUI): the reload re-applies the command line. `--host` and
+`--port` are fixed for the life of the process. See
+[Reloading Configuration](configuration.md#reloading-configuration).
+
 ### Boolean Flag Naming Convention
 
 mbr uses two patterns for boolean flags that disable behavior:

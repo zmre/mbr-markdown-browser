@@ -148,6 +148,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db4c94f57a570fce5d381be3289b3f79aef6332d72948fe82ab5772e423ccf92"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3163,6 +3172,7 @@ name = "mbr-server"
 version = "0.7.1"
 dependencies = [
  "aho-corasick",
+ "arc-swap",
  "axum",
  "chrono",
  "futures",

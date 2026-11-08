@@ -11356,3 +11356,112 @@ async fn test_periodic_detection_default_narrowed_and_off() {
     assert_html_contains(&day_page, r#"calendar: {"enabled":true"#);
     assert_html_contains(&day_page, "<mbr-calendar></mbr-calendar>");
 }
+
+// ============================================================================
+// Configuration reload (`mbr::live::LiveServer`)
+// ============================================================================
+
+/// A `LiveServer` the way `mbr -s` starts one: the repository's configuration
+/// with command-line-style overrides (the port, oembed off), read again the
+/// same way on every reload.
+async fn start_live_server(
+    root: PathBuf,
+) -> (
+    u16,
+    std::sync::Arc<mbr::live::LiveServer>,
+    tokio::task::JoinHandle<()>,
+) {
+    let port = find_available_port();
+    let read_config: mbr::live::ConfigReader = std::sync::Arc::new(move || {
+        let mut config = mbr::Config::read(&root)?;
+        config.port = port;
+        config.oembed_timeout_ms = 0;
+        Ok(config)
+    });
+    let config = read_config().expect("initial configuration");
+    let live = mbr::live::LiveServer::init(config, false, read_config).expect("init");
+    let serving = std::sync::Arc::clone(&live);
+    let handle = tokio::spawn(async move {
+        serving.start().await.expect("live server failed to start");
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    (port, live, handle)
+}
+
+async fn fetch_text(client: &reqwest::Client, port: u16, path: &str) -> String {
+    client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .send()
+        .await
+        .expect("request")
+        .text()
+        .await
+        .expect("body")
+}
+
+/// Cmd/Ctrl+R's path: an edited `.mbr/config.toml` is served on the same
+/// port after a reload, with no restart.
+#[tokio::test]
+async fn test_reloaded_config_is_served_on_the_same_port() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n");
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "title_prefix = \"Before | \"\n",
+    )
+    .unwrap();
+    let (port, live, _handle) = start_live_server(repo.path().to_path_buf()).await;
+    let client = mbr::http_client(Duration::from_secs(5));
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "Before | ");
+
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "title_prefix = \"After | \"\n",
+    )
+    .unwrap();
+    assert_eq!(live.reload().await, mbr::live::ReloadOutcome::Applied);
+
+    let html = fetch_text(&client, port, "/note/").await;
+    assert_html_contains(&html, "After | ");
+    assert_html_not_contains(&html, "Before | ");
+}
+
+/// Saving `.mbr/config.toml` changes what the running server serves, with no
+/// restart and no reload asked for: the watcher sees it. A broken save keeps
+/// the last good settings and shows the error on the page's error panel.
+#[cfg(feature = "watcher")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_saving_config_toml_changes_the_served_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n");
+    let config_path = repo.path().join(".mbr/config.toml");
+    std::fs::write(&config_path, "title_prefix = \"Before | \"\n").unwrap();
+    let (port, _live, _handle) = start_live_server(repo.path().to_path_buf()).await;
+    let client = mbr::http_client(Duration::from_secs(5));
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "Before | ");
+
+    // Saved until the watcher (started in the background) reports it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut html = String::new();
+    while tokio::time::Instant::now() < deadline {
+        std::fs::write(&config_path, "title_prefix = \"After | \"\n").unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        html = fetch_text(&client, port, "/note/").await;
+        if html.contains("After | ") {
+            break;
+        }
+    }
+    assert_html_contains(&html, "After | ");
+
+    std::fs::write(&config_path, "title_prefix = [broken\n").unwrap();
+    let mut errors = String::new();
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        errors = fetch_text(&client, port, "/note/errors.json").await;
+        if errors.contains("config_parse_error") {
+            break;
+        }
+    }
+    assert!(errors.contains("config_parse_error"), "{errors}");
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "After | ");
+}

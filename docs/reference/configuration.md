@@ -35,6 +35,38 @@ a table: `[slides] transition` is `MBR_SLIDES__TRANSITION`, `[calendar] enabled`
 is `MBR_CALENDAR__ENABLED`. Because of that, a
 `__` in an `MBR_*` name always means a nested key.
 
+## Reloading Configuration
+
+A running server (`mbr -s`) or GUI window applies changes to `.mbr/config.toml`
+without a restart:
+
+- **Saving the file** is enough: mbr watches it, reloads the configuration a
+  moment after the save, and every open page reloads itself once.
+- **Cmd+R / Ctrl+R** in the GUI reloads the configuration (and the `.mbr/`
+  templates), then the page on screen. When nothing changed it is just a page
+  reload.
+
+A reload reads the configuration the way the launch did: environment
+variables and command-line flags still win over the file (`mbr -s --theme
+blue` stays blue whatever `theme` says). The server keeps its port, so pages
+keep their browser storage (review notes, flashcard preferences). The
+repository is not rescanned unless a setting that decides which files are
+indexed changed (`ignore_dirs`, `ignore_globs`, `markdown_extensions`,
+`index_file`, `static_folder`, `tag_sources`, `relationship_types`,
+`[calendar]`); then it is rescanned in the background, as at startup.
+
+**A file that no longer loads is not applied.** mbr keeps serving the last
+configuration that loaded, logs a warning, and every page's error panel shows
+the problem under "Configuration ignored" until the file is fixed. (A broken
+file at launch still stops `mbr` from starting.)
+
+**Needs a relaunch:** `host`, `port` and `gui_menu_bar` (logged when they
+change), and the repository root itself (creating a `.mbr/` folder higher up
+does not move a running server). Environment variables are read from the
+process, so a changed `MBR_*` variable needs a relaunch too. A build without
+the `watcher` feature (every shipped build has it) does not notice a save;
+there it takes Cmd+R or a relaunch.
+
 ## Configuration File
 
 Create `.mbr/config.toml` in your markdown repository:

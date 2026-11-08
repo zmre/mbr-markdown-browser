@@ -42,6 +42,9 @@ mbr-server = { path = "crates/mbr-server", version = "=0.7.1" }
 mbr-ssg = { path = "crates/mbr-ssg", version = "=0.7.1" }
 
 aho-corasick = "1.1"
+# Lock-free swap of the live server behind one listener when the
+# configuration is reloaded (mbr-server `live.rs`): one atomic load per request.
+arc-swap = "1.7"
 # Editing feature: password/token hashing for the edit endpoint
 argon2 = "0.6"
 axum = { version = "0.8", features = ["http1", "http2", "json", "tokio", "tracing", "ws"] }

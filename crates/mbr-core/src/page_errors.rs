@@ -70,10 +70,11 @@ pub enum PageError {
     /// The YAML frontmatter block failed to parse, so the entire frontmatter
     /// (including otherwise-valid fields) was discarded.
     FrontmatterParseError { message: String },
-    /// The repository's `.mbr/config.toml` could not be loaded, so every page
-    /// is rendered with the default configuration. Repository-wide, so it is
-    /// reported on every page. Only an embedder that falls back rather than
-    /// failing (the iOS app) produces it; the desktop refuses to start.
+    /// The repository's `.mbr/config.toml` could not be loaded, so its
+    /// contents are not in effect: the iOS app renders with the defaults, a
+    /// desktop server that reloaded it keeps the last configuration that
+    /// loaded (`mbr_server::live`). Repository-wide, so it is reported on
+    /// every page. A desktop launch with a broken file refuses to start.
     ConfigParseError { message: String },
     /// Two or more notes form a parent/child cycle, which is impossible in a real
     /// family tree and makes the genealogy chart unrenderable.

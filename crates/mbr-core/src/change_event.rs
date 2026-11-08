@@ -43,6 +43,11 @@ pub enum ChangeEventType {
     Modified,
     Created,
     Deleted,
+    /// Not a file change: the server applied a changed `.mbr/config.toml`
+    /// (or a `config.toml` that no longer loads), so every open page is out
+    /// of date. `relative_path` is `.mbr/config.toml`. The index ignores it;
+    /// `<mbr-live-reload>` reloads on it. Sent by `mbr_server::live`.
+    Reloaded,
 }
 
 #[cfg(test)]

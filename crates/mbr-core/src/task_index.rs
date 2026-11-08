@@ -333,6 +333,8 @@ impl TaskIndex {
         }
 
         match event {
+            // A configuration reload, not a file change.
+            ChangeEventType::Reloaded => {}
             ChangeEventType::Deleted => {
                 self.files.pin().remove(abs_path);
             }

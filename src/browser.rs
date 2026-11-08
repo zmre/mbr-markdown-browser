@@ -6,7 +6,7 @@ use crate::external_open::{
     SiteOrigin, apply_decision, decide_without_frame_info, mark_gui_active, open_external,
     parse_ipc_open_request,
 };
-use crate::server::{Server, ServerConfig};
+use crate::live::LiveServer;
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
@@ -80,8 +80,15 @@ enum UserEvent {
     /// which server is current — can abort the one being replaced.
     ServerReady {
         handle: JoinHandle<()>,
+        server: Arc<LiveServer>,
         url: String,
     },
+    /// Cmd/Ctrl+R: reload the configuration, then the page
+    /// ([`Shortcut::Reload`]).
+    Reload,
+    /// The configuration reload asked for by [`UserEvent::Reload`] is done
+    /// (applied, unchanged or refused): reload the page on screen.
+    ReloadPage,
     /// A server asked for by `Open…` never came up. The old one is still
     /// running, so the window keeps working; `path` is only for the message.
     ServerFailed {
@@ -93,6 +100,8 @@ enum UserEvent {
 pub struct BrowserContext {
     pub url: String,
     pub server_handle: JoinHandle<()>,
+    /// The server `server_handle` runs, for reloading its configuration.
+    pub server: Arc<LiveServer>,
     pub config: Config,
     pub tokio_runtime: tokio::runtime::Handle,
 }
@@ -527,14 +536,18 @@ fn spawn_open_picker(proxy: EventLoopProxy<UserEvent>) {
 /// the same directory/media-viewer/markdown-page URL `main.rs` resolves for
 /// the initial launch, so a picked file opens directly rather than dropping
 /// the user at the repository root they'd have to navigate away from.
-async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), BrowserError> {
+async fn start_server_for(path: PathBuf) -> Result<StartedServer, BrowserError> {
     let absolute_path = path.canonicalize().map_err(|e| {
         tracing::error!("Failed to canonicalize path: {e}");
         BrowserError::ServerStartFailed
     })?;
 
     // The GUI's defaults (editing on), like the first folder `main` opened.
-    let config = Config::read_for_gui(&absolute_path).map_err(|e| {
+    // Read the same way again on every configuration reload.
+    let reader_path = absolute_path.clone();
+    let read_config: crate::live::ConfigReader =
+        Arc::new(move || Config::read_for_gui(&reader_path));
+    let config = read_config().map_err(|e| {
         tracing::error!("Failed to read config: {e}");
         BrowserError::ServerStartFailed
     })?;
@@ -547,23 +560,17 @@ async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), Bro
     // to open the folder at all.
     let relative_path = pathdiff::diff_paths(&absolute_path, &config.root_dir).unwrap_or_default();
 
+    let server = LiveServer::init(config.clone(), true, read_config).map_err(|e| {
+        tracing::error!("Server init failed: {e}");
+        BrowserError::ServerStartFailed
+    })?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
-
-    let config_copy = config.clone();
+    let serving = Arc::clone(&server);
     let handle = tokio::spawn(async move {
-        let server_config = ServerConfig::from(&config_copy).with_gui_mode(true);
-        match Server::init(server_config) {
-            Ok(mut s) => {
-                if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
-                    tracing::error!("Server error: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::error!("Server init failed: {e}");
-                // Dropping the sender is what tells the awaiter below that this
-                // will never be ready; without it that await would hang forever.
-                drop(ready_tx);
-            }
+        // A failed bind drops `ready_tx`, which is what tells the awaiter
+        // below that this will never be ready.
+        if let Err(e) = serving.start_with_port_retry(Some(ready_tx), 10).await {
+            tracing::error!("Server error: {e}");
         }
     });
 
@@ -587,7 +594,33 @@ async fn start_server_for(path: PathBuf) -> Result<(JoinHandle<()>, String), Bro
         BrowserError::ServerStartFailed
     })?;
 
-    Ok((handle, url.to_string()))
+    Ok(StartedServer {
+        handle,
+        server,
+        url: url.to_string(),
+    })
+}
+
+/// A server [`start_server_for`] brought up: the task serving it, the server
+/// (for reloading its configuration) and the URL to open.
+struct StartedServer {
+    handle: JoinHandle<()>,
+    server: Arc<LiveServer>,
+    url: String,
+}
+
+/// Reloads the page on screen — not the URL the window was opened on, which
+/// may be pages ago. Falls back to `fallback` when the webview has no URL to
+/// give (no page yet).
+fn reload_page(webview: &wry::WebView, fallback: &str) {
+    let url = webview
+        .url()
+        .ok()
+        .filter(|url| !url.is_empty() && url != "about:blank")
+        .unwrap_or_else(|| fallback.to_owned());
+    if let Err(e) = webview.load_url(&url) {
+        tracing::warn!("Could not reload {url}: {e}");
+    }
 }
 
 /// Whether the platform shows the menu bar by default under
@@ -708,7 +741,6 @@ fn shortcut_for_menu_id(id: &muda::MenuId, ids: &ShortcutIds) -> Option<Shortcut
 fn perform_shortcut(
     shortcut: Shortcut,
     webview: &wry::WebView,
-    current_url: &str,
     proxy: &EventLoopProxy<UserEvent>,
     // Read by the `Quit` arm alone, which is Linux-only: everywhere else Quit and
     // Close Window are `PredefinedMenuItem`s the platform activates itself, so
@@ -723,8 +755,10 @@ fn perform_shortcut(
             spawn_open_picker(proxy.clone());
         }
         Shortcut::Reload => {
+            // The configuration first, off the event loop; the page follows
+            // as `UserEvent::ReloadPage`.
             tracing::debug!("Reload requested");
-            let _ = webview.load_url(current_url);
+            let _ = proxy.send_event(UserEvent::Reload);
         }
         Shortcut::Print => {
             tracing::debug!("Print requested");
@@ -926,6 +960,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         menu_bar_setting,
         initial_url,
         initial_server_handle,
+        initial_server,
         tokio_runtime,
         mut awaiting_open_decision,
     ) = match launch {
@@ -933,6 +968,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
             ctx.config.gui_menu_bar,
             ctx.url,
             ctx.server_handle,
+            Some(ctx.server),
             ctx.tokio_runtime,
             false,
         ),
@@ -943,6 +979,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 Config::default().gui_menu_bar,
                 "about:blank".to_string(),
                 placeholder_handle,
+                None,
                 tokio_runtime,
                 true,
             )
@@ -1105,6 +1142,9 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
 
     // Mutable state for server management
     let mut server_handle = initial_server_handle;
+    // The server `server_handle` runs, for Cmd/Ctrl+R's configuration reload.
+    // `None` only before a deferred launch has opened anything.
+    let mut live_server: Option<Arc<LiveServer>> = initial_server;
     let mut current_url = initial_url;
 
     // Create proxy for the open picker
@@ -1118,7 +1158,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 // `PredefinedMenuItem` events (quit, close, clipboard, about)
                 // are activated by the platform and never arrive here.
                 if let Some(shortcut) = shortcut_for_menu_id(&menu_event.id, &shortcut_ids) {
-                    perform_shortcut(shortcut, &webview, &current_url, &event_proxy, control_flow);
+                    perform_shortcut(shortcut, &webview, &event_proxy, control_flow);
                 }
             }
             Event::UserEvent(UserEvent::PathSelected(new_path)) => {
@@ -1136,7 +1176,15 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 let proxy = event_proxy.clone();
                 tokio_runtime.spawn(async move {
                     let event = match start_server_for(new_path.clone()).await {
-                        Ok((handle, url)) => UserEvent::ServerReady { handle, url },
+                        Ok(StartedServer {
+                            handle,
+                            server,
+                            url,
+                        }) => UserEvent::ServerReady {
+                            handle,
+                            server,
+                            url,
+                        },
                         Err(e) => {
                             tracing::error!("Failed to open {}: {e}", new_path.display());
                             UserEvent::ServerFailed { path: new_path }
@@ -1147,9 +1195,14 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                     let _ = proxy.send_event(event);
                 });
             }
-            Event::UserEvent(UserEvent::ServerReady { handle, url }) => {
+            Event::UserEvent(UserEvent::ServerReady {
+                handle,
+                server,
+                url,
+            }) => {
                 server_handle.abort();
                 server_handle = handle;
+                live_server = Some(server);
                 current_url = url;
                 // The new server rarely lands on the old port, and the
                 // navigation handler compares against this.
@@ -1157,6 +1210,24 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 tracing::info!("Server restarted at {}", current_url);
                 let _ = webview.load_url(&current_url);
             }
+            Event::UserEvent(UserEvent::Reload) => match &live_server {
+                // Re-read `.mbr/config.toml` (and templates) on the runtime,
+                // never on the event loop; an unchanged configuration makes
+                // this a few milliseconds, so the page reload still feels
+                // instant. The page follows whatever the outcome: a refused
+                // configuration shows on the page's error panel.
+                Some(server) => {
+                    let server = Arc::clone(server);
+                    let proxy = event_proxy.clone();
+                    tokio_runtime.spawn(async move {
+                        let outcome = server.reload().await;
+                        tracing::debug!("Configuration reload: {outcome:?}");
+                        let _ = proxy.send_event(UserEvent::ReloadPage);
+                    });
+                }
+                None => reload_page(&webview, &current_url),
+            },
+            Event::UserEvent(UserEvent::ReloadPage) => reload_page(&webview, &current_url),
             Event::UserEvent(UserEvent::ServerFailed { path }) => {
                 // Off-thread because a modal dialog spins its own run loop, and
                 // this one is the event loop it would spin inside.
@@ -1308,7 +1379,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 // The guard proved this is `Some`; the table is consulted twice
                 // rather than restructured because a match guard cannot bind.
                 if let Some(shortcut) = linux_shortcut_for(&key_event.logical_key, modifiers) {
-                    perform_shortcut(shortcut, &webview, &current_url, &event_proxy, control_flow);
+                    perform_shortcut(shortcut, &webview, &event_proxy, control_flow);
                 }
             }
             // History navigation off Linux, where the menu bar is always present
@@ -1326,7 +1397,6 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                         perform_shortcut(
                             Shortcut::Back,
                             &webview,
-                            &current_url,
                             &event_proxy,
                             control_flow,
                         );
@@ -1335,7 +1405,6 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                         perform_shortcut(
                             Shortcut::Forward,
                             &webview,
-                            &current_url,
                             &event_proxy,
                             control_flow,
                         );
@@ -1408,9 +1477,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("index.md"), "# hi\n").expect("write");
 
-        let (handle, url) = super::start_server_for(dir.path().to_path_buf())
-            .await
-            .expect("server should come up for a plain markdown folder");
+        let super::StartedServer { handle, url, .. } =
+            super::start_server_for(dir.path().to_path_buf())
+                .await
+                .expect("server should come up for a plain markdown folder");
 
         assert!(
             url.starts_with("http://"),

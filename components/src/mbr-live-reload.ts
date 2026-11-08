@@ -10,7 +10,12 @@ export function isSocketReachable(protocol: string): boolean {
 interface FileChangeEvent {
   path: string;
   relative_path: string;
-  event: 'modified' | 'created' | 'deleted';
+  /**
+   * `reloaded` is not a file change: the server applied a changed
+   * `.mbr/config.toml` (or now reports one that does not load), so every
+   * page is out of date.
+   */
+  event: 'modified' | 'created' | 'deleted' | 'reloaded';
 }
 
 /**
@@ -241,6 +246,14 @@ export class MbrLiveReloadElement extends LitElement {
     // the page (the calendar's task markers) goes stale on writes from
     // anywhere, this page's own included.
     announceFileChanged(changedPath);
+
+    // The server reloaded its configuration: every page renders differently
+    // now. The raw `.mbr/config.toml` event before it reloads nothing (see
+    // `_shouldReloadForFile`), so this is the one reload a save causes.
+    if (event.event === 'reloaded') {
+      this._scheduleReload(changedPath);
+      return;
+    }
 
     // A change this page made and already drew for itself: every task write
     // patches the document in place, so reloading for it would cost the edit

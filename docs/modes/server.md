@@ -31,6 +31,9 @@ This works for:
 - YAML frontmatter changes
 - Template modifications (in `.mbr/`)
 - CSS/style changes
+- `.mbr/config.toml`: the server applies the new settings on the same port
+  without a restart, then every open page reloads (see
+  [Reloading Configuration](../reference/configuration.md#reloading-configuration))
 
 ### Full-Text Search
 
