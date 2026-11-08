@@ -79,7 +79,13 @@ function rulesFor(selector: string): Rule[] {
 
 function declaration(rule: Rule, property: string): string | undefined {
   const match = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`).exec(rule.body)
-  return match?.[1].trim()
+  // Formatter-proof: a value wrapped over several lines (`calc(\n  a * b\n)`)
+  // reads the same as the one-line spelling.
+  return match?.[1]
+    .replace(/\s+/g, ' ')
+    .replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')')
+    .trim()
 }
 
 const NARROW = 'screen and (max-width: 600px)'

@@ -1073,6 +1073,14 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       margin: 0;
     }
 
+    .calendar-section {
+      --mbr-cal-indent: 1.25rem;
+      --mbr-cal-sub-indent: 0.75rem;
+      --mbr-cal-row-y: 0.35rem;
+      --mbr-cal-color: var(--pico-secondary, rgb(93, 107, 137));
+      --mbr-cal-hover-color: var(--pico-primary, #0d6efd);
+    }
+
     .section-header a {
       color: inherit;
       text-decoration: none;

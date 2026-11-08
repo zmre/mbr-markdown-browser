@@ -108,10 +108,18 @@
   --mbr-cal-type-5: #00897b;
   --mbr-cal-type-6: #d81b60;
   --mbr-cal-type-7: #c49000;
-  --mbr-agenda-chip-bg: color-mix(in srgb, var(--pico-primary) 13%, transparent);
+  --mbr-agenda-chip-bg: color-mix(
+    in srgb,
+    var(--pico-primary) 13%,
+    transparent
+  );
   --mbr-agenda-chip-color: var(--pico-primary);
   --mbr-agenda-now-color: var(--pico-primary);
-  --mbr-agenda-next-color: color-mix(in srgb, var(--pico-primary) 45%, transparent);
+  --mbr-agenda-next-color: color-mix(
+    in srgb,
+    var(--pico-primary) 45%,
+    transparent
+  );
 
   /* Review notes (r / R). One accent per note type, matching the six in
    * components/src/review/types.ts. The panel restates its rules against these
@@ -226,7 +234,7 @@ main > section[data-theme="dark"] {
   padding: var(--pico-block-spacing-vertical) 0;
 }
 
-main h1 + h2 {
+.subtitle main h1 + h2 {
   margin-top: -0.8em;
   padding-top: 0;
 }
@@ -2957,7 +2965,9 @@ main .mbr-fc-pie-unreviewed {
 }
 
 html:not(.mbr-companion-hidden) body.mbr-has-companion {
-  --mbr-inset-right: calc(var(--mbr-companion-docked, 0) * var(--mbr-companion-width));
+  --mbr-inset-right: calc(
+    var(--mbr-companion-docked, 0) * var(--mbr-companion-width)
+  );
   padding-right: var(--mbr-inset-right);
 }
 

@@ -27,7 +27,7 @@ export interface CalendarRow {
 
 export interface CalendarSectionModel {
   readonly rows: readonly CalendarRow[]
-  /** The last seven day notes up to today, newest first. */
+  /** The last {@link RECENT_DAILY} day notes up to today, newest first. */
   readonly recent: readonly { readonly label: string; readonly url: string }[]
 }
 
@@ -40,7 +40,7 @@ const ROW_LABELS: Readonly<Record<PeriodKind, string>> = {
 }
 
 /** Recent daily notes listed. */
-export const RECENT_DAILY = 7
+export const RECENT_DAILY = 3
 
 /** The last model built per index: the widgets re-render often, and the inputs rarely change. */
 const modelCache = new WeakMap<PeriodicIndex, { today: DateKey; locale: string; model: CalendarSectionModel | null }>()
@@ -131,7 +131,15 @@ export function renderCalendarSection(model: CalendarSectionModel, options: Cale
   return html`<ul class="mbr-cal-rows">${model.rows.map(row)}${recent}${open}</ul>`
 }
 
-/** Styles for {@link renderCalendarSection}, for each widget's shadow root. */
+/**
+ * Styles for {@link renderCalendarSection}, for each widget's shadow root.
+ * The host lines the rows up with its own by setting, on the section's
+ * container: `--mbr-cal-indent` (left inset of a row's text),
+ * `--mbr-cal-sub-indent` (extra inset of a recent day), `--mbr-cal-row-y`
+ * (a row's vertical padding), `--mbr-cal-color` / `--mbr-cal-hover-color`
+ * (link colours). "Calendar…" pulls itself left by its own padding so its
+ * icon starts where the row text does.
+ */
 export const CALENDAR_SECTION_CSS = css`
   .mbr-cal-rows,
   .mbr-cal-rows ul {
@@ -141,19 +149,22 @@ export const CALENDAR_SECTION_CSS = css`
   }
   .mbr-cal-rows li {
     margin: 0;
-    padding: 0.15rem 0.75rem;
+    padding: var(--mbr-cal-row-y, 0.25rem) 0.75rem var(--mbr-cal-row-y, 0.25rem) var(--mbr-cal-indent, 1rem);
     list-style: none;
     font-size: 0.875rem;
   }
+  .mbr-cal-rows li.mbr-cal-recent {
+    padding-bottom: 0;
+  }
   .mbr-cal-rows ul li {
-    padding: 0.1rem 0 0.1rem 0.6rem;
+    padding: var(--mbr-cal-row-y, 0.25rem) 0 var(--mbr-cal-row-y, 0.25rem) var(--mbr-cal-sub-indent, 0.75rem);
   }
   .mbr-cal-rows a {
-    color: var(--pico-color);
+    color: var(--mbr-cal-color, var(--pico-color));
     text-decoration: none;
   }
   .mbr-cal-rows a:hover {
-    color: var(--pico-primary);
+    color: var(--mbr-cal-hover-color, var(--pico-primary));
     text-decoration: underline;
   }
   .mbr-cal-rows a.mbr-cal-latest,
@@ -161,11 +172,14 @@ export const CALENDAR_SECTION_CSS = css`
     font-size: 0.8rem;
     color: var(--pico-muted-color);
   }
+  .mbr-cal-sub {
+    display: block;
+  }
   .mbr-cal-open {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    margin: 0.15rem 0 0;
+    margin: 0 0 0 -0.4rem;
     padding: 0.2rem 0.4rem;
     border: 0;
     border-radius: 6px;

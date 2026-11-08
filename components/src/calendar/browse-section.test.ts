@@ -30,11 +30,11 @@ describe('calendarSectionModel', () => {
     ])
   })
 
-  it('lists the last seven day notes up to today, newest first', () => {
+  it('lists the last three day notes up to today, newest first', () => {
     const days = Array.from({ length: 10 }, (_, i) => p(`2026-10-${String(20 + i).padStart(2, '0')}`))
     const model = calendarSectionModel(buildPeriodicIndex([...days, p('2026-11-02')]), '2026-10-28', 'en-US')!
     expect(model.recent.map((r) => r.url)).toEqual(
-      ['28', '27', '26', '25', '24', '23', '22'].map((d) => `/n/2026-10-${d}/`)
+      ['28', '27', '26'].map((d) => `/n/2026-10-${d}/`)
     )
     expect(model.recent[0].label).toBe('Wed, Oct 28')
   })
