@@ -218,7 +218,7 @@ describe('the floating action button position', () => {
 
   it('clears the home indicator and stacks above a floating play button', () => {
     expect(css()).toMatch(
-      /\.review-fab \{[^}]*right: calc\(1rem \+ env\(safe-area-inset-right, 0px\)\);[^}]*bottom: calc\(1rem \+ env\(safe-area-inset-bottom, 0px\) \+ var\(--mbr-fab-stack-offset, 0px\)\)/
+      /\.review-fab \{[^}]*right: calc\(1rem \+ var\(--mbr-inset-right, 0px\) \+ env\(safe-area-inset-right, 0px\)\);[^}]*bottom: calc\(1rem \+ env\(safe-area-inset-bottom, 0px\) \+ var\(--mbr-fab-stack-offset, 0px\)\)/
     )
   })
 

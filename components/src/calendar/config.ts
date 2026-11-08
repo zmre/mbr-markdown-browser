@@ -3,13 +3,11 @@
  * (`window.__MBR_CONFIG__.calendar`, from `crates/mbr-core/src/calendar.rs`'s
  * `CalendarConfig`).
  *
- * Pure, with type-only imports: `shared.ts`'s `getCalendarConfig()` reads the
+ * Pure, no imports: `shared.ts`'s `getCalendarConfig()` reads the
  * page's value through `calendarConfigFrom`, and a lazy chunk receives the
  * result as a property. A missing or malformed value (a custom `_head.html`
  * predating the option, an error page) yields the defaults, key by key.
  */
-
-import { PERIOD_KINDS, type PeriodKind } from './periodic.js'
 
 export type WeekStart = 'locale' | 'monday' | 'sunday' | 'saturday'
 export type CompanionMode = 'auto' | 'on-demand' | 'off'
@@ -17,10 +15,6 @@ export type CompanionMode = 'auto' | 'on-demand' | 'off'
 export interface CalendarConfig {
   /** Master switch for periodic navigation, the keys and the calendar UI. */
   readonly enabled: boolean
-  /** Kinds that make a note periodic (already applied by the server). */
-  readonly periods: readonly PeriodKind[]
-  /** Folders periodic detection is restricted to (already applied). */
-  readonly periodicFolders: readonly string[]
   /** Frontmatter fields that date a note (already applied). */
   readonly dateFields: readonly string[]
   /** First column of every grid. */
@@ -35,8 +29,6 @@ export interface CalendarConfig {
 
 export const DEFAULT_CALENDAR_CONFIG: CalendarConfig = Object.freeze({
   enabled: true,
-  periods: PERIOD_KINDS,
-  periodicFolders: [],
   dateFields: ['date', 'created'],
   weekStart: 'locale',
   weekNumbers: null,
@@ -44,23 +36,21 @@ export const DEFAULT_CALENDAR_CONFIG: CalendarConfig = Object.freeze({
   agendaChips: true,
 })
 
-const WEEK_STARTS: readonly WeekStart[] = ['locale', 'monday', 'sunday', 'saturday']
+export const WEEK_STARTS: readonly WeekStart[] = ['locale', 'monday', 'sunday', 'saturday']
 const COMPANION_MODES: readonly CompanionMode[] = ['auto', 'on-demand', 'off']
 
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string')
+
+/** `v` when it is one of `allowed`, else `fallback`. */
+export const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+  typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback
 
 /** Validates the page's raw snake_case object, defaulting key by key. */
 export function calendarConfigFrom(raw: unknown): CalendarConfig {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const d = DEFAULT_CALENDAR_CONFIG
-  const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
-    typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback
   return {
     enabled: typeof r.enabled === 'boolean' ? r.enabled : d.enabled,
-    periods: isStringArray(r.periods)
-      ? r.periods.filter((p): p is PeriodKind => (PERIOD_KINDS as readonly string[]).includes(p))
-      : d.periods,
-    periodicFolders: isStringArray(r.periodic_folders) ? r.periodic_folders : d.periodicFolders,
     dateFields: isStringArray(r.date_fields) ? r.date_fields : d.dateFields,
     weekStart: oneOf(r.week_start, WEEK_STARTS, d.weekStart),
     weekNumbers: typeof r.week_numbers === 'boolean' ? r.week_numbers : null,

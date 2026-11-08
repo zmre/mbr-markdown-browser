@@ -187,7 +187,8 @@ describe('FAB_CSS', () => {
   const text = FAB_CSS.cssText
 
   it('clears the safe-area insets', () => {
-    expect(text).toContain('right: calc(1rem + env(safe-area-inset-right, 0px))')
+    // Clear of the docked calendar column too (theme.css's --mbr-inset-right).
+    expect(text).toContain('right: calc(1rem + var(--mbr-inset-right, 0px) + env(safe-area-inset-right, 0px))')
     expect(text).toContain('bottom: calc(1rem + env(safe-area-inset-bottom, 0px))')
   })
 

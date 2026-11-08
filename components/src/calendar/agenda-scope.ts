@@ -28,16 +28,21 @@ export const AGENDA_NESTING_SELECTOR = `${MARKDOWN_NESTING_SELECTOR}, dl, table,
  */
 export const AGENDA_PREFILTER = /^\s*(?:(?:at|from)\s+)?(?:\d{1,2}[:.]\d{2}|\d{1,2}\s*[ap]\.?m|noon|midnight)/i
 
-/** Every `<li>` of every top-level `ul` / `ol` under `root`, in document order. */
-export function topLevelListItems(root: ParentNode): HTMLLIElement[] {
-  const items: HTMLLIElement[] = []
-  for (const list of Array.from(root.querySelectorAll('ul, ol'))) {
+/** Every `<li>` of every top-level `ul` / `ol` under `root`, in document order, lazily. */
+export function* eachTopLevelListItem(root: ParentNode): Generator<HTMLLIElement> {
+  const lists = root.querySelectorAll('ul, ol')
+  for (let i = 0; i < lists.length; i++) {
+    const list = lists[i]
     if (!isTopLevel(list, AGENDA_NESTING_SELECTOR)) continue
-    for (const child of Array.from(list.children)) {
-      if (child.tagName === 'LI') items.push(child as HTMLLIElement)
+    for (let child = list.firstElementChild; child; child = child.nextElementSibling) {
+      if (child.tagName === 'LI') yield child as HTMLLIElement
     }
   }
-  return items
+}
+
+/** {@link eachTopLevelListItem}, collected. */
+export function topLevelListItems(root: ParentNode): HTMLLIElement[] {
+  return [...eachTopLevelListItem(root)]
 }
 
 /** How much of an item's start the prefilter needs to see. */
@@ -57,7 +62,14 @@ function itemStart(li: Element): string {
   return text
 }
 
-/** True when some top-level item under `root` starts with something time-like. */
+/**
+ * True when some top-level item under `root` starts with something time-like.
+ * Stops at the first one: a long note with an agenda near the top costs a
+ * few items, not the whole document.
+ */
 export function mayHaveAgenda(root: ParentNode): boolean {
-  return topLevelListItems(root).some((li) => AGENDA_PREFILTER.test(itemStart(li)))
+  for (const li of eachTopLevelListItem(root)) {
+    if (AGENDA_PREFILTER.test(itemStart(li))) return true
+  }
+  return false
 }

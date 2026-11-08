@@ -1,10 +1,13 @@
 /**
  * Timeline layout for the day agenda (design/calendar.md §4.3): the visible
- * hour range and the side-by-side columns of overlapping entries.
+ * hour range, the side-by-side columns of overlapping entries, and the whole
+ * drawn timeline ({@link timelineModel}: hour labels, block geometry and
+ * labels, the screen-reader lines) that the companion renders with Lit and
+ * the QuickLook preview with plain DOM.
  *
- * Pure, no imports: the companion's timeline today, and any later day or week
- * view that draws timed blocks.
+ * Pure, importing only `month-grid.ts`'s clock formatter.
  */
+import { formatClock, formatSpan } from './month-grid.js'
 
 /** Something placed on the timeline: minutes after midnight. */
 export interface Timed {
@@ -96,4 +99,84 @@ export function layoutAgenda<T extends Timed>(items: readonly T[]): LaidOut<T>[]
   }
   flush()
   return out
+}
+
+/** Pixels per minute on a timeline (40px an hour). */
+export const PX_PER_MINUTE = 40 / 60
+/** Shortest drawn block, so a 5-minute entry still has a readable line. */
+export const MIN_BLOCK_PX = 18
+
+/** What a timeline draws per entry. */
+export interface TimelineItem extends Timed {
+  readonly title: string
+  readonly details: readonly string[]
+  readonly task?: string
+}
+
+/**
+ * One block, placed: its `top` and `height` (px) and its column (`column` of
+ * `columns`, which each renderer's CSS turns into `left` / `width` right of
+ * its hour gutter, through {@link blockStyle}), plus its texts.
+ */
+export interface TimelineBlock<T extends TimelineItem> {
+  readonly item: T
+  readonly open: boolean
+  readonly top: number
+  readonly height: number
+  readonly column: number
+  readonly columns: number
+  /** The start time shown in the block. */
+  readonly time: string
+  /** The full text: hover title and accessible name. */
+  readonly label: string
+}
+
+/** A day's timeline, ready to draw. */
+export interface Timeline<T extends TimelineItem> {
+  /** The visible minutes ({@link visibleRange}). */
+  readonly from: number
+  readonly to: number
+  readonly height: number
+  readonly hours: readonly { readonly top: number; readonly label: string }[]
+  readonly blocks: readonly TimelineBlock<T>[]
+  /** One line per entry, in the entries' order, for the screen-reader list. */
+  readonly spoken: readonly string[]
+}
+
+/**
+ * A block's inline style: its `top` and `height`, and its column as `--col` /
+ * `--cols`, which the renderer's stylesheet turns into `left` and `width`
+ * (`left: calc(gutter + (100% - gutter) * var(--col) / var(--cols))`).
+ */
+export function blockStyle(b: TimelineBlock<TimelineItem>): string {
+  return `top:${b.top}px;height:${b.height}px;--col:${b.column};--cols:${b.columns}`
+}
+
+/** Everything a timeline draws for `entries` in `locale`. */
+export function timelineModel<T extends TimelineItem>(entries: readonly T[], locale: string): Timeline<T> {
+  const { from, to } = visibleRange(entries)
+  const y = (m: number): number => (m - from) * PX_PER_MINUTE
+  const hours = []
+  for (let h = from; h <= to; h += 60) {
+    hours.push({ top: y(h), label: h < 24 * 60 ? formatClock(h, locale).replace(/:00(?=\D|$)/, '') : '' })
+  }
+  const blocks = layoutAgenda(entries).map((b): TimelineBlock<T> => ({
+    item: b.item,
+    open: b.open,
+    top: y(b.start),
+    height: Math.max(y(b.end) - y(b.start), MIN_BLOCK_PX),
+    column: b.column,
+    columns: b.columns,
+    time: formatClock(b.item.start, locale),
+    label: [formatSpan(b.item, locale), b.item.title, ...b.item.details].join(' · '),
+  }))
+  const spoken = entries.map(
+    (e) => `${formatSpan(e, locale)} ${e.title}${e.task ? ` (${e.task})` : ''}${e.details.length ? `: ${e.details.join('; ')}` : ''}`
+  )
+  return { from, to, height: y(to), hours, blocks, spoken }
+}
+
+/** The current-time line's `top` on a timeline, or `null` when `minutes` is not on it. */
+export function nowLineTop(timeline: { readonly from: number; readonly to: number }, minutes: number | null): number | null {
+  return minutes === null || minutes < timeline.from || minutes > timeline.to ? null : (minutes - timeline.from) * PX_PER_MINUTE
 }

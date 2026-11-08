@@ -483,7 +483,7 @@ async fn run() -> Result<(), MbrError> {
                 title_suffix: &config.title_suffix,
                 root_dir: None,
                 slides: &config.slides,
-                calendar: &config.calendar,
+                calendar: &mbr::page_context::CalendarChrome::new(&config.calendar),
             },
             &mbr::page_context::UrlMode::Absolute,
         );

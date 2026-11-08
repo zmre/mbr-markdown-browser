@@ -22,8 +22,7 @@
  *   {@link APP_ACTIONS} through the same public method its own button and
  *   shortcut use (`open()`, `openNew()` for `new`, `<mbr-fuzzy-nav>`'s
  *   `open(tab)` for `toc`/`links-out`/`links-in`, `<mbr-calendar>`'s
- *   `openOverlay`/`toggleCompanion` and `d`'s `openTodayDailyNote` for
- *   `calendar`/`companion`/`today`), so the app never
+ *   `open(kind)` for `calendar`/`companion`/`today`), so the app never
  *   re-implements a feature.
  *
  * The app marks the page as embedded with a user script injected at document
@@ -38,12 +37,14 @@
  * source file, new only with editing on, tasks only with the task browser enabled, flashcards and slides
  * only on a deck, contents only with headings, links only on a note page;
  * the calendar's `today` only once the site index shows a day note, `calendar`
- * with the calendar on, `companion` unless it is docked or off), so the app's
- * menu shows exactly what works.
+ * with the calendar on, `companion` unless it is docked or off — all three
+ * read from `<mbr-calendar>`'s own gates), so the app's menu shows exactly
+ * what works.
  */
-import { getCalendarConfig, getCanonicalPath, isTasksEnabled } from './shared.js';
+import { getCalendarConfig, isTasksEnabled } from './shared.js';
 // Main bundle, like this module; it memoizes the periodic index off siteNav.
-import { openTodayDailyNote, periodicIndex } from './calendar/periodic-nav.js';
+import { periodicIndex } from './calendar/periodic-nav.js';
+import type { MbrCalendarElement } from './mbr-calendar.js';
 import { isDeckPage } from './mbr-flashcards.js';
 // mbr-editor imports only shared/mbr-keys/edit-token (no cycle) and is in the
 // main bundle already; its heavy editor is a lazy chunk.
@@ -143,49 +144,25 @@ interface ActionTarget {
   method?: OpenMethod;
   /** Arguments for that method, when one element serves several actions. */
   args?: readonly string[];
-  /**
-   * Performs the action itself, for one that is not a call of `open`/`openNew`
-   * (the calendar's). Replaces `method`/`args`; the selector still gates it.
-   */
-  run?: (el: HTMLElement) => void;
 }
 
-/** The public surface of `<mbr-calendar>` the calendar actions use. */
-type CalendarTrigger = HTMLElement &
-  Partial<{
-    overlayAvailable: boolean;
-    isDocked: boolean;
-    openOverlay: (scope: { label: string; pagePath?: string }) => boolean;
-    toggleCompanion: () => void;
-  }>;
+/** One of `<mbr-calendar>`'s gates (`overlayAvailable`, `companionAvailable`, `hasDayNotes`). */
+const calendarGate =
+  (gate: 'overlayAvailable' | 'companionAvailable' | 'hasDayNotes') =>
+  (el: HTMLElement): boolean =>
+    (el as Partial<MbrCalendarElement>)[gate] === true;
 
 /**
- * Whether the site has a day note, once the periodic index is known: `null`
- * until then, so `today` is listed only after {@link watchDayNotes} answered
- * (it re-posts the page when it does).
- */
-let siteHasDayNotes: boolean | null = null;
-
-/**
- * Learns whether the site has any day note, from the same memoized index `d`
- * uses (built off `siteNav`, which every page fetches anyway), and calls
- * `onKnown` once it is. A failed load leaves `today` unlisted.
+ * Loads the periodic index `d` uses (memoized off `siteNav`, which every page
+ * fetches anyway) and calls `onKnown` once it is, so the page is re-posted
+ * with `today` once `<mbr-calendar>`'s `hasDayNotes` can answer. A failed
+ * load leaves `today` unlisted.
  */
 export function watchDayNotes(onKnown: () => void = () => {}): Promise<void> {
   return periodicIndex().then(
-    (index) => {
-      siteHasDayNotes = index.day.length > 0;
-      onKnown();
-    },
-    () => {
-      siteHasDayNotes = false;
-    },
+    () => onKnown(),
+    () => {},
   );
-}
-
-/** Test seam: forgets what {@link watchDayNotes} learned. */
-export function resetDayNotes(): void {
-  siteHasDayNotes = null;
 }
 
 /** Whether `<mbr-fuzzy-nav>` reports `gate` (its `hasHeadings`/`hasPageLinks`). */
@@ -212,26 +189,11 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
   'links-in': { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasPageLinks'), args: ['links-in'] },
   tasks: { selector: 'mbr-tasks', usable: () => isTasksEnabled() },
   // `d`: today's day note, else the most recent one before it.
-  today: {
-    selector: 'mbr-calendar',
-    usable: () => siteHasDayNotes === true,
-    run: () => void openTodayDailyNote(),
-  },
+  today: { selector: 'mbr-calendar', usable: calendarGate('hasDayNotes'), args: ['today'] },
   // `c`: the overlay over all notes, with the page's "This folder" toggle.
-  calendar: {
-    selector: 'mbr-calendar',
-    usable: (el) => (el as CalendarTrigger).overlayAvailable === true,
-    run: (el) => void (el as CalendarTrigger).openOverlay?.({ label: 'All notes', pagePath: getCanonicalPath() }),
-  },
+  calendar: { selector: 'mbr-calendar', usable: calendarGate('overlayAvailable'), args: ['overlay'] },
   // `C`: the day panel as a drawer; not offered while it is the docked column.
-  companion: {
-    selector: 'mbr-calendar',
-    usable: (el) =>
-      typeof (el as CalendarTrigger).toggleCompanion === 'function' &&
-      (el as CalendarTrigger).isDocked !== true &&
-      getCalendarConfig().companion !== 'off',
-    run: (el) => (el as CalendarTrigger).toggleCompanion?.(),
-  },
+  companion: { selector: 'mbr-calendar', usable: calendarGate('companionAvailable'), args: ['companion'] },
   flashcards: { selector: 'mbr-flashcards', usable: () => isDeckPage() },
   slides: {
     selector: 'mbr-slides',
@@ -246,10 +208,9 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
 
 /** The action's opener, bound to its element, or `null` when unavailable. */
 function targetFor(action: AppAction, root: ParentNode): (() => void) | null {
-  const { selector, usable, method = 'open', args = [], run } = ACTION_TARGETS[action];
+  const { selector, usable, method = 'open', args = [] } = ACTION_TARGETS[action];
   const el = root.querySelector<HTMLElement>(selector) as Openable | null;
   if (!el || !usable(el)) return null;
-  if (run) return () => run(el);
   if (typeof el[method] !== 'function') return null;
   return () => el[method]?.(...args);
 }

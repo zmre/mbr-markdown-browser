@@ -8,23 +8,18 @@
  * `window.__MBR_QUICKLOOK_CALENDAR__` just above it. The entries themselves
  * come from `agenda-parse.ts` over the rendered preview, the same grammar the
  * companion uses; a note the prefilter let through with no entry draws
- * nothing.
+ * nothing (`mount.ts`).
  */
-import type { AgendaEntry } from '../calendar/agenda-parse.js'
-import type { WeekStart } from '../calendar/config.js'
+import { WEEK_STARTS, oneOf, type WeekStart } from '../calendar/config.js'
 import { parseDateKey, type DateKey } from '../calendar/note-date.js'
 
 /** The global `quicklook.rs` (`DAY_CALENDAR_GLOBAL`) writes the payload to. */
 export const QUICKLOOK_CALENDAR_GLOBAL = '__MBR_QUICKLOOK_CALENDAR__'
 
-/** Where the date came from (D1); `birthtime` covers mtime where there is none. */
-export type DaySource = 'filename' | 'frontmatter' | 'birthtime'
-
 /** What the preview was told about its note, validated. */
 export interface DayCalendarPayload {
   /** The note's date, `YYYY-MM-DD`. */
   readonly date: DateKey
-  readonly source: DaySource
   /** `[calendar] week_start`. */
   readonly weekStart: WeekStart
   /** `[calendar] week_numbers`; unset is off (a preview knows no week notes). */
@@ -32,9 +27,6 @@ export interface DayCalendarPayload {
   /** `[calendar] agenda_chips`: paint the time chips in the body. */
   readonly agendaChips: boolean
 }
-
-const SOURCES: readonly DaySource[] = ['filename', 'frontmatter', 'birthtime']
-const WEEK_STARTS: readonly WeekStart[] = ['locale', 'monday', 'sunday', 'saturday']
 
 /**
  * The payload from its raw (snake_case) global, or `null` when it is missing
@@ -44,20 +36,12 @@ export function readPayload(raw: unknown): DayCalendarPayload | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   if (typeof r.date !== 'string' || !parseDateKey(r.date)) return null
-  const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
-    typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback
   return {
     date: r.date,
-    source: oneOf(r.source, SOURCES, 'birthtime'),
     weekStart: oneOf(r.week_start, WEEK_STARTS, 'locale'),
     weekNumbers: r.week_numbers === true,
     agendaChips: r.agenda_chips !== false,
   }
-}
-
-/** Draw only with a date and at least one agenda entry. */
-export function shouldRender(payload: DayCalendarPayload | null, entries: readonly AgendaEntry[]): boolean {
-  return payload !== null && entries.length > 0
 }
 
 /** A right column beside the note, or a block above it. */

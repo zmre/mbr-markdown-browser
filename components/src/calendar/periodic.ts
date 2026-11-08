@@ -2,12 +2,12 @@
  * Periodic notes on the client: a per-kind sorted index built from
  * `site.json`, and the lookups the `d` key (and later the companion) needs.
  *
- * Pure, with type-only imports: safe for the main bundle and for any lazy
- * chunk. The stateful loader (memoized off `shared.ts`'s `siteNav`) lives in
+ * Pure, importing only `period.ts` (the one period-key parser): safe for the
+ * main bundle and for any lazy chunk. The stateful loader (memoized off `shared.ts`'s `siteNav`) lives in
  * `periodic-nav.ts`, which a chunk must not import.
  *
  * The server decides which notes are periodic (`calendar.period` in
- * `site.json`, after the `[calendar]` `periods` / `periodic_folders` filters;
+ * `site.json`, after the `[calendar]` filters;
  * see `crates/mbr-core/src/calendar.rs`); this module only indexes them, with
  * the server's duplicate rule (the first by `url_path` wins), so the client
  * and the server-rendered bar agree on which note is "the" note for a period.
@@ -17,8 +17,9 @@
  */
 
 import type { DateKey } from './note-date.js'
+import { periodSpan, type PeriodKind } from './period.js'
 
-export type PeriodKind = 'day' | 'week' | 'month' | 'quarter' | 'year'
+export type { PeriodKind } from './period.js'
 
 /** Every kind, smallest first (the server's order). */
 export const PERIOD_KINDS: readonly PeriodKind[] = ['day', 'week', 'month', 'quarter', 'year']
@@ -39,20 +40,9 @@ export interface PeriodicSource {
   readonly calendar?: { readonly period?: string } | null
 }
 
-const KEY_PATTERNS: ReadonlyArray<readonly [PeriodKind, RegExp]> = [
-  ['day', /^\d{4}-\d{2}-\d{2}$/],
-  ['week', /^\d{4}-W\d{2}$/],
-  ['month', /^\d{4}-\d{2}$/],
-  ['quarter', /^\d{4}-Q[1-4]$/],
-  ['year', /^\d{4}$/],
-]
-
-/** The kind of a canonical period key, or `null` for anything else. */
+/** The kind of a period key (`w`/`q` either case), or `null` for anything else. */
 export function periodKindOf(key: string): PeriodKind | null {
-  for (const [kind, pattern] of KEY_PATTERNS) {
-    if (pattern.test(key)) return kind
-  }
-  return null
+  return periodSpan(key)?.kind ?? null
 }
 
 const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
@@ -70,9 +60,9 @@ export function buildPeriodicIndex(files: readonly PeriodicSource[]): PeriodicIn
   const index: Record<PeriodKind, PeriodicEntry[]> = { day: [], week: [], month: [], quarter: [], year: [] }
   const seen = new Set<string>()
   for (const file of periodic) {
-    const period = file.calendar!.period!
-    const kind = periodKindOf(period)
-    if (!kind || seen.has(period)) continue
+    const span = periodSpan(file.calendar!.period!)
+    if (!span || seen.has(span.key)) continue
+    const { kind, key: period } = span
     seen.add(period)
     index[kind].push({ period, url: file.url_path })
   }
@@ -96,7 +86,7 @@ export function periodicIndexOf(files: readonly PeriodicSource[]): PeriodicIndex
 }
 
 /** Index of the first entry whose period is `>= period` (binary search). */
-function lowerBound(entries: readonly PeriodicEntry[], period: string): number {
+export function lowerBound(entries: readonly PeriodicEntry[], period: string): number {
   let lo = 0
   let hi = entries.length
   while (lo < hi) {
@@ -107,13 +97,13 @@ function lowerBound(entries: readonly PeriodicEntry[], period: string): number {
   return lo
 }
 
-/** The note for exactly `period`, if any. */
+/** The note for exactly `period` (`w`/`q` either case), if any. */
 export function findPeriod(index: PeriodicIndex, period: string): PeriodicEntry | null {
-  const kind = periodKindOf(period)
-  if (!kind) return null
-  const entries = index[kind]
-  const at = entries[lowerBound(entries, period)]
-  return at?.period === period ? at : null
+  const span = periodSpan(period)
+  if (!span) return null
+  const entries = index[span.kind]
+  const at = entries[lowerBound(entries, span.key)]
+  return at?.period === span.key ? at : null
 }
 
 /**
@@ -134,11 +124,11 @@ export function todayDailyNote(index: PeriodicIndex, today: DateKey): PeriodicEn
  * skipping gaps. `period` need not have a note itself.
  */
 export function adjacent(index: PeriodicIndex, period: string, delta: 1 | -1): PeriodicEntry | null {
-  const kind = periodKindOf(period)
-  if (!kind) return null
-  const entries = index[kind]
-  const i = lowerBound(entries, period)
+  const span = periodSpan(period)
+  if (!span) return null
+  const entries = index[span.kind]
+  const i = lowerBound(entries, span.key)
   if (delta < 0) return i > 0 ? entries[i - 1] : null
-  const next = entries[i]?.period === period ? i + 1 : i
+  const next = entries[i]?.period === span.key ? i + 1 : i
   return entries[next] ?? null
 }

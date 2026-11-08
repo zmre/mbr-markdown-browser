@@ -3,7 +3,6 @@ import './mbr-tasks-panel.js'
 import type { MbrTasksPanelElement } from './mbr-tasks-panel.js'
 import '../calendar/mbr-calendar-grid.js'
 import type { MbrCalendarMonthGridElement } from '../calendar/mbr-calendar-grid.js'
-import { moveDay, overflowSplit, overlayCommand } from '../calendar/overlay-model.js'
 import type { CalendarChunk } from '../calendar-chunk.js'
 import {
   calendarResponse,
@@ -160,6 +159,7 @@ describe('MbrTasksPanelElement', () => {
         include: 'tasks',
         mode: 'category',
         limit: 500,
+        today: '2026-08-04',
       })
     })
 
@@ -178,6 +178,7 @@ describe('MbrTasksPanelElement', () => {
         include: 'tasks',
         mode: 'category',
         limit: 500,
+        today: '2026-08-04',
       })
     })
 
@@ -213,6 +214,7 @@ describe('MbrTasksPanelElement', () => {
         include: 'tasks',
         mode: 'category',
         limit: 500,
+        today: '2026-08-04',
       })
     })
 
@@ -1528,7 +1530,7 @@ describe('MbrTasksPanelElement By Due grids', () => {
   /** The calendar chunk as the trigger would hand it over: the real key map. */
   const loadCalendarChunk = (): Promise<CalendarChunk | null> => {
     chunkLoads++
-    return Promise.resolve({ enhancePage: () => ({ entries: [], dispose: () => {} }), overlayCommand, moveDay, overflowSplit })
+    return Promise.resolve({ enhancePage: () => ({ entries: [], dispose: () => {} }) })
   }
 
   beforeEach(() => {
@@ -1599,7 +1601,7 @@ describe('MbrTasksPanelElement By Due grids', () => {
     expect(lastBody()).not.toHaveProperty('from')
 
     await chooseView('Week')
-    expect(lastBody()).toMatchObject({ mode: 'grid', from: '2026-08-03', to: '2026-08-09', include: 'tasks' })
+    expect(lastBody()).toMatchObject({ mode: 'grid', from: '2026-08-03', to: '2026-08-09', include: 'tasks', today: '2026-08-04' })
 
     await chooseView('Month')
     // August 2026 from a Monday start: six rows, 2026-07-27 .. 2026-09-06.
@@ -1619,15 +1621,15 @@ describe('MbrTasksPanelElement By Due grids', () => {
     const grid = root().querySelector('mbr-calendar-month-grid') as MbrCalendarMonthGridElement
     expect(grid).not.toBeNull()
     expect(grid.month).toBe('2026-08')
-    const entries = grid.dayEntries('2026-08-05')
-    // A time the text starts with is not repeated as a label.
+    const entries = grid.dayEntries('2026-08-05', 10)
+    // No time label: the placing date (a due date) carried no time.
     expect(entries.map((e) => [e.title, e.status, e.time])).toEqual([
       ['09:00 standup', 'open', undefined],
       ['shipped', 'done', undefined],
     ])
     expect(entries[0].tooltip).toBe('09:00 standup — Notes')
     expect(entries[0].href).toContain('#mbr-task-2')
-    expect(grid.dayMarks('2026-08-03')).toEqual({ notes: 0, open: 1, overdue: true })
+    expect(grid.dayMarks('2026-08-03')).toEqual({ notes: 0, open: 1, overdue: true, hidden: 0 })
     await grid.updateComplete
     expect(grid.shadowRoot!.querySelector('[data-date="2026-08-03"]')?.classList.contains('overdue')).toBe(true)
   })
@@ -1677,6 +1679,34 @@ describe('MbrTasksPanelElement By Due grids', () => {
     await byDue()
     await chooseView('Week', gridResponse({ days: {}, scan_in_progress: true }))
     expect(root().querySelector('.grid-body')?.textContent).toContain('Indexing tasks…')
+  })
+
+  it('draws "+N more" for rows the server’s limit dropped, in the cell and the day list', async () => {
+    element = await mountGrid()
+    await byDue()
+    const rows = [makeGridHit({ text: 'first', line: 1 }), makeGridHit({ text: 'second', line: 2 })]
+    // 30 open placed on the 5th, 2 rows sent; 4 done that the Open filter hides.
+    await chooseView('Week', gridResponse({ days: { '2026-08-05': { tasks: rows, open: 30, done: 4, overdue: false } } }))
+    const grid = root().querySelector('mbr-calendar-week-grid') as HTMLElement & { updateComplete: Promise<unknown> }
+    await grid.updateComplete
+    const cell = grid.shadowRoot!.querySelector('[data-date="2026-08-05"]')!
+    expect(cell.querySelectorAll('.entry').length).toBe(2)
+    expect(cell.querySelector('.more')?.textContent).toBe('+28')
+    expect(grid.shadowRoot!.querySelector('[data-date="2026-08-04"] .more')).toBeNull()
+
+    grid.dispatchEvent(new CustomEvent('mbr-calendar-focus', { detail: { date: '2026-08-05' }, bubbles: true, composed: true }))
+    await flush(element)
+    expect(root().querySelectorAll('.day-popover .task-card').length).toBe(2)
+    expect(root().querySelector('.day-popover .day-popover-more')?.textContent).toBe('+28 more')
+
+    // The month cell folds them into its own +N.
+    await chooseView('Month', gridResponse({ days: { '2026-08-05': { tasks: rows, open: 30, done: 4, overdue: false } } }))
+    const month = root().querySelector('mbr-calendar-month-grid') as HTMLElement & { updateComplete: Promise<unknown> }
+    await month.updateComplete
+    const monthCell = month.shadowRoot!.querySelector('[data-date="2026-08-05"]')!
+    const shown = monthCell.querySelectorAll('.entry').length
+    expect(shown).toBeGreaterThan(0)
+    expect(monthCell.querySelector('.more')?.textContent).toBe(`+${30 - shown}`)
   })
 
   it('lists a day as task cards whose checkboxes use the injected toggler', async () => {

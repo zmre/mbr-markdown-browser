@@ -110,3 +110,14 @@ describe('the tasks chunk (tasks/index.ts)', () => {
   })
 })
 
+
+describe('the search-extras chunk (search-extras/index.ts)', () => {
+  it('reads queries with the pure date-facet tokenizer, and nothing stateful', () => {
+    const modules = chunkModules('search-extras/index.ts')
+    expect(modules.has('search-extras/facets.ts')).toBe(true)
+    expect(modules.has('calendar/date-facets.ts')).toBe(true)
+    for (const forbidden of ['shared.ts', 'task-toggle.ts', 'edit-token.ts', 'mbr-search.ts', 'calendar/periodic-nav.ts']) {
+      expect(modules.has(forbidden), forbidden).toBe(false)
+    }
+  })
+})

@@ -35,10 +35,15 @@ describe('splitDateFacets', () => {
   it('takes out date facets and keeps everything else as typed', () => {
     const split = splitDateFacets('standup When:-7d type:"Meeting Notes" date:draft created:2026-10', TODAY)
     expect(split.text).toBe('standup type:"Meeting Notes" date:draft')
-    expect(split.facets).toEqual([
+    expect(split.facets.map(({ key, range }) => ({ key, range }))).toEqual([
       { key: 'when', range: { from: '2026-10-31', to: TODAY } },
       { key: 'created', range: { from: '2026-10-01', to: '2026-10-31' } },
     ])
+    // Each range as the reader's local-day bounds, taken once per query.
+    expect(split.facets[1].bounds).toEqual({
+      from: new Date(2026, 9, 1).getTime() / 1000,
+      to: new Date(2026, 10, 1).getTime() / 1000,
+    })
   })
 
   it('leaves a query without date facets alone', () => {
@@ -95,6 +100,14 @@ describe('matchDateFacets', () => {
       ['/post/', '2026-10-20'],
       ['/undated/', '2026-10-05'],
     ])
+  })
+
+  it('a range starting past 9999-12-31 matches nothing, as on the server', () => {
+    const files = [byBirthtime, byFrontmatter, byFilename]
+    for (const q of ['when:>9999', 'date:>9999-12-31', 'created:>9999-W52', 'modified:>9999']) {
+      expect(filterByDate(files, facets(q)), q).toEqual([])
+    }
+    expect(filterByDate(files, facets('when:<=9999-W52'))).toHaveLength(3)
   })
 })
 

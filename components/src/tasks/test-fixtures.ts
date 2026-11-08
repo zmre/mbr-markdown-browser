@@ -268,7 +268,7 @@ export function gridResponse(overrides: Partial<TaskGridResponse> = {}): TaskGri
       },
       '2026-08-05': {
         tasks: [
-          makeGridHit({ text: '09:00 standup', line: 2, due: '2026-08-05T00:00:00', time: '09:00' }),
+          makeGridHit({ text: '09:00 standup', line: 2, due: '2026-08-05T00:00:00' }),
           makeGridHit({ text: 'shipped', line: 3, status: 'done', placed_by: 'done', done: '2026-08-05T00:00:00' }),
         ],
         open: 1,

@@ -4,8 +4,8 @@
  * month-cell overflow arithmetic, the type-colour hash and the key map.
  *
  * Pure, with type-only imports plus the other pure calendar modules: the
- * overlay element is a thin view over this, and the phase 6 task grids can
- * reuse the key map and the overflow arithmetic.
+ * overlay element is a thin view over this. The key map (`overlayCommand`,
+ * `moveDay`) and the view ranges are `month-grid.ts`'s, re-exported here.
  *
  * **Performance (§5.4).** `bucketNotes` is the one O(notes) pass, run once
  * per (scope, plot-by): every entry's title, folder, type, tags and lowercase
@@ -15,11 +15,15 @@
  * keys forward from the visible range, testing bucket by bucket).
  */
 import type { MarkdownFile } from '../sorting.js'
-import { noteTitle } from './day-notes.js'
-import { addMonthsToDate, monthOf, periodStart, weekdayOf, type Weekday } from './month-grid.js'
-import { addDays, noteDate, parseDateKey, type DateKey } from './note-date.js'
-import { periodKindOf, type PeriodKind } from './periodic.js'
+import { folderOfRawPath, noteTitle, noteTypeOf } from './day-notes.js'
+import type { CalendarView } from './month-grid.js'
+import { addDays, noteDayOf, todayKey, type DateKey } from './note-date.js'
+import { periodSpan, type PeriodKind } from './period.js'
 import type { PlotBy } from './types.js'
+
+// The key map and the view ranges live with the grid math; re-exported for
+// the overlay and its tests.
+export { moveDay, overlayCommand, viewRange, type CalendarView, type OverlayCommand } from './month-grid.js'
 
 /** One note placed on one day. */
 export interface OverlayEntry {
@@ -69,8 +73,6 @@ export function nextPlotBy(current: PlotBy): PlotBy {
   return PLOT_BYS[(PLOT_BYS.indexOf(current) + 1) % PLOT_BYS.length]
 }
 
-export type CalendarView = 'month' | 'week' | 'list'
-
 /** List on a phone (≤600px), where month cells are too small to read; Month otherwise. */
 export function defaultView(width: number): CalendarView {
   return width <= 600 ? 'list' : 'month'
@@ -117,11 +119,7 @@ function localStamp(seconds: number | undefined): { date: DateKey; minutes: numb
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return null
   const d = new Date(seconds * 1000)
   if (Number.isNaN(d.getTime())) return null
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return {
-    date: `${String(d.getFullYear()).padStart(4, '0')}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
-    minutes: d.getHours() * 60 + d.getMinutes(),
-  }
+  return { date: todayKey(d), minutes: d.getHours() * 60 + d.getMinutes() }
 }
 
 /** Where a note lands for `plotBy`, or `null` when it is not plotted. */
@@ -131,14 +129,13 @@ function placement(
   dateFields: readonly string[]
 ): { date: DateKey; minutes: number | null } | null {
   if (plotBy !== 'date') return localStamp(plotBy === 'modified' ? file.modified : file.created)
-  // A week, month, quarter or year note is reached through the week-number
-  // and header links: its date is only its period's first day.
-  const period = file.calendar?.period
-  if (period && periodKindOf(period) !== 'day') return null
-  if (!file.calendar) return localStamp(file.created)
-  const date = noteDate(file)
+  // `noteDayOf` is the day (or none, for a week … year note); a birthtime
+  // also gives the time, and a frontmatter date may carry one.
+  const date = noteDayOf(file)
   if (!date) return null
-  return { date, minutes: file.calendar.source === 'frontmatter' ? frontmatterMinutes(file, date, dateFields) : null }
+  const cal = file.calendar
+  if (!cal) return { date, minutes: localStamp(file.created)?.minutes ?? null }
+  return { date, minutes: cal.source === 'frontmatter' ? frontmatterMinutes(file, date, dateFields) : null }
 }
 
 function tagsOf(file: MarkdownFile, fields: readonly string[]): string[] {
@@ -183,8 +180,7 @@ export function bucketNotes(files: readonly MarkdownFile[], plotBy: PlotBy, opti
   for (const file of files) {
     const at = placement(file, plotBy, options.dateFields)
     if (!at) continue
-    const rawType = file.frontmatter?.type
-    const type = typeof rawType === 'string' && rawType.trim() ? rawType.trim() : null
+    const type = noteTypeOf(file)
     const typeKey = type?.toLowerCase() ?? ''
     let color: number | null = null
     if (type) {
@@ -192,12 +188,11 @@ export function bucketNotes(files: readonly MarkdownFile[], plotBy: PlotBy, opti
       colors.set(typeKey, color)
     }
     const title = noteTitle(file)
-    const slash = file.raw_path.lastIndexOf('/')
     const tags = tagsOf(file, options.tagFields)
     const entry: MutableEntry = {
       file,
       title,
-      folder: slash < 0 ? '' : file.raw_path.slice(0, slash),
+      folder: folderOfRawPath(file.raw_path),
       date: at.date,
       minutes: at.minutes,
       type,
@@ -297,16 +292,6 @@ export function prevMatch(buckets: Buckets, before: DateKey, terms: readonly Fil
   return null
 }
 
-/** The first and last day a view covers for `focus`. */
-export function viewRange(view: CalendarView, focus: DateKey, weekStart: Weekday): { from: DateKey; to: DateKey } {
-  if (view === 'week') {
-    const from = addDays(focus, -((weekdayOf(focus) - weekStart + 7) % 7))
-    return { from, to: addDays(from, 6) }
-  }
-  const from = `${monthOf(focus)}-01`
-  return { from, to: addDays(addMonthsToDate(from, 1), -1) }
-}
-
 /** Every day from `from` to `to`, inclusive. */
 export function daysBetween(from: DateKey, to: DateKey): DateKey[] {
   const out: DateKey[] = []
@@ -320,10 +305,8 @@ export function daysBetween(from: DateKey, to: DateKey): DateKey[] {
  * to focus (its first day) and the kind it named. `null` for anything else.
  */
 export function parseJump(input: string): { date: DateKey; kind: PeriodKind } | null {
-  const key = input.trim().toUpperCase()
-  const date = periodStart(key)
-  const kind = periodKindOf(key)
-  return date && kind && parseDateKey(date) ? { date, kind } : null
+  const span = periodSpan(input.trim())
+  return span ? { date: span.start, kind: span.kind } : null
 }
 
 /** Entry lines that fit a month cell: at least two (§5.2). */
@@ -334,85 +317,14 @@ export function cellLines(cellHeight: number, headHeight: number, lineHeight: nu
 
 /**
  * How many of `count` entries a cell of `lines` lines draws, and the `+N`
- * that replaces its last line when they do not all fit.
+ * that replaces its last line when they do not all fit. `total` counts
+ * entries the cell was never handed as well (a task grid's rows the server
+ * dropped for its limit): they are only ever part of the `+N`.
  */
-export function overflowSplit(count: number, lines: number): { shown: number; more: number } {
+export function overflowSplit(count: number, lines: number, total = count): { shown: number; more: number } {
   const room = Math.max(2, lines)
-  return count <= room ? { shown: count, more: 0 } : { shown: room - 1, more: count - (room - 1) }
-}
-
-/** What a key does inside the overlay (§5.5). */
-export type OverlayCommand =
-  | 'left'
-  | 'right'
-  | 'up'
-  | 'down'
-  | 'prev'
-  | 'next'
-  | 'today'
-  | 'month'
-  | 'week'
-  | 'list'
-  | 'jump'
-  | 'plot'
-  | 'filter'
-  | 'open'
-  | 'escape'
-  | 'help'
-
-const KEY_COMMANDS: ReadonlyMap<string, OverlayCommand> = new Map(
-  Object.entries({
-  ArrowLeft: 'left',
-  h: 'left',
-  ArrowRight: 'right',
-  l: 'right',
-  ArrowUp: 'up',
-  k: 'up',
-  ArrowDown: 'down',
-  j: 'down',
-  '[': 'prev',
-  PageUp: 'prev',
-  ']': 'next',
-  PageDown: 'next',
-  t: 'today',
-  m: 'month',
-  w: 'week',
-  a: 'list',
-  g: 'jump',
-  p: 'plot',
-  '/': 'filter',
-  Enter: 'open',
-  Escape: 'escape',
-  '?': 'help',
-  }) as [string, OverlayCommand][]
-)
-
-/** The overlay command for an unmodified key, or `null`. */
-export function overlayCommand(key: string): OverlayCommand | null {
-  return KEY_COMMANDS.get(key) ?? null
-}
-
-/**
- * Where a movement command takes the focused day in Month and Week (List
- * moves between entries instead). `[`/`]` page by a month, or a week in Week.
- */
-export function moveDay(command: OverlayCommand, view: CalendarView, focus: DateKey): DateKey | null {
-  switch (command) {
-    case 'left':
-      return addDays(focus, -1)
-    case 'right':
-      return addDays(focus, 1)
-    case 'up':
-      return addDays(focus, -7)
-    case 'down':
-      return addDays(focus, 7)
-    case 'prev':
-      return view === 'week' ? addDays(focus, -7) : addMonthsToDate(focus, -1)
-    case 'next':
-      return view === 'week' ? addDays(focus, 7) : addMonthsToDate(focus, 1)
-    default:
-      return null
-  }
+  const shown = total <= room ? count : Math.min(count, room - 1)
+  return { shown, more: total - shown }
 }
 
 /** The `?` help list. */
@@ -434,11 +346,7 @@ export const OVERLAY_SHORTCUTS: readonly { readonly keys: string; readonly descr
  */
 export function pageFolder(files: readonly MarkdownFile[], pagePath: string): string {
   const note = files.find((f) => f.url_path === pagePath)
-  if (note) {
-    const slash = note.raw_path.lastIndexOf('/')
-    return slash < 0 ? '' : note.raw_path.slice(0, slash)
-  }
-  return pagePath.replace(/^\/+|\/+$/g, '')
+  return note ? folderOfRawPath(note.raw_path) : pagePath.replace(/^\/+|\/+$/g, '')
 }
 
 /** The notes in `folder` and its subfolders. */

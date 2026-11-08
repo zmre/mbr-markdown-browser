@@ -429,25 +429,19 @@ function describeReadFailure(status: number): ToggleFailure {
   }
 }
 
-/** Told after every successful {@link toggleTask}; see {@link onTaskWritten}. */
-const writeListeners = new Set<() => void>()
-
 /**
- * Subscribe to successful task writes from this page (the document's
- * checkboxes, the task panel, anything else through {@link toggleTask}).
- * Returns the unsubscribe function.
- *
- * For state derived from the task index that a write makes stale and that
- * nothing re-renders: the calendar companion's day markers drop their
- * per-month cache on it (`calendar/task-markers.ts`).
+ * Dispatched on `document`, with `{ path }` (repository-relative), whenever a
+ * repository file is known to have changed: by `<mbr-live-reload>` for every
+ * change event the server sends (before it decides whether to reload), and
+ * by {@link toggleTask} after each successful write (the in-app page has no
+ * socket). For state derived from the files that nothing re-renders: the
+ * calendar companion's task markers drop their cache on it.
  */
-export function onTaskWritten(listener: () => void): () => void {
-  writeListeners.add(listener)
-  return () => writeListeners.delete(listener)
-}
+export const FILE_CHANGED_EVENT = 'mbr-file-changed'
 
-function announceTaskWritten(): void {
-  for (const listener of writeListeners) listener()
+/** Announces {@link FILE_CHANGED_EVENT} for `path`. */
+export function announceFileChanged(path: string): void {
+  document.dispatchEvent(new CustomEvent(FILE_CHANGED_EVENT, { detail: { path } }))
 }
 
 /**
@@ -525,7 +519,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     if (typeof body.text !== 'string') throw new Error('no text in the response')
     read.lines[target.line - 1] = body.text
     noteSourceHash(path, typeof body.hash === 'string' ? body.hash : null)
-    announceTaskWritten()
+    announceFileChanged(path)
     return { ok: true, text: body.text }
   } catch {
     // A response we cannot parse says nothing about the write, which the
@@ -533,7 +527,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     // stop checking the page's version, which moved to one we never learned.
     lineCache.delete(path)
     noteSourceHash(path, null)
-    announceTaskWritten()
+    announceFileChanged(path)
     return { ok: true }
   }
 }

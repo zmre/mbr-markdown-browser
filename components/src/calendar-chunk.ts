@@ -3,11 +3,12 @@
  * registers `<mbr-calendar-companion>`, `<mbr-calendar-month>`, the calendar
  * overlay and the large month / week grids.
  *
- * MAIN BUNDLE. `graph-chunk.ts`'s pattern: `<mbr-calendar>` loads it today,
- * and the task panel (design/calendar.md §8.2) will receive
- * `loadCalendarChunk` as an injected service and create the grid elements by
- * tag name with type-only imports — a chunk that bundled its own copy of an
- * element would hit a double `customElements.define`.
+ * MAIN BUNDLE. `graph-chunk.ts`'s pattern: `<mbr-calendar>` loads it, and
+ * the task panel (design/calendar.md §8.2) receives `loadCalendarChunk` as an
+ * injected service and creates the grid elements by tag name with type-only
+ * imports — a chunk that bundled its own copy of an element would hit a
+ * double `customElements.define`. The grids' pure helpers (ranges, titles,
+ * the key map) are `calendar/month-grid.ts`, which any bundle may import.
  *
  * The URL is computed against the asset base, so it works in server mode and
  * in static builds deployed at any depth.
@@ -15,15 +16,10 @@
 import { getMbrAssetBase } from './dynamic-loader.js'
 import type { EnhancePageOptions } from './calendar/agenda-page.js'
 import type { AgendaEntry } from './calendar/agenda-parse.js'
-import type { moveDay, overflowSplit, overlayCommand } from './calendar/overlay-model.js'
 
-/** What the chunk exports (`calendar/index.ts`). */
+/** What the chunk exports (`calendar/index.ts`) besides its elements. */
 export interface CalendarChunk {
   enhancePage(options: EnhancePageOptions): { entries: AgendaEntry[]; dispose: () => void }
-  /** The overlay's grid key map and overflow arithmetic, for the phase 6 task grids. */
-  overlayCommand: typeof overlayCommand
-  moveDay: typeof moveDay
-  overflowSplit: typeof overflowSplit
 }
 
 const defaultImporter = (): Promise<unknown> => {

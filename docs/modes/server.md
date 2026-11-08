@@ -242,7 +242,7 @@ A date expression is one of:
 |------------|-------|
 | `2026`, `2026-10`, `2026-10-31`, `2026-W44`, `2026-Q4` | That whole year, month, day, ISO week or quarter |
 | `2026-10-01..2026-10-15` | A range, both ends included. Either end may be any of the forms above, or left out: `2026-10..` (October 2026 onwards), `..2025` (up to the end of 2025). Reversed ends are swapped |
-| `>=2026-10`, `>2026-10`, `<=2026-10`, `<2026-10` | From the start of a period, after its end, up to its end, before its start |
+| `>=2026-10`, `>2026-10`, `<=2026-10`, `<2026-10` | From the start of a period, after its end, up to its end, before its start. Dates stop at 9999-12-31, so `>9999` matches nothing |
 | `today`, `yesterday` | One day |
 | `this-week`, `last-week` | An ISO week, Monday to Sunday (the [`week_start`](../reference/configuration/#calendar-settings) setting only lays out calendars) |
 | `this-month`, `last-month`, `this-year` | A calendar month or year |
@@ -371,7 +371,13 @@ This enables wiki-style bidirectional link navigation without requiring any spec
 
 `POST /.mbr/tasks` answers the [task browser](../markdown/tasks/). Every field
 is optional: `q`, `folder`, `statuses` (empty = open only), `priorities`,
-`due`, `include`, `limit` (default 500) and `mode`. `mode` is `category`
+`due`, `include`, `limit` (default 500), `today` and `mode`. `today` is the
+reader's local date (`YYYY-MM-DD`), and it decides what is overdue, due today
+and due tomorrow in every mode: the calendar buckets, the `due` filter, a grid
+day's `overdue`, `overdue_before_range` and the grid's default `from`. The
+browser always sends it, as it does for search, because only the browser knows
+the reader's time zone; without it, or with a value that is not a date, the
+server's own date is used. `mode` is `category`
 (one group per note, the default), `calendar` (one group per due bucket), or
 `grid`, which places tasks on the days of a range for the week and month grids
 and the calendar companion's day marks:
@@ -390,7 +396,7 @@ The answer replaces `groups` with:
   "from": "2026-10-26", "to": "2026-11-01",
   "days": {
     "2026-10-31": {
-      "tasks": [ { "line": 12, "text": "09:00 call Bob", "status": "open", "due": "2026-10-31T00:00:00",
+      "tasks": [ { "line": 12, "text": "call Bob", "status": "open", "due": "2026-10-31T09:00:00",
                    "url_path": "/projects/plan/", "path": "projects/plan.md",
                    "placed_by": "due", "time": "09:00", "note": "Plan", "...": "every other task field" } ],
       "open": 3, "done": 2, "overdue": true
@@ -405,9 +411,19 @@ The answer replaces `groups` with:
 
 A task is placed on its done date when it is ticked and has one, else on its
 due date, else on its scheduled date (`placed_by` says which); canceled tasks
-and incomplete markers never are. `open` and `done` count every filter except
-the status filter, and `limit` truncates `tasks` without changing them.
-`overdue` marks a past day that still has open tasks. `undated_in_day_notes`
+and incomplete markers never are. `time` (`HH:MM`) is present only when that
+date carries a time of day (`@due(2026-10-31 09:00)`); a time at the start of
+the task's text (`09:00 call Bob`) still orders the day's list (timed tasks
+first) but is not sent. `open` and `done` count every filter except
+the status filter. `limit` caps the rows across all the days without changing
+the counts, and is shared out evenly rather than spent in date order: each day
+keeps its first rows up to an equal share, and what is left goes to the days
+that still have more. A day can therefore list fewer `tasks` than its counts
+(the task browser draws the difference as "+N more"); `total_matches` is the
+number before the limit.
+`overdue` marks a past day (before `today`) that still has an open task placed
+by its due date; open tasks placed by their scheduled date never make a day
+overdue. `undated_in_day_notes`
 counts the open, undated tasks of each daily note in the range, which are never
 placed. `overdue_before_range` counts open tasks due before both `from` and
 today. While the index is still being built `scan_in_progress` is `true`.

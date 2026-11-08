@@ -393,7 +393,7 @@ describe('durable web storage across the whole frontend', () => {
     // and none of them stores a credential:
     //   calendar/companion-pref.ts — one UI preference flag: the reader
     //     dismissed the docked daily-note companion. Nothing from the page,
-    //     nothing secret; `_head.html` reads it before paint.
+    //     nothing secret, scoped by repo id; `_head.html` reads it before paint.
     //   mbr-browse.ts        — recently viewed pages and pinned shortcuts (URLs)
     //   mbr-video-extras.ts  — playback position per video, in seconds
     //   genealogy/selector.ts — which genealogy chart the reader last picked

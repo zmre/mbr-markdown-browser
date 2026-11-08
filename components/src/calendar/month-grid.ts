@@ -1,15 +1,17 @@
 /**
- * Month-grid arithmetic: week starts, the six-row month grid, ISO week
- * labels, month keys and the grid's keyboard map.
+ * Month-grid arithmetic: week starts, the six-row month grid, the ranges and
+ * titles of a month / week view, ISO week labels, month keys, localized date
+ * and clock labels, and **the** calendar keyboard map.
  *
- * Pure, with type-only imports (plus `note-date.ts`'s pure helpers): the one
- * place grid math lives, for the companion's mini month (phase 2), the
- * calendar overlay's month view (phase 3) and the task panel's grids
- * (phase 6). Everything works on `YYYY-MM-DD` date keys and UTC calendar
- * arithmetic, so no daylight-saving change can move a cell.
+ * Pure, importing only the other pure calendar modules (`note-date.ts`,
+ * `period.ts`): the one place grid math lives, for the companion's mini
+ * month, the calendar overlay and the task panel's grids (tasks chunk, which
+ * imports this module directly). Everything works on `YYYY-MM-DD` date keys
+ * and UTC calendar arithmetic, so no daylight-saving change can move a cell.
  */
 import type { WeekStart } from './config.js'
-import { addDays, dateKey, parseDateKey, type DateKey } from './note-date.js'
+import { addDays, dateKey, dayNumber, parseDateKey, type DateKey } from './note-date.js'
+import { daysInMonth, isoWeekKeyOfDays, isoWeekday, periodSpan } from './period.js'
 
 /** A day of the week, JavaScript's numbering: 0 = Sunday … 6 = Saturday. */
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6
@@ -31,8 +33,6 @@ export interface GridWeek {
 
 /** A month laid out on a fixed six-row grid (42 days). */
 export interface MonthGrid {
-  readonly month: MonthKey
-  readonly weekStart: Weekday
   readonly weeks: readonly GridWeek[]
 }
 
@@ -63,16 +63,19 @@ export function monthOf(date: DateKey): MonthKey {
 }
 
 /** `month` moved by `delta` months. Throws on an invalid key. */
+/** Year and month (1–12) `delta` months after `year`-`month`. */
+function shiftMonth(year: number, month: number, delta: number): { year: number; month: number } {
+  const total = year * 12 + month - 1 + delta
+  const y = Math.floor(total / 12)
+  return { year: y, month: total - y * 12 + 1 }
+}
+
+/** `month` moved by `delta` months. Throws on an invalid key. */
 export function addMonths(month: MonthKey, delta: number): MonthKey {
   const parts = parseMonthKey(month)
   if (!parts) throw new RangeError(`not a month key: ${month}`)
-  const moved = new Date(Date.UTC(parts.year, parts.month - 1 + delta, 1))
-  return monthKey(moved.getUTCFullYear(), moved.getUTCMonth() + 1)
-}
-
-/** Days in a month. */
-function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const moved = shiftMonth(parts.year, parts.month, delta)
+  return monthKey(moved.year, moved.month)
 }
 
 /**
@@ -82,56 +85,85 @@ function daysInMonth(year: number, month: number): number {
 export function addMonthsToDate(date: DateKey, delta: number): DateKey {
   const parts = parseDateKey(date)
   if (!parts) throw new RangeError(`not a date key: ${date}`)
-  const target = parseMonthKey(addMonths(monthKey(parts.year, parts.month), delta))!
-  return dateKey(target.year, target.month, Math.min(parts.day, daysInMonth(target.year, target.month)))
+  const { year, month } = shiftMonth(parts.year, parts.month, delta)
+  return dateKey(year, month, Math.min(parts.day, daysInMonth(year, month)))
 }
 
 /** The weekday of a date key. Throws on an invalid key. */
 export function weekdayOf(date: DateKey): Weekday {
-  const parts = parseDateKey(date)
-  if (!parts) throw new RangeError(`not a date key: ${date}`)
-  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay() as Weekday
+  return ((isoWeekday(dayNumber(date)) + 1) % 7) as Weekday
 }
 
-/** The ISO 8601 week of a date: its week-year, week number and key. */
-export function isoWeekOf(date: DateKey): { year: number; week: number; key: string } {
-  // The ISO week-year is the year of the week's Thursday.
-  const thursday = addDays(date, 3 - ((weekdayOf(date) + 6) % 7))
-  const year = Number(thursday.slice(0, 4))
-  const jan1 = dateKey(year, 1, 1)
-  const dayOfYear = Math.round(
-    (Date.parse(`${thursday}T00:00:00Z`) - Date.parse(`${jan1}T00:00:00Z`)) / 86_400_000
-  )
-  const week = Math.floor(dayOfYear / 7) + 1
-  return { year, week, key: `${String(year).padStart(4, '0')}-W${pad2(week)}` }
+/** The ISO 8601 week key of a date (`2026-W53`). Throws on an invalid key. */
+export function isoWeekOf(date: DateKey): string {
+  return isoWeekKeyOfDays(dayNumber(date))
 }
 
-/** The Monday an ISO week (`2026-W44`) starts on, or `null` for another key. */
+/** The Monday an ISO week (`2026-W44`, `w` either case) starts on, or `null` for another key. */
 export function isoWeekStart(key: string): DateKey | null {
-  const m = /^(\d{4})-W(\d{2})$/.exec(key)
-  if (!m) return null
-  const year = Number(m[1])
-  const week = Number(m[2])
-  // Jan 4 is always in week 1.
-  const jan4 = dateKey(year, 1, 4)
-  const week1Monday = addDays(jan4, -((weekdayOf(jan4) + 6) % 7))
-  const start = addDays(week1Monday, (week - 1) * 7)
-  return isoWeekOf(start).key === key ? start : null
+  const span = periodSpan(key)
+  return span?.kind === 'week' ? span.start : null
 }
 
 /**
- * The first day of a canonical period key (`2026-10-31`, `2026-W44`,
- * `2026-10`, `2026-Q4`, `2026`), or `null` for anything else.
+ * The first day of a period key (`2026-10-31`, `2026-W44`, `2026-10`,
+ * `2026-Q4`, `2026`), or `null` for anything else.
  */
 export function periodStart(key: string): DateKey | null {
-  if (parseDateKey(key)) return key
-  if (/^\d{4}-W\d{2}$/.test(key)) return isoWeekStart(key)
-  if (parseMonthKey(key)) return `${key}-01`
-  const quarter = /^(\d{4})-Q([1-4])$/.exec(key)
-  if (quarter) return dateKey(Number(quarter[1]), (Number(quarter[2]) - 1) * 3 + 1, 1)
-  if (/^\d{4}$/.test(key)) return `${key}-01-01`
-  return null
+  return periodSpan(key)?.start ?? null
 }
+
+/** The week-number label of an ISO week key: `2026-W05` → `5`. */
+export function weekNumberLabel(isoWeek: string): string {
+  return String(Number(isoWeek.slice(6)))
+}
+
+/** The first day of the `weekStart` week holding `date`. */
+export function weekStartOf(date: DateKey, weekStart: Weekday): DateKey {
+  return addDays(date, -((weekdayOf(date) - weekStart + 7) % 7))
+}
+
+/** An inclusive range of date keys. */
+export interface DayRange {
+  readonly from: DateKey
+  readonly to: DateKey
+}
+
+/** The `weekStart` week holding `date`. */
+export function weekRange(date: DateKey, weekStart: Weekday): DayRange {
+  const from = weekStartOf(date, weekStart)
+  return { from, to: addDays(from, 6) }
+}
+
+/** The six week rows of `month`'s grid (42 days): what a month grid draws. */
+export function gridMonthRange(month: MonthKey, weekStart: Weekday): DayRange {
+  const from = weekStartOf(`${month}-01`, weekStart)
+  return { from, to: addDays(from, GRID_ROWS * 7 - 1) }
+}
+
+/** A calendar view: the overlay's three, of which the task grids use two. */
+export type CalendarView = 'month' | 'week' | 'list'
+
+/**
+ * The days a view of `focus` is about: its `weekStart` week in Week, its
+ * calendar month otherwise (the month grid draws more: {@link gridMonthRange}).
+ */
+export function viewRange(view: CalendarView, focus: DateKey, weekStart: Weekday): DayRange {
+  if (view === 'week') return weekRange(focus, weekStart)
+  const from = `${monthOf(focus)}-01`
+  return { from, to: addDays(addMonthsToDate(from, 1), -1) }
+}
+
+/** A view's title: "October 2026", or "Oct 26 – Nov 1, 2026" for a week. */
+export function viewTitle(view: CalendarView, focus: DateKey, weekStart: Weekday, locale: string): string {
+  if (view !== 'week') return formatDate(`${monthOf(focus)}-01`, locale, MONTH_YEAR)
+  const { from, to } = weekRange(focus, weekStart)
+  return `${formatDate(from, locale, SHORT_DAY)} – ${formatDate(to, locale, SHORT_DAY_YEAR)}`
+}
+
+const MONTH_YEAR: Intl.DateTimeFormatOptions = { month: 'long', year: 'numeric' }
+const SHORT_DAY: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }
+const SHORT_DAY_YEAR: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', year: 'numeric' }
 
 /** The shape of `Intl.Locale`'s week information (ES2024 / the older getter). */
 interface WeekInfoLocale {
@@ -184,44 +216,103 @@ export function weekdayOrder(weekStart: Weekday): Weekday[] {
 export function monthGrid(month: MonthKey, weekStart: Weekday): MonthGrid {
   const parts = parseMonthKey(month)
   if (!parts) throw new RangeError(`not a month key: ${month}`)
-  const first = dateKey(parts.year, parts.month, 1)
-  const start = addDays(first, -((weekdayOf(first) - weekStart + 7) % 7))
+  const start = weekStartOf(dateKey(parts.year, parts.month, 1), weekStart)
   const weeks: GridWeek[] = []
   for (let row = 0; row < GRID_ROWS; row++) {
     const days = Array.from({ length: 7 }, (_, i) => addDays(start, row * 7 + i))
     const thursday = days[(4 - weekStart + 7) % 7]
-    weeks.push({ days, isoWeek: isoWeekOf(thursday).key })
+    weeks.push({ days, isoWeek: isoWeekOf(thursday) })
   }
-  return { month, weekStart, weeks }
+  return { weeks }
+}
+
+/** What a key does in a calendar grid (design/calendar.md §5.5). */
+export type OverlayCommand =
+  | 'left'
+  | 'right'
+  | 'up'
+  | 'down'
+  | 'prev'
+  | 'next'
+  | 'today'
+  | 'month'
+  | 'week'
+  | 'list'
+  | 'jump'
+  | 'plot'
+  | 'filter'
+  | 'open'
+  | 'escape'
+  | 'help'
+
+const KEY_COMMANDS: ReadonlyMap<string, OverlayCommand> = new Map(
+  Object.entries({
+    ArrowLeft: 'left',
+    h: 'left',
+    ArrowRight: 'right',
+    l: 'right',
+    ArrowUp: 'up',
+    k: 'up',
+    ArrowDown: 'down',
+    j: 'down',
+    '[': 'prev',
+    PageUp: 'prev',
+    ']': 'next',
+    PageDown: 'next',
+    t: 'today',
+    m: 'month',
+    w: 'week',
+    a: 'list',
+    g: 'jump',
+    p: 'plot',
+    '/': 'filter',
+    Enter: 'open',
+    Escape: 'escape',
+    '?': 'help',
+  }) as [string, OverlayCommand][]
+)
+
+/**
+ * **The** calendar key map: the command for an unmodified key, or `null`.
+ * The overlay, the task panel's grids and (through {@link moveFocus}) the
+ * mini month all read it; modifier keys are the caller's to filter.
+ */
+export function overlayCommand(key: string): OverlayCommand | null {
+  return KEY_COMMANDS.get(key) ?? null
 }
 
 /**
- * The grid keyboard map shared by every calendar grid: where a key moves the
- * focused day, or `null` for a key the grid does not handle. Arrows and
- * `h j k l` move by a day or a week; PageUp / PageDown by a month (clamped).
- * Modifier keys are the caller's to filter.
+ * Where a movement command takes the focused day in Month and Week (List
+ * moves between entries instead): arrows by a day or a week, `prev` / `next`
+ * by a month (clamped, Jan 31 → Feb 28), or a week in Week.
  */
-export function moveFocus(key: string, focus: DateKey): DateKey | null {
-  switch (key) {
-    case 'ArrowLeft':
-    case 'h':
+export function moveDay(command: OverlayCommand, view: CalendarView, focus: DateKey): DateKey | null {
+  switch (command) {
+    case 'left':
       return addDays(focus, -1)
-    case 'ArrowRight':
-    case 'l':
+    case 'right':
       return addDays(focus, 1)
-    case 'ArrowUp':
-    case 'k':
+    case 'up':
       return addDays(focus, -7)
-    case 'ArrowDown':
-    case 'j':
+    case 'down':
       return addDays(focus, 7)
-    case 'PageUp':
-      return addMonthsToDate(focus, -1)
-    case 'PageDown':
-      return addMonthsToDate(focus, 1)
+    case 'prev':
+      return view === 'week' ? addDays(focus, -7) : addMonthsToDate(focus, -1)
+    case 'next':
+      return view === 'week' ? addDays(focus, 7) : addMonthsToDate(focus, 1)
     default:
       return null
   }
+}
+
+/**
+ * The mini month's movement keys, on {@link overlayCommand} and
+ * {@link moveDay} (Month view): arrows / `h j k l` and PageUp / PageDown.
+ * `[` / `]` are left to the page, where they follow the periodic-note bar.
+ */
+export function moveFocus(key: string, focus: DateKey): DateKey | null {
+  const command = key === '[' || key === ']' ? null : overlayCommand(key)
+  return command ? moveDay(command, 'month', focus) : null
 }
 
 /** A UTC `Date` for a date key, for `Intl` formatting with `timeZone: 'UTC'`. */
@@ -230,21 +321,59 @@ export function utcDate(date: DateKey): Date {
 }
 
 /** Localized formatters, cached per locale and options. */
-const formatters = new Map<string, Intl.DateTimeFormat>()
+const formatters = new Map<string, Intl.DateTimeFormat | null>()
+
+/**
+ * A UTC formatter for `locale` and `options`, built once. The cache key
+ * names the option fields the calendar uses (cheaper than serializing the
+ * object on every cell). An invalid locale falls back to the reader's;
+ * `null` when even that throws (then callers format by hand).
+ */
+function formatter(locale: string, o: Intl.DateTimeFormatOptions): Intl.DateTimeFormat | null {
+  const key = `${locale}|${o.dateStyle}|${o.weekday}|${o.year}|${o.month}|${o.day}|${o.hour}`
+  let fmt = formatters.get(key)
+  if (fmt === undefined) {
+    fmt = null
+    for (const tag of [locale, undefined]) {
+      try {
+        fmt = new Intl.DateTimeFormat(tag, { ...o, timeZone: 'UTC' })
+        break
+      } catch {
+        // An invalid tag: try the reader's own; failing that, format by hand.
+      }
+    }
+    formatters.set(key, fmt)
+  }
+  return fmt
+}
 
 /** `date` formatted in `locale` (a date key, read as a calendar date). */
 export function formatDate(date: DateKey, locale: string, options: Intl.DateTimeFormatOptions): string {
-  const cacheKey = `${locale}|${JSON.stringify(options)}`
-  let fmt = formatters.get(cacheKey)
-  if (!fmt) {
-    try {
-      fmt = new Intl.DateTimeFormat(locale, { ...options, timeZone: 'UTC' })
-    } catch {
-      fmt = new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC' })
-    }
-    formatters.set(cacheKey, fmt)
-  }
-  return fmt.format(utcDate(date))
+  return formatter(locale, options)?.format(utcDate(date)) ?? date
+}
+
+/** `HH:MM` for minutes after midnight (24-hour; `24:00` for the day's end). */
+export function formatMinutes(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+}
+
+const CLOCK: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
+
+/**
+ * A clock time in the reader's locale (`9:00 AM`, `09:00`); `HH:MM`
+ * ({@link formatMinutes}) where `Intl` cannot format at all. The one clock
+ * formatter: the companion's timeline, the overlay's entry times and
+ * QuickLook's preview.
+ */
+export function formatClock(minutes: number, locale: string): string {
+  const fmt = formatter(locale, CLOCK)
+  return fmt ? fmt.format(new Date(Date.UTC(1970, 0, 1, Math.floor(minutes / 60), minutes % 60))) : formatMinutes(minutes)
+}
+
+/** An entry's time, or its time range (`9:00 AM–10:00 AM`), localized. */
+export function formatSpan(entry: { readonly start: number; readonly end?: number }, locale: string): string {
+  const start = formatClock(entry.start, locale)
+  return entry.end === undefined ? start : `${start}–${formatClock(entry.end, locale)}`
 }
 
 /** Column headers: the weekdays' narrow (or short) names in column order. */

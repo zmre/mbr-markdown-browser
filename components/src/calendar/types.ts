@@ -16,8 +16,13 @@ export interface DayMarks {
   readonly notes?: number
   /** Open tasks that day (hollow ring); from {@link TaskMarkerSource}. */
   readonly open?: number
-  /** The ring is the overdue colour (a past day with open tasks). */
+  /** The ring is the overdue colour (the server says a past day has an open task due on it). */
   readonly overdue?: boolean
+  /**
+   * Entries the host knows of but cannot hand over at all (a task grid's
+   * rows the server dropped for its limit): drawn only as part of `+N`.
+   */
+  readonly hidden?: number
 }
 
 /** Open-task count for one day (`calendar/task-markers.ts`'s `dayTaskCounts`). */
@@ -55,11 +60,9 @@ export type CompanionPlacement = 'docked' | 'drawer'
  * panel. Data only, so a host in another bundle can fill it.
  */
 export interface GridEntry {
-  /** Stable within a day (the overlay uses the note's `url_path`). */
-  readonly key: string
   readonly title: string
-  /** Where the entry goes: rendered as a link. Without one, a click fires `mbr-calendar-entry`. */
-  readonly href?: string
+  /** Where the entry goes: every entry is a link. */
+  readonly href: string
   /** Type-colour slot 0–7 (`--mbr-cal-type-N`), `null` for a muted dot. */
   readonly color?: number | null
   /** A time label shown before the title (Week view, list rows). */

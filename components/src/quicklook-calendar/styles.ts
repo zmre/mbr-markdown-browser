@@ -161,6 +161,8 @@ body.${BODY_COLUMN_CLASS} > main {
 }
 .mbr-ql-cal-block {
   position: absolute;
+  left: calc(var(--mbr-ql-cal-gutter) + (100% - var(--mbr-ql-cal-gutter)) * var(--col) / var(--cols));
+  width: calc((100% - var(--mbr-ql-cal-gutter)) / var(--cols) - 2px);
   box-sizing: border-box;
   overflow: hidden;
   padding: 1px 4px;

@@ -5,18 +5,15 @@
  * The grids themselves are the calendar chunk's `<mbr-calendar-month-grid>`
  * and `<mbr-calendar-week-grid>`, which the panel creates **by tag name**
  * after the injected `loadCalendarChunk()`: nothing here may import a grid
- * element or `overlay-model.ts` as a value (a second `customElements.define`
- * throws, and the calendar chunk is already over its size budget). What this
+ * element (a second `customElements.define` throws). What this
  * module turns the `mode: "grid"` response into is plain data the grids read:
- * `GridEntry` lists and `DayMarks`.
+ * `GridEntry` lists and `DayMarks`. Ranges, titles and the key map are
+ * `calendar/month-grid.ts`'s (pure, imported directly).
  */
-import { addDays, type DateKey } from '../calendar/note-date.js'
-import { addMonthsToDate, formatDate, monthGrid, monthOf, weekdayOf, type Weekday } from '../calendar/month-grid.js'
+import type { DateKey } from '../calendar/note-date.js'
+import { gridMonthRange, monthOf, weekRange, type DayRange, type Weekday } from '../calendar/month-grid.js'
 import type { DayMarks, GridEntry } from '../calendar/types.js'
 import type { DueView, GridDay, TaskGridResponse, TaskHit, TaskStatus } from './types.js'
-
-/** Text that starts with a clock time, as the server's `leading_minutes` reads one. */
-const LEADING_TIME = /^\d{1,2}[:.]\d{2}/
 
 /** A grid view: "By Due" minus its list. */
 export type GridView = Exclude<DueView, 'list'>
@@ -42,25 +39,8 @@ export function effectiveView(view: DueView, narrow: boolean): DueView {
  * grid request asks for: the week containing `focus` from `weekStart`, or the
  * six week rows of its month (42 days, inside the server's 62-day cap).
  */
-export function gridRange(view: GridView, focus: DateKey, weekStart: Weekday): { from: DateKey; to: DateKey } {
-  if (view === 'week') {
-    const from = addDays(focus, -((weekdayOf(focus) - weekStart + 7) % 7))
-    return { from, to: addDays(from, 6) }
-  }
-  const weeks = monthGrid(monthOf(focus), weekStart).weeks
-  return { from: weeks[0].days[0], to: weeks[weeks.length - 1].days[6] }
-}
-
-/** `focus` moved one page: a week, or a calendar month (clamped to its length). */
-export function stepGrid(view: GridView, focus: DateKey, delta: 1 | -1): DateKey {
-  return view === 'week' ? addDays(focus, 7 * delta) : addMonthsToDate(focus, delta)
-}
-
-/** The grid header: "October 2026", or "Oct 26 – Nov 1, 2026" for a week. */
-export function gridTitle(view: GridView, focus: DateKey, weekStart: Weekday, locale: string): string {
-  if (view === 'month') return formatDate(`${monthOf(focus)}-01`, locale, { month: 'long', year: 'numeric' })
-  const { from, to } = gridRange('week', focus, weekStart)
-  return `${formatDate(from, locale, { month: 'short', day: 'numeric' })} – ${formatDate(to, locale, { month: 'short', day: 'numeric', year: 'numeric' })}`
+export function gridRange(view: GridView, focus: DateKey, weekStart: Weekday): DayRange {
+  return view === 'week' ? weekRange(focus, weekStart) : gridMonthRange(monthOf(focus), weekStart)
 }
 
 /** The response's day, if it has one. */
@@ -79,27 +59,43 @@ export function gridEntries(
 ): GridEntry[] {
   if (!day) return []
   return day.tasks.map((hit) => ({
-    key: taskKey(hit),
     title: hit.text,
     href: href(hit),
     status: statusOf(hit),
-    // A time the text already starts with (`09:30 call`) is not repeated.
-    time: hit.time && !LEADING_TIME.test(hit.text) ? hit.time : undefined,
+    // The server sends a time only when the placing date carried one.
+    time: hit.time,
     tooltip: `${hit.text} — ${hit.note}`,
   }))
 }
 
 /**
+ * Rows of `day` that pass the status filter but were not sent: the server
+ * shares its row limit out across the days (`task_query::spread_limit`), so a
+ * busy day can carry fewer `tasks` than its counts. The counts ignore status
+ * and the rows honour it, so the comparison is against the counts of the
+ * statuses on screen — never `open + done`, which would call every filtered-
+ * out done task "more". Canceled tasks are never placed. An empty `statuses`
+ * means open only, as on the server.
+ */
+export function gridHiddenCount(day: GridDay | undefined, statuses: readonly TaskStatus[]): number {
+  if (!day) return 0
+  const wanted =
+    (statuses.length === 0 || statuses.includes('open') ? day.open : 0) + (statuses.includes('done') ? day.done : 0)
+  return Math.max(0, wanted - day.tasks.length)
+}
+
+/**
  * A day cell's marks in the panel grid: its open count (for the cell's
- * spoken label) and the overdue colour. `notes: 0` because the entries are
- * tasks, not notes, and the label must not count them as "other notes".
+ * spoken label), the overdue colour, and the rows the limit dropped (drawn
+ * as the cell's `+N`). `notes: 0` because the entries are tasks, not notes,
+ * and the label must not count them as "other notes".
  *
  * Undated tasks in a day note are not counted here: the tasks grid plots only
  * dated tasks (D9), and a count without rows to show for it would mislead.
  */
-export function gridDayMarks(day: GridDay | undefined): DayMarks {
+export function gridDayMarks(day: GridDay | undefined, statuses: readonly TaskStatus[]): DayMarks {
   if (!day) return { notes: 0 }
-  return { notes: 0, open: day.open, overdue: day.overdue }
+  return { notes: 0, open: day.open, overdue: day.overdue, hidden: gridHiddenCount(day, statuses) }
 }
 
 /** Whether a grid response has nothing to show at all. */

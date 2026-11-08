@@ -103,6 +103,15 @@ describe('withFacet', () => {
     expect(facetValue('type:"Meeting Notes"', 'type')).toBe('Meeting Notes')
     expect(facetValue('plan', 'when')).toBeNull()
   })
+
+  it('reads the query as the server does: `when:` inside a quoted value is that value', () => {
+    expect(facetValue('title:"a when:today"', 'when')).toBeNull()
+    expect(whenSelectValue('title:"a when:today"')).toBe(WHEN_ANY)
+    expect(withFacet('title:"a when:today" plan', 'when', '-7d')).toBe('title:"a when:today" plan when:-7d')
+    expect(withFacet('title:"a when:today" when:-7d', 'when', null)).toBe('title:"a when:today"')
+    // A `when:` still being typed is replaced, not left behind.
+    expect(withFacet('plan when:', 'when', 'today')).toBe('plan when:today')
+  })
 })
 
 describe('the When select', () => {

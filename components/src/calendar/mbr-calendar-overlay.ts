@@ -8,11 +8,15 @@
  * the view, plot-by and filter persist for the life of the page; it hands over
  * `scope` (`CalendarScope`: the notes, or all of them) and the services the
  * chunk may not import (`siteIndex`, `resolveUrl`, `navigate`, `config`,
- * `tagFields`). `tasksEndpoint` is accepted for phase 6 and never called: the
- * overlay reads `site.json` alone, so it works the same in static builds.
+ * `tagFields`). It reads `site.json` alone, so it works the same in static
+ * builds.
  *
  * The model is `overlay-model.ts` (bucketing once per scope and plot-by, the
- * filter, the key map); the grids are `mbr-calendar-grid.ts`. While open, one
+ * filter) and `month-grid.ts` (the key map, ranges and titles); the grids are
+ * `mbr-calendar-grid.ts`. Nothing renders more than it can show: the grids
+ * draw what fits, the day popover and each List day stop at a cap with a
+ * `+N more`, so a scope where thousands of notes share a day (Plot by
+ * modified on a fresh clone) stays fast. While open, one
  * capture-phase `window` keydown listener owns the keyboard (the flashcard
  * deck's pattern): it stops every key's propagation, so the page's `[`, `]`,
  * `p` and `?` never see them, and prevents the default only for keys it
@@ -25,8 +29,9 @@ import { ICON_BUTTON_CSS, KBD_CSS } from '../controls.js'
 import { ICON_SM, icon, iconChevronDown, iconChevronLeft, iconChevronRight, iconCircleHelp, iconX } from '../icons.js'
 import type { MarkdownFile } from '../sorting.js'
 import { DEFAULT_CALENDAR_CONFIG, type CalendarConfig } from './config.js'
-import { formatDate, isoWeekOf, monthOf, resolveWeekStart } from './month-grid.js'
+import { formatClock, formatDate, isoWeekOf, monthOf, resolveWeekStart, viewTitle, weekNumberLabel } from './month-grid.js'
 import { addDays, todayKey, type DateKey } from './note-date.js'
+import { periodKeysContaining } from './period.js'
 import {
   OVERLAY_SHORTCUTS,
   PLOT_BYS,
@@ -39,6 +44,7 @@ import {
   moveDay,
   nextMatch,
   nextPlotBy,
+  overflowSplit,
   prevMatch,
   overlayCommand,
   pageFolder,
@@ -63,6 +69,11 @@ declare global {
 /** Filter debounce (§5.3, the media browser's). */
 const FILTER_DEBOUNCE_MS = 100
 
+/** Most rows the day popover lists before its `+N more`. */
+const POPOVER_CAP = 100
+/** Most rows one List day shows before its `+N more`. */
+const LIST_DAY_CAP = 50
+
 /** One day as the views draw it, after the filter. */
 interface DayView {
   readonly daily: OverlayEntry | null
@@ -70,6 +81,12 @@ interface DayView {
 }
 
 const EMPTY_DAY: DayView = Object.freeze({ daily: null, entries: [] })
+
+/** The List view's rows, and how many each capped day left out. */
+interface ListRows {
+  readonly rows: readonly { readonly date: DateKey; readonly entry: OverlayEntry }[]
+  readonly more: ReadonlyMap<DateKey, number>
+}
 
 @customElement('mbr-calendar-overlay')
 export class MbrCalendarOverlayElement extends LitElement {
@@ -82,8 +99,6 @@ export class MbrCalendarOverlayElement extends LitElement {
   @property({ attribute: false }) config: CalendarConfig = DEFAULT_CALENDAR_CONFIG
   /** Frontmatter fields holding tags (the configured tag sources). */
   @property({ attribute: false }) tagFields: readonly string[] = ['tags']
-  /** Phase 6; never called here (static builds have none). */
-  @property({ attribute: false }) tasksEndpoint: string | null = null
   @property() locale = typeof navigator === 'undefined' ? 'en-US' : navigator.language || 'en-US'
   @property({ attribute: false }) now: () => Date = () => new Date()
 
@@ -110,6 +125,10 @@ export class MbrCalendarOverlayElement extends LitElement {
   private _buckets: Buckets | null = null
   private _bucketsKey: readonly [readonly MarkdownFile[], boolean, PlotBy] | null = null
   private _dayCache = new Map<DateKey, DayView>()
+  /** Bumped whenever `_dayCache` is dropped: keys the memos below. */
+  private _dayGen = 0
+  private _listMemo: { key: string; value: ListRows } | null = null
+  private _matchMemo = new Map<string, DateKey | null>()
   private _debounce: number | null = null
   private _focusAfterRender: 'grid' | 'popover' | 'list' | null = null
 
@@ -191,7 +210,7 @@ export class MbrCalendarOverlayElement extends LitElement {
     if (!buckets || !this._scoped) return
     const { from, to } = viewRange(this._view ?? 'month', this._focus, this._weekStart())
     if (this._countRange(from, to).shown > 0) return
-    const near = prevMatch(buckets, from, this._terms) ?? nextMatch(buckets, to, this._terms)
+    const near = this._nearMatch(-1, from, to) ?? this._nearMatch(1, from, to)
     if (near) this._focus = near
   }
 
@@ -225,9 +244,31 @@ export class MbrCalendarOverlayElement extends LitElement {
         dateFields: this.config.dateFields,
       })
       this._bucketsKey = [base, this._folderOnly, this._plotBy]
-      this._dayCache.clear()
+      this._dropDays()
     }
     return this._buckets
+  }
+
+  /** Forgets every filtered day and what was derived from them. */
+  private _dropDays(): void {
+    this._dayCache.clear()
+    this._dayGen++
+    this._listMemo = null
+    this._matchMemo.clear()
+  }
+
+  /**
+   * The nearest day with a match before `from` (`-1`) or after `to` (`1`),
+   * memoized per (buckets, filter, range): render asks on every keystroke.
+   */
+  private _nearMatch(dir: -1 | 1, from: DateKey, to: DateKey): DateKey | null {
+    const buckets = this._bucketsNow()
+    if (!buckets) return null
+    const key = `${dir}|${from}|${to}`
+    if (!this._matchMemo.has(key)) {
+      this._matchMemo.set(key, dir < 0 ? prevMatch(buckets, from, this._terms) : nextMatch(buckets, to, this._terms))
+    }
+    return this._matchMemo.get(key)!
   }
 
   /** One day after the filter, memoized until the filter or buckets change. */
@@ -260,28 +301,22 @@ export class MbrCalendarOverlayElement extends LitElement {
     return { shown, total }
   }
 
-  private _time(minutes: number): string {
-    const d = new Date(Date.UTC(1970, 0, 1, Math.floor(minutes / 60), minutes % 60))
-    try {
-      return new Intl.DateTimeFormat(this.locale, { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' }).format(d)
-    } catch {
-      return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`
-    }
-  }
-
   private _gridEntry(e: OverlayEntry, withTime: boolean): GridEntry {
     return {
-      key: e.file.url_path,
       title: e.title,
       href: this.resolveUrl(e.file.url_path),
       color: e.color,
-      ...(withTime && e.minutes !== null ? { time: this._time(e.minutes) } : {}),
+      ...(withTime && e.minutes !== null ? { time: formatClock(e.minutes, this.locale) } : {}),
       tooltip: [e.title, e.type, e.folder].filter(Boolean).join(' · '),
     }
   }
 
-  private _monthEntries = (date: DateKey): readonly GridEntry[] => this._day(date).entries.map((e) => this._gridEntry(e, false))
-  private _weekEntries = (date: DateKey): readonly GridEntry[] => this._day(date).entries.map((e) => this._gridEntry(e, true))
+  /** The first `limit` entries of a day as grid lines: a grid never asks for more than it draws. */
+  private _monthEntries = (date: DateKey, limit: number): readonly GridEntry[] =>
+    this._day(date).entries.slice(0, limit).map((e) => this._gridEntry(e, false))
+  private _weekEntries = (date: DateKey, limit: number): readonly GridEntry[] =>
+    this._day(date).entries.slice(0, limit).map((e) => this._gridEntry(e, true))
+  private _dayCount = (date: DateKey): number => this._day(date).entries.length
   private _dayMarks = (date: DateKey): DayMarks => {
     const daily = this._day(date).daily
     return daily ? { dailyUrl: this.resolveUrl(daily.file.url_path) } : {}
@@ -330,7 +365,7 @@ export class MbrCalendarOverlayElement extends LitElement {
     this._debounce = window.setTimeout(() => {
       this._debounce = null
       this._terms = parseFilter(text)
-      this._dayCache.clear()
+      this._dropDays()
       this._listIndex = 0
     }, FILTER_DEBOUNCE_MS)
   }
@@ -391,16 +426,27 @@ export class MbrCalendarOverlayElement extends LitElement {
     this._jump(parsed.date)
   }
 
-  /** The rows of the List view, flat. */
-  private _listRows(): { date: DateKey; entry: OverlayEntry }[] {
+  /**
+   * The rows of the List view, flat, each day capped at {@link LIST_DAY_CAP}
+   * (the rest is the day's `more`). Memoized per (month, filter, buckets).
+   */
+  private _listRows(): ListRows {
     const { from, to } = viewRange('list', this._focus, this._weekStart())
+    this._bucketsNow()
+    const key = `${from}|${this._dayGen}`
+    if (this._listMemo?.key === key) return this._listMemo.value
     const rows: { date: DateKey; entry: OverlayEntry }[] = []
+    const more = new Map<DateKey, number>()
     for (const date of daysBetween(from, to)) {
       const day = this._day(date)
-      if (day.daily) rows.push({ date, entry: day.daily })
-      for (const entry of day.entries) rows.push({ date, entry })
+      const all = day.daily ? [day.daily, ...day.entries.slice(0, LIST_DAY_CAP)] : day.entries
+      const split = overflowSplit(Math.min(all.length, LIST_DAY_CAP), LIST_DAY_CAP, day.entries.length + (day.daily ? 1 : 0))
+      for (const entry of all.slice(0, split.shown)) rows.push({ date, entry })
+      if (split.more) more.set(date, split.more)
     }
-    return rows
+    const value = { rows, more }
+    this._listMemo = { key, value }
+    return value
   }
 
   private _run(command: OverlayCommand): boolean {
@@ -440,7 +486,7 @@ export class MbrCalendarOverlayElement extends LitElement {
           this._openDay(this._focus)
           return true
         }
-        const row = this._listRows()[this._listIndex]
+        const row = this._listRows().rows[this._listIndex]
         if (row) this.navigate(this.resolveUrl(row.entry.file.url_path))
         return true
       }
@@ -448,7 +494,7 @@ export class MbrCalendarOverlayElement extends LitElement {
         break
     }
     if (view === 'list' && command !== 'prev' && command !== 'next') {
-      const rows = this._listRows()
+      const rows = this._listRows().rows
       const delta = command === 'left' || command === 'up' ? -1 : 1
       this._listIndex = Math.max(0, Math.min(rows.length - 1, this._listIndex + delta))
       this._focusAfterRender = 'list'
@@ -505,27 +551,20 @@ export class MbrCalendarOverlayElement extends LitElement {
 
   // ---- render ----
 
-  private _title(view: CalendarView): string {
-    if (view !== 'week') return formatDate(`${monthOf(this._focus)}-01`, this.locale, { month: 'long', year: 'numeric' })
-    const { from, to } = viewRange('week', this._focus, this._weekStart())
-    return `${formatDate(from, this.locale, { month: 'short', day: 'numeric' })} – ${formatDate(to, this.locale, { month: 'short', day: 'numeric', year: 'numeric' })}`
-  }
-
   /** Week / month / quarter / year notes of the period on screen that exist. */
   private _periodLinks(view: CalendarView): TemplateResult[] {
     const { from } = viewRange(view, this._focus, this._weekStart())
-    // A week belongs to its Thursday's month, quarter and year (ISO).
-    const anchor = view === 'week' ? addDays(from, (4 - this._weekStart() + 7) % 7) : from
-    const year = anchor.slice(0, 4)
-    const quarter = `${year}-Q${Math.floor((Number(anchor.slice(5, 7)) - 1) / 3) + 1}`
-    const week = isoWeekOf(anchor).key
-    const keys: [string, string][] = [
-      ...(view === 'week' ? ([[week, `Week ${Number(week.slice(6))}`]] as [string, string][]) : []),
-      [monthOf(anchor), formatDate(`${monthOf(anchor)}-01`, this.locale, { month: 'short' })],
-      [quarter, `Q${quarter.slice(6)} ${year}`],
-      [year, year],
+    // A week view is about the ISO week of its row's Thursday, and that week
+    // belongs to its Thursday's month, quarter and year (Rust's `containing`).
+    const keys = periodKeysContaining(view === 'week' ? isoWeekOf(addDays(from, (4 - this._weekStart() + 7) % 7)) : from)
+    if (!keys) return []
+    const links: [string, string][] = [
+      ...(view === 'week' ? ([[keys.week, `Week ${weekNumberLabel(keys.week)}`]] as [string, string][]) : []),
+      [keys.month, formatDate(`${keys.month}-01`, this.locale, { month: 'short' })],
+      [keys.quarter, `Q${keys.quarter.slice(6)} ${keys.year}`],
+      [keys.year, keys.year],
     ]
-    return keys.flatMap(([key, label]) => {
+    return links.flatMap(([key, label]) => {
       const url = this._periodUrl(key)
       return url ? [html`<a href=${url} title=${`Open the ${label} note`}>${label}</a>`] : []
     })
@@ -533,52 +572,135 @@ export class MbrCalendarOverlayElement extends LitElement {
 
   private _renderPicker(): TemplateResult {
     const months = Array.from({ length: 12 }, (_, i) => `${this._pickerYear}-${String(i + 1).padStart(2, '0')}`)
-    // prettier-ignore
-    return html`<div class="picker" role="dialog" aria-label="Jump to a date"><div class="yr"><button type="button" class="mbr-icon-btn sm" aria-label="Previous year" @click=${() => this._pickerYear--}>${icon(iconChevronLeft, { size: ICON_SM })}</button><strong>${this._pickerYear}</strong><button type="button" class="mbr-icon-btn sm" aria-label="Next year" @click=${() => this._pickerYear++}>${icon(iconChevronRight, { size: ICON_SM })}</button></div><div class="months">${months.map((m) => html`<button type="button" class=${m === monthOf(this._focus) ? 'cur' : ''} @click=${() => this._jump(`${m}-01`)}>${formatDate(`${m}-01`, this.locale, { month: 'short' })}</button>`)}</div><form @submit=${this._onJumpSubmit}><input type="text" placeholder="2026-10 or 2026-W44" aria-label="Date, month or week" aria-invalid=${this._jumpError ? 'true' : 'false'} @input=${() => (this._jumpError = false)} /><button type="submit">Go</button></form>${this._jumpError ? html`<p class="err" role="alert">Try 2026-10, 2026-10-31 or 2026-W44.</p>` : nothing}</div>`
+    const focusMonth = monthOf(this._focus)
+    return html`
+      <div class="picker" role="dialog" aria-label="Jump to a date">
+        <div class="yr">
+          <button type="button" class="mbr-icon-btn sm" aria-label="Previous year" @click=${() => this._pickerYear--}>
+            ${icon(iconChevronLeft, { size: ICON_SM })}
+          </button>
+          <strong>${this._pickerYear}</strong>
+          <button type="button" class="mbr-icon-btn sm" aria-label="Next year" @click=${() => this._pickerYear++}>
+            ${icon(iconChevronRight, { size: ICON_SM })}
+          </button>
+        </div>
+        <div class="months">
+          ${months.map(
+            (m) => html`
+              <button type="button" class=${m === focusMonth ? 'cur' : ''} @click=${() => this._jump(`${m}-01`)}>
+                ${formatDate(`${m}-01`, this.locale, { month: 'short' })}
+              </button>
+            `
+          )}
+        </div>
+        <form @submit=${this._onJumpSubmit}>
+          <input
+            type="text"
+            placeholder="2026-10 or 2026-W44"
+            aria-label="Date, month or week"
+            aria-invalid=${this._jumpError ? 'true' : 'false'}
+            @input=${() => (this._jumpError = false)}
+          />
+          <button type="submit">Go</button>
+        </form>
+        ${this._jumpError ? html`<p class="err" role="alert">Try 2026-10, 2026-10-31 or 2026-W44.</p>` : nothing}
+      </div>
+    `
+  }
+
+  private _closePopover = (): void => {
+    this._popover = null
+    this._focusAfterRender = 'grid'
   }
 
   private _renderPopover(): TemplateResult | typeof nothing {
     const pop = this._popover
     if (!pop) return nothing
     const day = this._day(pop.date)
-    const rows = [...(day.daily ? [day.daily] : []), ...day.entries]
-    // prettier-ignore
-    return html`<div class="popover" role="dialog" aria-label=${formatDate(pop.date, this.locale, { dateStyle: 'full' })}><div class="ph"><strong>${formatDate(pop.date, this.locale, { weekday: 'long', month: 'long', day: 'numeric' })}</strong><button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${() => { this._popover = null; this._focusAfterRender = 'grid' }}>${icon(iconX, { size: ICON_SM })}</button></div><ul>${rows.map((e) => html`<li>${this._renderRowBody(e, e.daily)}</li>`)}</ul></div>`
+    const count = day.entries.length + (day.daily ? 1 : 0)
+    const { shown, more } = overflowSplit(count, POPOVER_CAP)
+    const rows = [...(day.daily ? [day.daily] : []), ...day.entries.slice(0, shown)].slice(0, shown)
+    return html`
+      <div class="popover" role="dialog" aria-label=${formatDate(pop.date, this.locale, { dateStyle: 'full' })}>
+        <div class="ph">
+          <strong>${formatDate(pop.date, this.locale, { weekday: 'long', month: 'long', day: 'numeric' })}</strong>
+          <button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${this._closePopover}>${icon(iconX, { size: ICON_SM })}</button>
+        </div>
+        <ul>
+          ${rows.map((e) => html`<li>${this._renderRowBody(e, e.daily)}</li>`)}
+          ${more ? html`<li class="more">+${more} more — filter (/) to narrow</li>` : nothing}
+        </ul>
+      </div>
+    `
   }
 
   private _renderRowBody(e: OverlayEntry, daily: boolean, attrs?: { i: number; focus: boolean }): TemplateResult {
     const dot = e.color === null ? '' : `background:var(--mbr-cal-type-${e.color})`
-    // prettier-ignore
-    return html`<a class=${attrs ? 'row' : 'prow'} href=${this.resolveUrl(e.file.url_path)} data-i=${attrs?.i ?? nothing} tabindex=${attrs ? (attrs.focus ? 0 : -1) : nothing}><i class="dot" style=${dot}></i>${e.minutes !== null ? html`<span class="time">${this._time(e.minutes)}</span>` : nothing}<span class="t">${daily ? 'Daily note' : e.title}</span>${e.folder ? html`<span class="folder">${e.folder}</span>` : nothing}</a>`
+    const time = e.minutes !== null ? html`<span class="time">${formatClock(e.minutes, this.locale)}</span>` : nothing
+    const folder = e.folder ? html`<span class="folder">${e.folder}</span>` : nothing
+    const body = html`<i class="dot" style=${dot}></i>${time}<span class="t">${daily ? 'Daily note' : e.title}</span>${folder}`
+    return html`<a
+      class=${attrs ? 'row' : 'prow'}
+      href=${this.resolveUrl(e.file.url_path)}
+      data-i=${attrs?.i ?? nothing}
+      tabindex=${attrs ? (attrs.focus ? 0 : -1) : nothing}
+    >${body}</a>`
+  }
+
+  private _onListFocus = (e: Event): void => {
+    const i = (e.target as HTMLElement).dataset?.i
+    if (i !== undefined) this._listIndex = Number(i)
   }
 
   private _renderList(): TemplateResult {
-    const rows = this._listRows()
-    let i = 0
-    let last = ''
-    const out: TemplateResult[] = []
-    for (const row of rows) {
-      if (row.date !== last) {
-        last = row.date
-        // prettier-ignore
-        out.push(html`<h3 class=${row.date === this._today ? 'today' : ''}><time datetime=${row.date}>${formatDate(row.date, this.locale, { weekday: 'long', month: 'long', day: 'numeric' })}</time></h3>`)
+    const { rows, more } = this._listRows()
+    const out: (TemplateResult | typeof nothing)[] = []
+    rows.forEach((row, i) => {
+      if (i === 0 || rows[i - 1].date !== row.date) {
+        const label = formatDate(row.date, this.locale, { weekday: 'long', month: 'long', day: 'numeric' })
+        out.push(html`<h3 class=${row.date === this._today ? 'today' : ''}><time datetime=${row.date}>${label}</time></h3>`)
       }
       out.push(this._renderRowBody(row.entry, row.entry.daily, { i, focus: i === this._listIndex }))
-      i++
-    }
-    // prettier-ignore
-    return html`<div class="list" @focusin=${(e: Event) => { const i = (e.target as HTMLElement).dataset?.i; if (i !== undefined) this._listIndex = Number(i) }}>${out}</div>`
+      const left = more.get(row.date)
+      if (left && rows[i + 1]?.date !== row.date) out.push(html`<p class="more">+${left} more — filter (/) to narrow</p>`)
+    })
+    return html`<div class="list" @focusin=${this._onListFocus}>${out}</div>`
   }
 
   private _renderView(view: CalendarView): TemplateResult {
     const weekNumbers = this.config.weekNumbers ?? (this._index ? this._index.week.length > 0 : false)
     if (view === 'list') return this._renderList()
     if (view === 'week') {
-      // prettier-ignore
-      return html`<mbr-calendar-week-grid .start=${viewRange('week', this._focus, this._weekStart()).from} .focused=${this._focus} .today=${this._today} .locale=${this.locale} .dayEntries=${this._weekEntries} .dayMarks=${this._dayMarks} @mbr-calendar-focus=${this._onGridFocus}></mbr-calendar-week-grid>`
+      return html`
+        <mbr-calendar-week-grid
+          .start=${viewRange('week', this._focus, this._weekStart()).from}
+          .focused=${this._focus}
+          .today=${this._today}
+          .locale=${this.locale}
+          .dayEntries=${this._weekEntries}
+          .dayCount=${this._dayCount}
+          .dayMarks=${this._dayMarks}
+          @mbr-calendar-focus=${this._onGridFocus}
+          @mbr-calendar-day=${this._onGridDay}
+        ></mbr-calendar-week-grid>
+      `
     }
-    // prettier-ignore
-    return html`<mbr-calendar-month-grid .month=${monthOf(this._focus)} .focused=${this._focus} .today=${this._today} .weekStart=${this._weekStart()} .weekNumbers=${weekNumbers} .locale=${this.locale} .dayEntries=${this._monthEntries} .dayMarks=${this._dayMarks} .weekHref=${this._weekHref} @mbr-calendar-focus=${this._onGridFocus} @mbr-calendar-day=${this._onGridDay}></mbr-calendar-month-grid>`
+    return html`
+      <mbr-calendar-month-grid
+        .month=${monthOf(this._focus)}
+        .focused=${this._focus}
+        .today=${this._today}
+        .weekStart=${this._weekStart()}
+        .weekNumbers=${weekNumbers}
+        .locale=${this.locale}
+        .dayEntries=${this._monthEntries}
+        .dayCount=${this._dayCount}
+        .dayMarks=${this._dayMarks}
+        .weekHref=${this._weekHref}
+        @mbr-calendar-focus=${this._onGridFocus}
+        @mbr-calendar-day=${this._onGridDay}
+      ></mbr-calendar-month-grid>
+    `
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -589,18 +711,118 @@ export class MbrCalendarOverlayElement extends LitElement {
     const { shown, total } = this._countRange(from, to)
     const where = view === 'week' ? 'this week' : `in ${formatDate(from, this.locale, { month: 'long' })}`
     const count = `${this._terms.length ? `${shown} of ` : ''}${total} ${total === 1 ? 'note' : 'notes'} ${where}`
-    const before = buckets && shown === 0 ? prevMatch(buckets, from, this._terms) : null
-    const after = buckets && shown === 0 ? nextMatch(buckets, to, this._terms) : null
+    const before = buckets && shown === 0 ? this._nearMatch(-1, from, to) : null
+    const after = buckets && shown === 0 ? this._nearMatch(1, from, to) : null
     const unit = view === 'week' ? 'week' : 'month'
     const step = (d: number) => () => this._run(d < 0 ? 'prev' : 'next')
-    // prettier-ignore
-    return html`<div class="backdrop" @click=${() => this._close()}></div><div class="dialog" role="dialog" aria-modal="true" aria-label="Calendar">
-<div class="bar"><div class="nav"><button type="button" class="mbr-icon-btn" aria-label=${`Previous ${unit}`} title=${`Previous ${unit} ([)`} @click=${step(-1)}>${icon(iconChevronLeft)}</button><button type="button" class="mbr-icon-btn labeled" title="Today (t)" @click=${() => this._run('today')}>Today</button><button type="button" class="mbr-icon-btn" aria-label=${`Next ${unit}`} title=${`Next ${unit} (])`} @click=${step(1)}>${icon(iconChevronRight)}</button><button type="button" class="title mbr-icon-btn labeled" aria-expanded=${this._picker ? 'true' : 'false'} title="Jump to… (g)" @click=${() => this._togglePicker()}>${this._title(view)}${icon(iconChevronDown, { size: ICON_SM })}</button><span class="links">${this._periodLinks(view)}</span></div>
-<div class="views" role="group" aria-label="View">${(['month', 'week', 'list'] as const).map((v) => html`<button type="button" aria-pressed=${v === view ? 'true' : 'false'} title=${`${v === 'list' ? 'List' : v === 'week' ? 'Week' : 'Month'} (${v === 'list' ? 'a' : v[0]})`} @click=${() => this._setView(v)}>${v === 'list' ? 'List' : v === 'week' ? 'Week' : 'Month'}</button>`)}</div><button type="button" class="mbr-icon-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" @click=${() => (this._help = !this._help)}>${icon(iconCircleHelp)}</button><button type="button" class="mbr-icon-btn" aria-label="Close" title="Close (Esc)" @click=${() => this._close()}>${icon(iconX)}</button></div>
-<div class="tools"><span class="chip">${this._label}${this._scoped ? html`<button type="button" class="mbr-icon-btn sm" aria-label="Show all notes" title="Show all notes" @click=${() => this.widen()}>${icon(iconX, { size: ICON_SM })}</button>` : nothing}</span>${this._folder && !this._scoped ? html`<button type="button" class="chip toggle" aria-pressed=${this._folderOnly ? 'true' : 'false'} @click=${() => this._toggleFolder()}>This folder: ${this._folder}</button>` : nothing}<input class="filter" type="search" placeholder="Filter (/)" aria-label="Filter notes" .value=${this._filterText} @input=${(e: Event) => this._setFilter((e.target as HTMLInputElement).value)} autocomplete="off" spellcheck="false" /><label class="plot">Plot by <select @change=${(e: Event) => this._setPlotBy((e.target as HTMLSelectElement).value as PlotBy)}>${PLOT_BYS.map((p) => html`<option value=${p} ?selected=${p === this._plotBy}>${PLOT_BY_LABELS[p]}</option>`)}</select></label><span class="count" role="status">${buckets ? count : 'Loading…'}</span></div>
-${buckets && shown === 0 ? html`<div class="empty">${this._terms.length ? 'No matches' : 'No notes'} ${where}.${before ? html` <button type="button" class="linkish" @click=${() => this._setFocus(before)}>‹ Previous ${unit} with matches</button>` : nothing}${after ? html` <button type="button" class="linkish" @click=${() => this._setFocus(after)}>Next ${unit} with matches ›</button>` : nothing}</div>` : nothing}
-<div class=${`view ${view}`}>${buckets ? this._renderView(view) : nothing}</div>
-${this._picker ? this._renderPicker() : nothing}${this._renderPopover()}${this._help ? html`<div class="help" role="dialog" aria-label="Calendar keys"><table>${OVERLAY_SHORTCUTS.map((s) => html`<tr><td><kbd>${s.keys}</kbd></td><td>${s.description}</td></tr>`)}</table></div>` : nothing}</div>`
+    const viewName = (v: CalendarView): string => (v === 'list' ? 'List' : v === 'week' ? 'Week' : 'Month')
+    const nav = html`
+      <div class="nav">
+        <button type="button" class="mbr-icon-btn" aria-label=${`Previous ${unit}`} title=${`Previous ${unit} ([)`} @click=${step(-1)}>
+          ${icon(iconChevronLeft)}
+        </button>
+        <button type="button" class="mbr-icon-btn labeled" title="Today (t)" @click=${() => this._run('today')}>Today</button>
+        <button type="button" class="mbr-icon-btn" aria-label=${`Next ${unit}`} title=${`Next ${unit} (])`} @click=${step(1)}>
+          ${icon(iconChevronRight)}
+        </button>
+        <button
+          type="button"
+          class="title mbr-icon-btn labeled"
+          aria-expanded=${this._picker ? 'true' : 'false'}
+          title="Jump to… (g)"
+          @click=${() => this._togglePicker()}
+        >
+          ${viewTitle(view, this._focus, this._weekStart(), this.locale)}${icon(iconChevronDown, { size: ICON_SM })}
+        </button>
+        <span class="links">${this._periodLinks(view)}</span>
+      </div>
+    `
+    const bar = html`
+      <div class="bar">
+        ${nav}
+        <div class="views" role="group" aria-label="View">
+          ${(['month', 'week', 'list'] as const).map(
+            (v) => html`
+              <button
+                type="button"
+                aria-pressed=${v === view ? 'true' : 'false'}
+                title=${`${viewName(v)} (${v === 'list' ? 'a' : v[0]})`}
+                @click=${() => this._setView(v)}
+              >
+                ${viewName(v)}
+              </button>
+            `
+          )}
+        </div>
+        <button type="button" class="mbr-icon-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" @click=${() => (this._help = !this._help)}>
+          ${icon(iconCircleHelp)}
+        </button>
+        <button type="button" class="mbr-icon-btn" aria-label="Close" title="Close (Esc)" @click=${() => this._close()}>${icon(iconX)}</button>
+      </div>
+    `
+    const widen = this._scoped
+      ? html`<button type="button" class="mbr-icon-btn sm" aria-label="Show all notes" title="Show all notes" @click=${() => this.widen()}>
+          ${icon(iconX, { size: ICON_SM })}
+        </button>`
+      : nothing
+    const tools = html`
+      <div class="tools">
+        <span class="chip">${this._label}${widen}</span>
+        ${this._folder && !this._scoped
+          ? html`<button type="button" class="chip toggle" aria-pressed=${this._folderOnly ? 'true' : 'false'} @click=${() => this._toggleFolder()}>
+              This folder: ${this._folder}
+            </button>`
+          : nothing}
+        <input
+          class="filter"
+          type="search"
+          placeholder="Filter (/)"
+          aria-label="Filter notes"
+          .value=${this._filterText}
+          @input=${(e: Event) => this._setFilter((e.target as HTMLInputElement).value)}
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <label class="plot">
+          Plot by
+          <select @change=${(e: Event) => this._setPlotBy((e.target as HTMLSelectElement).value as PlotBy)}>
+            ${PLOT_BYS.map((p) => html`<option value=${p} ?selected=${p === this._plotBy}>${PLOT_BY_LABELS[p]}</option>`)}
+          </select>
+        </label>
+        <span class="count" role="status">${buckets ? count : 'Loading…'}</span>
+      </div>
+    `
+    const empty =
+      buckets && shown === 0
+        ? html`
+            <div class="empty">
+              ${this._terms.length ? 'No matches' : 'No notes'} ${where}.
+              ${before
+                ? html`<button type="button" class="linkish" @click=${() => this._setFocus(before)}>‹ Previous ${unit} with matches</button>`
+                : nothing}
+              ${after
+                ? html`<button type="button" class="linkish" @click=${() => this._setFocus(after)}>Next ${unit} with matches ›</button>`
+                : nothing}
+            </div>
+          `
+        : nothing
+    const help = this._help
+      ? html`
+          <div class="help" role="dialog" aria-label="Calendar keys">
+            <table>
+              ${OVERLAY_SHORTCUTS.map((sc) => html`<tr><td><kbd>${sc.keys}</kbd></td><td>${sc.description}</td></tr>`)}
+            </table>
+          </div>
+        `
+      : nothing
+    return html`
+      <div class="backdrop" @click=${() => this._close()}></div>
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="Calendar">
+        ${bar} ${tools} ${empty}
+        <div class=${`view ${view}`}>${buckets ? this._renderView(view) : nothing}</div>
+        ${this._picker ? this._renderPicker() : nothing}${this._renderPopover()}${help}
+      </div>
+    `
   }
 
   static override styles = [
@@ -859,6 +1081,12 @@ ${this._picker ? this._renderPicker() : nothing}${this._renderPopover()}${this._
       .popover li {
         margin: 0;
         list-style: none;
+      }
+      .popover .more,
+      .list .more {
+        margin: 0.2rem 0.4rem;
+        font-size: 0.8rem;
+        color: var(--pico-muted-color);
       }
       .ph,
       .yr {

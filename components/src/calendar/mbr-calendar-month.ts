@@ -31,6 +31,7 @@ import {
   monthGrid,
   monthOf,
   moveFocus,
+  weekNumberLabel,
   weekdayLabels,
   type MonthKey,
   type Weekday,
@@ -52,6 +53,19 @@ export function dayLabel(date: DateKey, locale: string, marks: DayMarks, today: 
   if (marks.notes) parts.push(`${marks.notes} other ${marks.notes === 1 ? 'note' : 'notes'}`)
   if (marks.open) parts.push(`${marks.open} open ${marks.open === 1 ? 'task' : 'tasks'}`)
   return parts.join(', ')
+}
+
+/** Fires a bubbling, composed calendar event from `host` (every calendar grid's events). */
+export function emitCalendarEvent(host: HTMLElement, type: string, detail: Record<string, unknown> = {}): void {
+  host.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }))
+}
+
+/** A grid row's ISO week number: a link to the week note when there is one. */
+export function renderWeekNumber(isoWeek: string, href: string | null): TemplateResult {
+  const n = weekNumberLabel(isoWeek)
+  return href
+    ? html`<a role="rowheader" class="wk has-note" href=${href} title=${`Week ${n}`}>${n}</a>`
+    : html`<span role="rowheader" class="wk" title=${`Week ${n}`}>${n}</span>`
 }
 
 @customElement('mbr-calendar-month')
@@ -103,7 +117,7 @@ export class MbrCalendarMonthElement extends LitElement {
   }
 
   private _emit(type: string, detail: Record<string, unknown> = {}): void {
-    this.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }))
+    emitCalendarEvent(this, type, detail)
   }
 
   private _goMonth(delta: number): void {
@@ -152,16 +166,24 @@ export class MbrCalendarMonthElement extends LitElement {
     ]
       .filter(Boolean)
       .join(' ')
-    // prettier-ignore
-    return html`<div role="gridcell" class=${classes} data-date=${date} tabindex=${date === this._focus ? 0 : -1} aria-selected=${date === this.selected ? 'true' : 'false'} aria-label=${dayLabel(date, this.locale, marks, this.today)} @click=${() => { this._focus = date; this._emit('mbr-calendar-select', { date }) }} @dblclick=${() => this._emit('mbr-calendar-activate', { date })}><span class="num" aria-hidden="true">${Number(date.slice(8))}</span>${marks.open ? html`<span class=${marks.overdue ? 'ring overdue' : 'ring'} aria-hidden="true"></span>` : nothing}<span class="dots" aria-hidden="true">${Array.from({ length: dots }, () => html`<i></i>`)}</span></div>`
-  }
-
-  private _renderWeekNumber(isoWeek: string): TemplateResult {
-    const href = this.weekHref(isoWeek)
-    const label = String(Number(isoWeek.slice(6)))
-    return href
-      ? html`<a role="rowheader" class="wk has-note" href=${href} title=${`Week ${label}`}>${label}</a>`
-      : html`<span role="rowheader" class="wk" title=${`Week ${label}`}>${label}</span>`
+    const select = (): void => {
+      this._focus = date
+      this._emit('mbr-calendar-select', { date })
+    }
+    return html`
+      <div
+        role="gridcell"
+        class=${classes}
+        data-date=${date}
+        tabindex=${date === this._focus ? 0 : -1}
+        aria-selected=${date === this.selected ? 'true' : 'false'}
+        aria-label=${dayLabel(date, this.locale, marks, this.today)}
+        @click=${select}
+        @dblclick=${() => this._emit('mbr-calendar-activate', { date })}
+      ><span class="num" aria-hidden="true">${Number(date.slice(8))}</span>${marks.open
+        ? html`<span class=${marks.overdue ? 'ring overdue' : 'ring'} aria-hidden="true"></span>`
+        : nothing}<span class="dots" aria-hidden="true">${Array.from({ length: dots }, () => html`<i></i>`)}</span></div>
+    `
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -169,7 +191,6 @@ export class MbrCalendarMonthElement extends LitElement {
     const grid = monthGrid(this.month, this.weekStart)
     const title = formatDate(`${this.month}-01`, this.locale, { month: 'long', year: 'numeric' })
     const labels = weekdayLabels(this.weekStart, this.locale)
-    // prettier-ignore
     return html`
       <div class="head">
         ${this.monthHref ? html`<a class="title" href=${this.monthHref} title=${`${title} (open the month note)`}>${title}</a>` : html`<span class="title" title=${title}>${title}</span>`}
@@ -179,7 +200,14 @@ export class MbrCalendarMonthElement extends LitElement {
       </div>
       <div role="grid" class=${this.weekNumbers ? 'grid with-weeks' : 'grid'} aria-label=${title} @keydown=${this._onKeydown}>
         <div role="row" class="row labels">${this.weekNumbers ? html`<span class="wk" aria-hidden="true"></span>` : nothing}${labels.map((l) => html`<span role="columnheader" class="dow">${l}</span>`)}</div>
-        ${grid.weeks.map((week) => html`<div role="row" class="row">${this.weekNumbers ? this._renderWeekNumber(week.isoWeek) : nothing}${week.days.map((d) => this._renderCell(d, monthOf(d) === this.month))}</div>`)}
+        ${grid.weeks.map(
+          (week) => html`
+            <div role="row" class="row">
+              ${this.weekNumbers ? renderWeekNumber(week.isoWeek, this.weekHref(week.isoWeek)) : nothing}
+              ${week.days.map((d) => this._renderCell(d, monthOf(d) === this.month))}
+            </div>
+          `
+        )}
       </div>
     `
   }

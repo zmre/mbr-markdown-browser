@@ -12,10 +12,9 @@ import {
   postEditorState,
   postPageState,
   postSlidesState,
-  resetDayNotes,
   watchDayNotes,
 } from './app-bridge.ts'
-import { setPeriodicNavDeps } from './calendar/periodic-nav.ts'
+import { knownHasDayNotes, openTodayDailyNote, setPeriodicNavDeps } from './calendar/periodic-nav.ts'
 import type { PeriodicSource } from './calendar/periodic.ts'
 import { EDITOR_STATE_EVENT } from './mbr-editor.ts'
 import { SLIDES_STATE_EVENT } from './mbr-slides.ts'
@@ -144,15 +143,18 @@ function installPage(
     open: (tab: string) => opened.push(`mbr-fuzzy-nav:${tab}`),
   })
   if (options.calendar) {
+    // `<mbr-calendar>`'s public surface: `open(kind)` and its three gates
+    // (`hasDayNotes` reads what the periodic index has learned, as the real one does).
     stub('mbr-calendar', {
       overlayAvailable: options.calendar.overlayAvailable ?? true,
-      isDocked: options.calendar.isDocked ?? false,
-      openOverlay: (scope: { label: string; pagePath?: string }) => {
-        opened.push(`mbr-calendar:overlay:${scope.label}`)
-        return true
+      companionAvailable: !(options.calendar.isDocked ?? false) && options.calendarConfig?.companion !== 'off',
+      open: (kind: string) => {
+        if (kind === 'today') void openTodayDailyNote()
+        else opened.push(`mbr-calendar:${kind}`)
       },
-      toggleCompanion: () => opened.push('mbr-calendar:companion'),
     })
+    const calendar = document.querySelector('mbr-calendar')!
+    Object.defineProperty(calendar, 'hasDayNotes', { get: () => knownHasDayNotes() === true, configurable: true })
   }
   window.__MBR_CONFIG__ = {
     serverMode: true,
@@ -170,7 +172,7 @@ describe('available actions follow the page', () => {
     window.__MBR_CONFIG__ = undefined
   })
 
-  beforeEach(() => resetDayNotes())
+  beforeEach(() => setPeriodicNavDeps(null))
 
   it('lists only what works: no edit, tasks, deck or slides on a plain read-only page', () => {
     installPage()
@@ -258,12 +260,12 @@ describe('calendar actions (design/calendar.md §9.1)', () => {
   let navigate: ReturnType<typeof vi.fn<(url: string) => void>>
 
   beforeEach(() => {
-    resetDayNotes()
+    setPeriodicNavDeps(null)
     navigate = vi.fn<(url: string) => void>()
   })
   afterEach(() => {
     setPeriodicNavDeps(null)
-    resetDayNotes()
+    setPeriodicNavDeps(null)
     document.body.innerHTML = ''
     window.__MBR_CONFIG__ = undefined
   })
@@ -322,7 +324,7 @@ describe('calendar actions (design/calendar.md §9.1)', () => {
     const { opened } = installPage({ calendar: {} })
     expect(availableActions()).toContain('calendar')
     expect(openAppAction('calendar')).toBe(true)
-    expect(opened).toEqual(['mbr-calendar:overlay:All notes'])
+    expect(opened).toEqual(['mbr-calendar:overlay'])
     document.body.innerHTML = ''
     const off = installPage({ calendar: { overlayAvailable: false } })
     expect(availableActions()).not.toContain('calendar')

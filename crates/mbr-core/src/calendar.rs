@@ -244,7 +244,7 @@ impl Period {
     /// The full English label of the period a page is about:
     /// `Friday, October 31, 2026`, `Week 44, 2026`, `October 2026`,
     /// `Q4 2026`, `2026`.
-    pub fn label_long(&self) -> String {
+    fn label_long(&self) -> String {
         match *self {
             Period::Day(date) => date.format("%A, %B %-d, %Y").to_string(),
             Period::Week { iso_year, week } => format!("Week {week}, {iso_year}"),
@@ -256,7 +256,7 @@ impl Period {
     /// `Thu, Oct 30`, `Week 43`, `September 2026`, `Q3 2026`, `2025`. The
     /// year is added to a day or week when it differs from `reference`'s, so
     /// stepping across New Year never reads as going back eleven months.
-    pub fn label_short(&self, reference: Option<&Period>) -> String {
+    fn label_short(&self, reference: Option<&Period>) -> String {
         let reference_year = reference.map(|p| p.label_year());
         let other_year = reference_year.is_some_and(|y| y != self.label_year());
         match *self {
@@ -434,7 +434,7 @@ fn is_prefix_separator(b: u8) -> bool {
 /// of `-`, `_`, space, `.` or `T` and then at least one more character. A
 /// Zettelkasten timestamp (`202610311230 Title`) is not a date: its 9th byte
 /// is a digit.
-pub fn date_prefix_of_stem(stem: &str) -> Option<NaiveDate> {
+fn date_prefix_of_stem(stem: &str) -> Option<NaiveDate> {
     let b = stem.as_bytes();
     let dashed = |sep: u8| {
         (b.len() > 11 && is_prefix_separator(b[10]))
@@ -468,7 +468,7 @@ pub fn date_prefix_of_stem(stem: &str) -> Option<NaiveDate> {
 ///
 /// Partial dates (`2026-10`), bare-year numbers and anything else are `None`,
 /// so resolution falls through to the next source.
-pub fn date_from_frontmatter_value(v: &serde_json::Value) -> Option<NaiveDate> {
+fn date_from_frontmatter_value(v: &serde_json::Value) -> Option<NaiveDate> {
     let s = v.as_str()?.trim();
     let b = s.as_bytes();
     if b.len() < 10 {
@@ -608,9 +608,9 @@ pub enum CompanionMode {
 /// The `[calendar]` table of `.mbr/config.toml` (and `MBR_CALENDAR__*`).
 ///
 /// Typed with `deny_unknown_fields`, so a typo fails at startup like every
-/// other option. Published to the browser as `__MBR_CONFIG__.calendar`
-/// (`page_context::insert_calendar_config`). The scan-time half is compiled
-/// into [`CalendarRules`].
+/// other option. Its browser half is published as `__MBR_CONFIG__.calendar`
+/// (`page_context::CalendarChrome`, serialized once); the scan-time half is
+/// compiled into [`CalendarRules`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CalendarConfig {
@@ -683,7 +683,7 @@ impl CalendarRules {
             periodic_folders: config
                 .periodic_folders
                 .iter()
-                .map(|f| normalize_folder(f))
+                .map(|f| crate::url_path::normalize_folder(f))
                 .collect(),
             date_fields: config.date_fields.clone(),
         }
@@ -701,7 +701,7 @@ impl CalendarRules {
                     .unwrap_or_default();
                 self.periodic_folders
                     .iter()
-                    .any(|f| folder_contains(f, &folder))
+                    .any(|f| crate::url_path::folder_contains(f, &folder))
             })
     }
 
@@ -756,25 +756,6 @@ fn filename_date(date: NaiveDate) -> NoteCalendar {
         source: DateSource::Filename,
         period: None,
     }
-}
-
-/// A configured folder as compared: `/`-separated, without `./`, leading or
-/// trailing slashes.
-fn normalize_folder(folder: &str) -> String {
-    let folder = folder.replace('\\', "/");
-    let mut trimmed = folder.trim();
-    while let Some(rest) = trimmed.strip_prefix("./") {
-        trimmed = rest;
-    }
-    trimmed.trim_matches('/').to_string()
-}
-
-/// Whether `folder` (repository-relative) is `configured` or below it.
-fn folder_contains(configured: &str, folder: &str) -> bool {
-    configured.is_empty()
-        || folder
-            .strip_prefix(configured)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 // ==================== The periodic index ====================
@@ -1404,6 +1385,59 @@ mod tests {
         });
         let day = resolve(&off, "2026-10-31.md", &none).unwrap();
         assert_eq!((day.date, day.period), (ymd(2026, 10, 31), None));
+    }
+
+    /// The owner's switches: by default a period-named note is periodic
+    /// anywhere (`books/1984.md` is a year note); `periodic_folders` narrows
+    /// that; `periods = []` turns periodic detection off while a day stem
+    /// still dates its note.
+    #[test]
+    fn periodic_detection_default_narrowed_and_off() {
+        let none = SimpleMetadata::new();
+        let year_1984 = Some(Period::Year(1984));
+
+        let defaults = CalendarRules::default();
+        assert_eq!(
+            resolve(&defaults, "books/1984.md", &none).unwrap().period,
+            year_1984,
+            "default: periodic anywhere"
+        );
+
+        let narrowed = CalendarRules::new(&CalendarConfig {
+            periodic_folders: vec!["journal".into()],
+            ..CalendarConfig::default()
+        });
+        assert_eq!(
+            resolve(&narrowed, "books/1984.md", &none),
+            None,
+            "outside journal: not periodic, and a year stem is not a date"
+        );
+        assert_eq!(
+            resolve(&narrowed, "journal/1984.md", &none).unwrap().period,
+            year_1984
+        );
+
+        let off = CalendarRules::new(&CalendarConfig {
+            periods: Vec::new(),
+            ..CalendarConfig::default()
+        });
+        assert_eq!(resolve(&off, "1984.md", &none), None);
+        assert_eq!(resolve(&off, "books/1984.md", &none), None);
+        for path in ["2026-W44.md", "2026-10.md", "2026-Q4.md"] {
+            assert_eq!(resolve(&off, path, &none), None, "{path}");
+        }
+        let day = resolve(&off, "daily/2026-10-31.md", &none).unwrap();
+        assert_eq!(
+            (day.date, day.source, day.period),
+            (ymd(2026, 10, 31), DateSource::Filename, None),
+            "a day file name still dates the note"
+        );
+        let front = fm(&[("date", json!("2026-02-02"))]);
+        assert_eq!(
+            resolve(&off, "post.md", &front).unwrap().date,
+            ymd(2026, 2, 2),
+            "frontmatter dates still apply"
+        );
     }
 
     // ---- PeriodicIndex ----

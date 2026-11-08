@@ -123,7 +123,9 @@ Canceled tasks and [incomplete markers](#incomplete-markers) never appear. A
 day lists its open tasks first, then timed ones by time (a time on the date, or
 a time the text starts with, like `09:30 call`), then by priority.
 
-Days in the past that still have open tasks have their date in red. When tasks
+Days in the past that still have an open task placed by its **due** date have
+their date in red. A scheduled date is when you plan to start, not a deadline,
+so a past day holding only scheduled (or done) tasks stays plain. When tasks
 were due before the range on screen, an **Overdue (12)** chip in the header
 switches to the List view filtered to overdue tasks. ‹ › page by a week or a
 month and **Today** comes back; the filter text, folder, status and priority

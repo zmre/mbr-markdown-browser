@@ -7,15 +7,16 @@
  * Both sides are held to one table of cases,
  * `tests/fixtures/date-expr-cases.json`, so they cannot drift. The grammar and
  * its choices (ISO weeks, `-N` counting today, a reversed range swapped, a
- * relative start before year 1000 open-ended) are documented in the Rust
- * module.
+ * relative start before year 1000 open-ended, nothing past 9999-12-31) are
+ * documented in the Rust module.
  *
- * Pure, with a type-only import: safe for the main bundle and any chunk. Day
- * arithmetic is on integer day numbers (days since 1970-01-01), never on
- * `Date`, whose `Date.UTC` reads years 0–99 as 1900–1999.
+ * Pure, importing only `period.ts` (the one period-key parser and the civil
+ * arithmetic): safe for the main bundle and any chunk. Day arithmetic is on
+ * integer day numbers, never on `Date`.
  */
 
 import type { DateKey } from './note-date.js'
+import { civilFromDays, daysFromCivil, daysInMonth, isoWeekday, keyOfDays, monthSpan, parsePeriodDays, type DaySpan as Span } from './period.js'
 
 /** An inclusive range of date keys; `null` is an open end. */
 export interface DateRange {
@@ -25,117 +26,35 @@ export interface DateRange {
 
 const MAX_EXPR_LEN = 32
 const MAX_COUNT_DIGITS = 6
-const MIN_YEAR = 1000
 const MAX_YEAR = 9999
 const MIN_RELATIVE_YEAR = 1000
 
-/** A period as an inclusive span of day numbers. */
-interface Span {
-  readonly start: number
-  readonly end: number
-}
+/**
+ * The range that matches nothing: an expression starting past 9999-12-31
+ * (`>9999`). `from` after `to`, so `rangeContains` needs no special case; the
+ * same constant as Rust's `DateRange::EMPTY`. A five-digit key must never be
+ * produced: `'10000-01-01' < '2026-…'` as strings, so it would match every date.
+ */
+export const EMPTY_RANGE: DateRange = Object.freeze({ from: '9999-12-31', to: '1000-01-01' })
 
-// ---- Civil-date arithmetic (Howard Hinnant's algorithms) ----
+/** Whether no date lies in `range`. */
+export const isEmptyRange = (range: DateRange): boolean =>
+  range.from !== null && range.to !== null && range.from > range.to
 
-/** Day number (days since 1970-01-01) of a proleptic Gregorian date. */
-function daysFromCivil(year: number, month: number, day: number): number {
-  const y = month <= 2 ? year - 1 : year
-  const era = Math.floor(y / 400)
-  const yoe = y - era * 400
-  const mp = (month + 9) % 12
-  const doy = Math.floor((153 * mp + 2) / 5) + day - 1
-  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
-  return era * 146097 + doe - 719468
-}
-
-/** The date of a day number. */
-function civilFromDays(days: number): { year: number; month: number; day: number } {
-  const z = days + 719468
-  const era = Math.floor(z / 146097)
-  const doe = z - era * 146097
-  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
-  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
-  const mp = Math.floor((5 * doy + 2) / 153)
-  const day = doy - Math.floor((153 * mp + 2) / 5) + 1
-  const month = mp < 10 ? mp + 3 : mp - 9
-  return { year: yoe + era * 400 + (month <= 2 ? 1 : 0), month, day }
-}
-
-const pad = (n: number, width: number): string => String(n).padStart(width, '0')
-
-function keyOf(days: number): DateKey {
-  const { year, month, day } = civilFromDays(days)
-  return `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}`
-}
-
-function daysInMonth(year: number, month: number): number {
-  const next = month === 12 ? daysFromCivil(year + 1, 1, 1) : daysFromCivil(year, month + 1, 1)
-  return next - daysFromCivil(year, month, 1)
-}
-
-/** Monday = 0 … Sunday = 6. Day 0 (1970-01-01) was a Thursday. */
-function isoWeekday(days: number): number {
-  return (((days + 3) % 7) + 7) % 7
-}
-
-/** The Monday of ISO week 1 of `isoYear`: the week holding January 4. */
-function isoWeekOneMonday(isoYear: number): number {
-  const jan4 = daysFromCivil(isoYear, 1, 4)
-  return jan4 - isoWeekday(jan4)
-}
-
-/** The ISO week-year of a day: the calendar year of its week's Thursday. */
-function isoYearOf(days: number): number {
-  return civilFromDays(days - isoWeekday(days) + 3).year
-}
-
-// ---- Periods ----
-
-const DIGITS = /^[0-9]+$/
-
-const inYearRange = (year: number): boolean => year >= MIN_YEAR && year <= MAX_YEAR
-
-function monthSpan(year: number, month: number, months: number): Span {
-  const start = daysFromCivil(year, month, 1)
-  const endMonth0 = month - 1 + months
-  const end = daysFromCivil(year + Math.floor(endMonth0 / 12), (endMonth0 % 12) + 1, 1) - 1
-  return { start, end }
-}
+/** Day number of 9999-12-31, the last date an expression can name. */
+const LAST_DAY = daysFromCivil(MAX_YEAR, 12, 31)
 
 /**
- * A period key (`2026`, `2026-10`, `2026-10-31`, `2026-W44`, `2026-Q4`, with
- * `W`/`Q` in either case) as a span of days, or `null`.
+ * A resolved span of day numbers as date keys: a start past `LAST_DAY` is the
+ * empty range, an end past it is clamped to it (Rust's `DateRange::bounded`).
  */
-function parsePeriod(s: string): Span | null {
-  const year = Number(s.slice(0, 4))
-  if (!DIGITS.test(s.slice(0, 4)) || !inYearRange(year)) return null
-  if (s.length === 4) return monthSpan(year, 1, 12)
-  if (s[4] !== '-') return null
-  const rest = s.slice(5)
-  if (s.length === 10 && s[7] === '-' && DIGITS.test(rest.slice(0, 2)) && DIGITS.test(rest.slice(3))) {
-    const month = Number(rest.slice(0, 2))
-    const day = Number(rest.slice(3))
-    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null
-    const d = daysFromCivil(year, month, day)
-    return { start: d, end: d }
-  }
-  if (s.length !== 7 && s.length !== 8) return null
-  const tag = rest[0].toUpperCase()
-  if (s.length === 8 && tag === 'W' && DIGITS.test(rest.slice(1))) {
-    const week = Number(rest.slice(1))
-    const monday = isoWeekOneMonday(year) + (week - 1) * 7
-    if (week < 1 || isoYearOf(monday) !== year) return null
-    return { start: monday, end: monday + 6 }
-  }
-  if (s.length === 7 && tag === 'Q' && /^[1-4]$/.test(rest[1])) {
-    return monthSpan(year, Number(rest[1]) * 3 - 2, 3)
-  }
-  if (s.length === 7 && DIGITS.test(rest)) {
-    const month = Number(rest)
-    return month >= 1 && month <= 12 ? monthSpan(year, month, 1) : null
-  }
-  return null
+function rangeOfDays(from: number | null, to: number | null): DateRange {
+  if (from !== null && from > LAST_DAY) return EMPTY_RANGE
+  return { from: from === null ? null : keyOfDays(from), to: to === null ? null : keyOfDays(Math.min(to, LAST_DAY)) }
 }
+
+/** A period key as a span of days, or `null` (`period.ts` is the one parser). */
+const parsePeriod = (s: string): Span | null => parsePeriodDays(s)
 
 // ---- Expressions ----
 
@@ -238,14 +157,11 @@ export function parseDateExpr(value: string): DateExpr | null {
 /** The dates `expr` names, relative forms resolved against `today`. */
 export function resolveDateExpr(expr: DateExpr, today: DateKey): DateRange {
   if (expr.kind === 'span') {
-    return {
-      from: expr.from ? keyOf(expr.from.start) : null,
-      to: expr.to ? keyOf(expr.to.end) : null,
-    }
+    return rangeOfDays(expr.from?.start ?? null, expr.to?.end ?? null)
   }
   const [y, m, d] = today.split('-').map(Number)
   const { from, to } = expr.resolve(daysFromCivil(y, m, d))
-  return { from: from === null ? null : keyOf(from), to: keyOf(to) }
+  return rangeOfDays(from, to)
 }
 
 /** Parses `value` and resolves it against `today` in one call. */

@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { isOwnWriteEcho, mayBeOwnWriteEcho, wasSelfWrite } from './task-toggle.js';
+import { announceFileChanged, isOwnWriteEcho, mayBeOwnWriteEcho, wasSelfWrite } from './task-toggle.js';
 
 /** Whether a page served under `protocol` has a WebSocket endpoint at all. */
 export function isSocketReachable(protocol: string): boolean {
@@ -236,6 +236,11 @@ export class MbrLiveReloadElement extends LitElement {
     console.log('[mbr-live-reload] File changed:', event);
 
     const changedPath = event.relative_path;
+
+    // Every change is announced, reload or not: derived state elsewhere on
+    // the page (the calendar's task markers) goes stale on writes from
+    // anywhere, this page's own included.
+    announceFileChanged(changedPath);
 
     // A change this page made and already drew for itself: every task write
     // patches the document in place, so reloading for it would cost the edit

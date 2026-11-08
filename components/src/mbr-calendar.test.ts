@@ -3,21 +3,21 @@ import { setCalendarChunkImporter } from './calendar-chunk.ts'
 import { COMPANION_HIDDEN_CLASS, COMPANION_HIDDEN_KEY } from './calendar/companion-pref.ts'
 import { MbrCalendarElement, companionDockable } from './mbr-calendar.ts'
 
+declare const __MBR_THEME_CSS__: string
+
 const DAY_NAV = '<nav class="mbr-calendar-nav" data-mbr-period="2026-10-31" data-mbr-period-kind="day"></nav>'
 
 let enhancePage: Mock<(options: unknown) => { entries: never[]; dispose: () => void }>
 let importer: Mock<() => Promise<unknown>>
 
-/** `matchMedia` answering the two dock queries. */
-function stubWidth(width: number): void {
-  vi.spyOn(window, 'matchMedia').mockImplementation(
-    (query: string) =>
-      ({
-        matches: Number(/min-width: (\d+)px/.exec(query)?.[1] ?? Infinity) <= width,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      }) as unknown as MediaQueryList
-  )
+/**
+ * What theme.css's width rules decide: `--mbr-companion-docked: 1` on a body
+ * wide enough for the column (happy-dom applies no media queries, so the
+ * tests set the property the stylesheet would).
+ */
+function stubDocked(docked: boolean): void {
+  if (docked) document.body.style.setProperty('--mbr-companion-docked', '1')
+  else document.body.style.removeProperty('--mbr-companion-docked')
 }
 
 async function mount(main: string, { bodyClass = '' } = {}): Promise<MbrCalendarElement> {
@@ -48,12 +48,13 @@ beforeEach(() => {
   // The real chunk elements would fetch site.json; a stand-in is enough here.
   importer = vi.fn((): Promise<unknown> => Promise.resolve({ enhancePage }))
   setCalendarChunkImporter(importer)
-  stubWidth(800)
+  stubDocked(false)
 })
 
 afterEach(() => {
   document.body.innerHTML = ''
   document.body.className = ''
+  document.body.removeAttribute('style')
   document.documentElement.classList.remove(COMPANION_HIDDEN_CLASS)
   localStorage.removeItem(COMPANION_HIDDEN_KEY)
   window.__MBR_CONFIG__ = undefined
@@ -138,7 +139,7 @@ describe('C and the drawer', () => {
 
 describe('docked', () => {
   it('docks on a wide day note the server marked, with no button', async () => {
-    stubWidth(1300)
+    stubDocked(true)
     const el = await mount(`${DAY_NAV}<p>x</p>`, { bodyClass: 'mbr-has-companion' })
     expect(el.isDocked).toBe(true)
     expect(el.isOpen).toBe(false)
@@ -146,19 +147,21 @@ describe('docked', () => {
     expect(fab(el)).toBeNull()
   })
 
-  it('needs 1440px when the sidebar is docked as well', () => {
-    const body = document.createElement('body')
-    body.className = 'mbr-has-companion'
-    expect(companionDockable(body, true, false)).toBe(true)
-    body.append(document.createElement('mbr-browse-single'))
-    expect(companionDockable(body, true, false)).toBe(false)
-    expect(companionDockable(body, true, true)).toBe(true)
-    body.className = ''
-    expect(companionDockable(body, true, true)).toBe(false)
+  it('reads the docking from theme.css, which alone holds the breakpoints', () => {
+    expect(companionDockable()).toBe(false)
+    stubDocked(true)
+    expect(companionDockable()).toBe(true)
+    // ≥1280px without the docked sidebar, ≥1440px with it: the only two places
+    // the property is set, each in its own width rule.
+    const css = __MBR_THEME_CSS__.replace(/\/\*[\s\S]*?\*\//g, '')
+    const at = (width: number) =>
+      new RegExp(`@media screen and \\(min-width: ${width}px\\) \\{\\s*([^{]+)\\{\\s*--mbr-companion-docked: 1;`).exec(css)?.[1].trim()
+    expect(at(1280)).toBe('body.mbr-has-companion:not(:has(> mbr-browse-single))')
+    expect(at(1440)).toBe('body.mbr-has-companion')
   })
 
   it('remembers a dismissal, then C brings it back', async () => {
-    stubWidth(1300)
+    stubDocked(true)
     const el = await mount(`${DAY_NAV}<p>x</p>`, { bodyClass: 'mbr-has-companion' })
     companion(el)!.dispatchEvent(new CustomEvent('mbr-calendar-close', { bubbles: true, composed: true }))
     await settle(el)
@@ -175,7 +178,7 @@ describe('docked', () => {
   })
 
   it('starts dismissed when the pre-paint class says so', async () => {
-    stubWidth(1300)
+    stubDocked(true)
     document.documentElement.classList.add(COMPANION_HIDDEN_CLASS)
     const el = await mount(`${DAY_NAV}<p>x</p>`, { bodyClass: 'mbr-has-companion' })
     expect(el.isDocked).toBe(false)
@@ -199,7 +202,8 @@ describe('the floating button', () => {
 })
 
 describe('c and the overlay', () => {
-  const overlay = (el: MbrCalendarElement) => el.shadowRoot!.querySelector('mbr-calendar-overlay')
+  // A <body> child, never inside the (docked: fixed, z-indexed) <mbr-calendar>.
+  const overlay = (_el: MbrCalendarElement) => document.body.querySelector(':scope > mbr-calendar-overlay')
 
   it('c opens the overlay over all notes, from this page', async () => {
     const el = await mount('<p>plain</p>')
@@ -211,6 +215,20 @@ describe('c and the overlay', () => {
     expect(o.open).toBe(true)
     expect(o.scope.label).toBe('All notes')
     expect(o.scope.pagePath).toBe('/')
+  })
+
+  it('opens the overlay outside the docked column, so its stacking context cannot trap it', async () => {
+    stubDocked(true)
+    const el = await mount(DAY_NAV, { bodyClass: 'mbr-has-companion' })
+    expect(el.isDocked).toBe(true)
+    press('c')
+    await settle(el)
+    const o = overlay(el)
+    expect(o).not.toBeNull()
+    expect(el.contains(o)).toBe(false)
+    expect(el.shadowRoot!.querySelector('mbr-calendar-overlay')).toBeNull()
+    el.remove()
+    expect(o!.isConnected).toBe(false)
   })
 
   it('ignores c with modifiers, in a field, and while another overlay is open', async () => {

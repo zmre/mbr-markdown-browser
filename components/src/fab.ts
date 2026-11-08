@@ -75,7 +75,7 @@ export const FAB_CSS = css`
   .mbr-fab {
     position: fixed;
     z-index: 800;
-    right: calc(1rem + env(safe-area-inset-right, 0px));
+    right: calc(1rem + var(--mbr-inset-right, 0px) + env(safe-area-inset-right, 0px));
     bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     width: 56px;
     height: 56px;

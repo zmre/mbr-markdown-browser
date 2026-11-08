@@ -1053,8 +1053,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   /**
    * Pagefind results that pass the date facets, looked up in site.json by
    * URL, loading fragments a page at a time until a page of hits is found or
-   * {@link STATIC_DATE_SCAN_LIMIT} have been inspected. `total` counts the
-   * hits found, so it is a lower bound when the scan stopped early.
+   * {@link STATIC_DATE_SCAN_LIMIT} have been inspected. The next page is
+   * fetched while this one is checked, so the rounds overlap (at most one
+   * page is loaded for nothing). `total` counts the hits found, so it is a
+   * lower bound when the scan stopped early.
    */
   private async _dateFilteredPagefind(
     found: PagefindResult[],
@@ -1064,8 +1066,12 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
     const byPath = await this._sitePaths();
     const candidates = found.slice(0, STATIC_DATE_SCAN_LIMIT);
     const hits: SearchResult[] = [];
-    for (let i = 0; i < candidates.length && hits.length < RESULT_LIMIT && !isStale(); i += RESULT_LIMIT) {
-      const page = await Promise.all(candidates.slice(i, i + RESULT_LIMIT).map((r) => r.data()));
+    const load = (i: number) =>
+      i < candidates.length ? Promise.all(candidates.slice(i, i + RESULT_LIMIT).map((r) => r.data())) : null;
+    let pending = load(0);
+    for (let i = 0; pending && hits.length < RESULT_LIMIT && !isStale(); i += RESULT_LIMIT) {
+      const page = await pending;
+      pending = load(i + RESULT_LIMIT);
       for (const data of page) {
         const file = byPath.get(sitePathOf(data.url));
         const matched = file ? matchDateFacets(file, facets) : null;
@@ -1074,6 +1080,8 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
         }
       }
     }
+    // A page fetched ahead and never read must not surface as an unhandled rejection.
+    void pending?.catch(() => {});
     return { results: hits, total: hits.length };
   }
 

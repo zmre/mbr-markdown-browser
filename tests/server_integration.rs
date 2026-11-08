@@ -9140,7 +9140,10 @@ async fn test_tasks_endpoint_grid_mode_places_tasks_on_days() {
     assert_eq!(texts("2999-12-30"), vec!["planned"]);
     let kickoff = &days["2999-12-29"]["tasks"][0];
     assert_eq!(kickoff["placed_by"], "due");
-    assert_eq!(kickoff["time"], "09:00");
+    assert!(
+        kickoff.get("time").is_none(),
+        "a time only in the text orders the day but is not sent: {kickoff}"
+    );
     assert_eq!(kickoff["path"], "projects/plan.md");
     assert_eq!(kickoff["note"], "plan");
     assert_eq!(days["2999-12-29"]["tasks"][1]["placed_by"], "done");
@@ -9182,6 +9185,56 @@ async fn test_tasks_endpoint_grid_mode_places_tasks_on_days() {
     );
     let hit = &calendar["groups"][0]["tasks"][0];
     assert!(hit.get("placed_by").is_none() && hit.get("note").is_none());
+}
+
+/// The request's `today` (the reader's date) decides what is overdue, in
+/// grid and calendar mode alike; absent or malformed, the server's date does.
+/// The tasks are dated in 2999 so the server's own date can never make them
+/// overdue.
+#[tokio::test]
+async fn test_tasks_endpoint_honours_the_readers_today() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "plan.md",
+        concat!(
+            "- [ ] early @due(2999-12-20)\n",
+            "- [ ] mid @due(2999-12-29)\n",
+            "- [ ] late @due(2999-12-31)\n",
+        ),
+    );
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let grid = |today: &str| {
+        format!(r#"{{"mode": "grid", "from": "2999-12-28", "to": "2999-12-31"{today}}}"#)
+    };
+    let body = tasks_query(&server, &grid(r#", "today": "2999-12-30""#)).await;
+    assert_eq!(body["days"]["2999-12-29"]["overdue"], true);
+    assert_eq!(body["days"]["2999-12-31"]["overdue"], false);
+    assert_eq!(body["overdue_before_range"], 1, "early, before the range");
+
+    for fallback in ["", r#", "today": "not a date""#, r#", "today": null"#] {
+        let body = tasks_query(&server, &grid(fallback)).await;
+        assert_eq!(
+            body["days"]["2999-12-29"]["overdue"], false,
+            "the server's date: {fallback:?}"
+        );
+        assert_eq!(body["overdue_before_range"], 0, "{fallback:?}");
+    }
+
+    // Calendar mode buckets against the same date.
+    let calendar = tasks_query(&server, r#"{"mode": "calendar", "today": "2999-12-30"}"#).await;
+    let keys: Vec<&str> = calendar["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .map(|g| g["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys, vec!["overdue", "tomorrow"]);
+    assert_eq!(
+        calendar["groups"][0]["tasks"].as_array().map(Vec::len),
+        Some(2)
+    );
 }
 
 /// A grid request wider than 62 days is cut, and the response says so.
@@ -11226,4 +11279,80 @@ async fn test_calendar_disabled_drops_the_nav() {
     let html = server.get_text("/daily/2026-10-31/").await;
     assert_html_not_contains(&html, r#"class="mbr-calendar-nav""#);
     assert_html_contains(&html, r#""enabled":false"#);
+}
+
+/// An error page publishes the repository's `[calendar]` table like any other
+/// page — it used to fall back to the defaults, so `d` and the calendar
+/// overlay came back on a 404 of a repository that turned them off.
+#[tokio::test]
+async fn test_error_page_carries_the_repositorys_calendar_config() {
+    let repo = periodic_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.calendar.enabled = false;
+    })
+    .await;
+    let response = server.get("/no/such/page/").await;
+    assert_eq!(response.status(), 404);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, r#"calendar: {"enabled":false"#);
+    assert_html_not_contains(&html, "<mbr-calendar></mbr-calendar>");
+}
+
+/// Periodic detection's three settings, end to end through `site.json`: by
+/// default `books/1984.md` is a year note; `periodic_folders` narrows that;
+/// `periods = []` turns it off while a day file name still dates its note and
+/// the calendar itself stays on.
+#[tokio::test]
+async fn test_periodic_detection_default_narrowed_and_off() {
+    let repo = TestRepo::new();
+    repo.create_markdown("books/1984.md", "# Nineteen Eighty-Four\n");
+    repo.create_markdown("journal/2026-10-31.md", "# Saturday\n");
+
+    async fn calendars(
+        repo: &TestRepo,
+        configure: impl FnOnce(&mut mbr::calendar::CalendarConfig) + Send + 'static,
+    ) -> (Option<serde_json::Value>, Option<serde_json::Value>, String) {
+        let server =
+            TestServer::start_with_config_fn(repo, |config| configure(&mut config.calendar)).await;
+        server.wait_for_scan().await;
+        let site: serde_json::Value = server.get("/.mbr/site.json").await.json().await.unwrap();
+        let calendar_of = |url: &str| {
+            site["markdown_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["url_path"] == url)
+                .unwrap_or_else(|| panic!("{url} in site.json"))
+                .get("calendar")
+                .cloned()
+        };
+        let day_page = server.get_text("/journal/2026-10-31/").await;
+        (
+            calendar_of("/books/1984/"),
+            calendar_of("/journal/2026-10-31/"),
+            day_page,
+        )
+    }
+
+    let (book, _, _) = calendars(&repo, |_| {}).await;
+    assert_eq!(
+        book,
+        Some(serde_json::json!({"date": "1984-01-01", "source": "filename", "period": "1984"})),
+        "default: a period-named note is periodic anywhere"
+    );
+
+    let (book, day, _) = calendars(&repo, |c| c.periodic_folders = vec!["journal".into()]).await;
+    assert_eq!(book, None, "outside journal: not periodic");
+    assert_eq!(day.unwrap()["period"], "2026-10-31");
+
+    let (book, day, day_page) = calendars(&repo, |c| c.periods = Vec::new()).await;
+    assert_eq!(book, None, "periods = []: nothing is periodic");
+    assert_eq!(
+        day,
+        Some(serde_json::json!({"date": "2026-10-31", "source": "filename"})),
+        "a day file name still dates the note"
+    );
+    assert_html_not_contains(&day_page, r#"class="mbr-calendar-nav""#);
+    assert_html_contains(&day_page, r#"calendar: {"enabled":true"#);
+    assert_html_contains(&day_page, "<mbr-calendar></mbr-calendar>");
 }

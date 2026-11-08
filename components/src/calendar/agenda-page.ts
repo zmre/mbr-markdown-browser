@@ -11,12 +11,15 @@
  *   review markers, find-in-page and cached ranges hold on to;
  * - on **today's** day note, the entry in progress gets `mbr-agenda-now` and
  *   the next one `mbr-agenda-next` (a class on an existing element is safe),
- *   re-evaluated each minute while the page is visible.
+ *   re-evaluated each minute while the page is visible (`minute-clock.ts`,
+ *   the bundle's one tick), and only while the day is today.
  *
- * Without `CSS.highlights` there is simply no chip.
+ * Without `CSS.highlights` there is simply no chip. The QuickLook preview
+ * runs this too, with its current-time line on {@link EnhancePageOptions.onTick}.
  */
 import { agendaEntries, type AgendaEntry } from './agenda-parse.js'
 import { drawnEnd } from './agenda-layout.js'
+import { onMinute } from './minute-clock.js'
 import { todayKey, type DateKey } from './note-date.js'
 
 /** `CSS.highlights` registry name; styled in theme.css. */
@@ -94,60 +97,68 @@ export function markNowAndNext(entries: readonly AgendaEntry[], minutes: number 
 export interface EnhancePageOptions {
   /** The note's rendered body (`main#wrapper`). */
   readonly root: ParentNode
+  /** Its agenda entries, when the caller has parsed them already. */
+  readonly entries?: AgendaEntry[]
   /** `[calendar] agenda_chips`. */
   readonly agendaChips: boolean
   /** The page's own day when it is a day note, else `null`. */
   readonly pageDay: DateKey | null
   /** Scrolls an element clear of the sticky header and flashes it. */
-  readonly reveal: (el: HTMLElement) => void
+  readonly reveal?: (el: HTMLElement) => void
+  /**
+   * Told the minute (minutes after midnight) on each tick while `pageDay` is
+   * today, then `null` once it no longer is (QuickLook's current-time line).
+   */
+  readonly onTick?: (minutes: number | null) => void
   /** The clock; tests pass a fixed one. */
   readonly now?: () => Date
 }
 
-/** How often today's now/next marks are re-evaluated. */
-const MINUTE_MS = 60_000
-
 /**
  * Enhances the page once. Returns the entries found and a disposer that
- * removes every listener, timer, class and highlight it added (ids stay).
+ * removes every listener, tick, class and highlight it added (ids stay).
  */
 export function enhancePage(options: EnhancePageOptions): { entries: AgendaEntry[]; dispose: () => void } {
   const clock = options.now ?? (() => new Date())
-  const entries = agendaEntries(options.root)
+  const entries = options.entries ?? agendaEntries(options.root)
   assignAgendaIds(entries)
 
   const revealHash = (): void => {
     const id = agendaIdFromHash(window.location.hash)
     const el = id ? document.getElementById(id) : null
-    if (el) options.reveal(el)
+    if (el) (options.reveal ?? ((e: HTMLElement) => e.scrollIntoView()))(el)
   }
   revealHash()
   window.addEventListener('hashchange', revealHash)
 
   const chips = options.agendaChips && entries.length > 0 && paintTimeChips(entries)
 
-  // Now / next only on today's own day note, and only while it is today.
+  // Now / next (and `onTick`) only on today's own day note, and only while it
+  // is today: the tick starts only then and stops at midnight.
+  let stop: (() => void) | null = null
   const tick = (): void => {
-    if (document.hidden) return
     const date = clock()
-    const live = options.agendaChips && options.pageDay !== null && options.pageDay === todayKey(date)
-    markNowAndNext(entries, live ? date.getHours() * 60 + date.getMinutes() : null)
+    const live = options.pageDay === todayKey(date)
+    const minutes = live ? date.getHours() * 60 + date.getMinutes() : null
+    if (options.agendaChips) markNowAndNext(entries, minutes)
+    options.onTick?.(minutes)
+    if (!live) {
+      stop?.()
+      stop = null
+    }
   }
-  let timer: number | null = null
-  if (options.agendaChips && options.pageDay !== null && entries.length > 0) {
+  const wanted = entries.length > 0 && (options.agendaChips || options.onTick !== undefined)
+  if (wanted && options.pageDay !== null && options.pageDay === todayKey(clock())) {
     tick()
-    timer = window.setInterval(tick, MINUTE_MS)
-    document.addEventListener('visibilitychange', tick)
+    stop = onMinute(tick)
   }
 
   return {
     entries,
     dispose: () => {
       window.removeEventListener('hashchange', revealHash)
-      if (timer !== null) {
-        window.clearInterval(timer)
-        document.removeEventListener('visibilitychange', tick)
-      }
+      stop?.()
+      stop = null
       markNowAndNext(entries, null)
       if (chips) CSS.highlights.delete(AGENDA_TIME_HIGHLIGHT)
     },

@@ -51,10 +51,14 @@ Jekyll's `2026-10-31-my-post.md`, is not periodic. It is still dated by its
 file name (see below), so a meeting note plots on the right day without
 becoming "the" daily note.
 
-**A note named `1984.md`** (a book, say) is a year note under these rules. If
-that is not what you want, leave `year` out of
-[`periods`](../reference/configuration/#calendar-settings), or limit periodic
-notes to a folder with `periodic_folders`.
+**A note named `1984.md`** (a book, say) is a year note under these rules,
+wherever it is, and two such notes get a "duplicate period" warning. If that is
+not what you want, limit periodic notes to your journal folder with
+[`periodic_folders`](../reference/configuration/#calendar-settings)
+(`periodic_folders = ["journal"]`), leave `year` out of `periods`, or turn
+periodic detection off with `periods = []`: day file names still date their
+notes and the calendar views keep working. `enabled = false` turns the whole
+calendar off.
 
 ### Two notes for one period
 
@@ -172,7 +176,7 @@ note**: that note's own entries, with no date claimed for them.
 
 | Key | Action |
 |-----|--------|
-| `C` (Shift+c) | Docked: move into the companion; pressed there, dismiss it (remembered in this browser until `C` brings it back). Elsewhere: open or close the drawer |
+| `C` (Shift+c) | Docked: move into the companion; pressed there, dismiss it (remembered in this browser, per repository, until `C` brings it back). Elsewhere: open or close the drawer |
 | Arrows or `h` `j` `k` `l` | Move between days in the mini month |
 | PageUp / PageDown | Previous / next month |
 | Space | Show the focused day |
@@ -184,7 +188,9 @@ note**: that note's own entries, with no date claimed for them.
 
 With the [task browser](tasks/) available (server and GUI, `tasks_enabled`),
 the mini month also marks days with open tasks: a hollow ring, red on a day in
-the past. A day's count is its open tasks with a due, scheduled or done date
+the past that still has an open task **due** that day (a scheduled date is a
+plan to start, not a deadline, so a past day of scheduled or undated tasks keeps
+a plain ring). A day's count is its open tasks with a due, scheduled or done date
 that day (as the [task grids](tasks/#week-and-month-grids) place them), plus the
 open tasks with no date at all in that day's daily note. The agenda header then
 says how many: "3 tasks due".
@@ -270,14 +276,18 @@ one of three views:
   a day holds more than its cell can show, the last line becomes **+N**:
   click it (or the day, or press Enter) for the whole day. The week-number
   column links to week notes.
-- **Week**: seven columns, each day's notes in full. A note whose date has a
-  time (`date: 2026-10-31T14:00`) is listed at that time, after the untimed
-  ones.
-- **List** (the default on a phone): the month's notes day by day.
+- **Week**: seven columns, each day's notes in full (up to 60; past that a
+  **+N** opens the whole day). A note whose date has a time
+  (`date: 2026-10-31T14:00`) is listed at that time, after the untimed ones.
+- **List** (the default on a phone): the month's notes day by day, up to 50 a
+  day, then "+N more". The day list a **+N** opens shows up to 100; type in
+  **Filter** to narrow a very busy day (plotting a fresh clone by modified can
+  put thousands of notes on one day).
 
 The header pages back and forth with ‹ and ›, **Today** returns to today, and
 clicking the title opens a picker: step the year, pick a month, or type
-`2026-10`, `2026-10-31`, `2026-W44`, `2026-Q4` or `2026`. Links beside the
+`2026-10`, `2026-10-31`, `2026-W44`, `2026-Q4` or `2026` (`w` and `q` in
+either case). Links beside the
 title open the month, quarter and year notes (and the week note in Week view)
 when they exist. A dot's colour is fixed per type, so `meeting` is the same
 colour on every page and in every repository.

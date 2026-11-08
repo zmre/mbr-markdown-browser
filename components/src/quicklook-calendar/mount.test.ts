@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mountQuickLookCalendar, type MountedCalendar } from './mount.ts'
 import { QUICKLOOK_CALENDAR_GLOBAL, COLUMN_MIN_WIDTH } from './model.ts'
 import { BODY_COLUMN_CLASS, STYLE_ID } from './styles.ts'
-import { PX_PER_MINUTE } from './render.ts'
+import { PX_PER_MINUTE } from '../calendar/agenda-layout.ts'
 
 /** What QuickLook renders for a day note's `## Calendar` section, plus tasks. */
 const NOTE = `<h2 id="calendar">Calendar</h2>
@@ -63,7 +63,7 @@ describe('mountQuickLookCalendar', () => {
   })
 
   it('draws the header, the month with the day marked and one block per entry', () => {
-    setUp(NOTE, { date: '2026-11-03', source: 'filename' })
+    setUp(NOTE, { date: '2026-11-03' })
     mounted = mountQuickLookCalendar({ now: at(5, 9, 30) })
     const cal = mounted!.calendar
     expect(document.querySelector('main#wrapper')!.firstElementChild).toBe(cal)
@@ -94,8 +94,9 @@ describe('mountQuickLookCalendar', () => {
     expect(blocks[3].classList.contains('done')).toBe(true)
     expect(blocks[3].querySelector('.mbr-ql-cal-check')).not.toBeNull()
     // The two 09:00 entries overlap: side by side, half width each.
-    expect(blocks[0].style.width).toContain('/ 2')
-    expect(blocks[1].style.left).toContain('* 1 / 2')
+    // Two overlapping blocks share the width: columns 0 and 1 of 2 (styles.ts places them).
+    expect([blocks[0].style.getPropertyValue('--col'), blocks[0].style.getPropertyValue('--cols')]).toEqual(['0', '2'])
+    expect([blocks[1].style.getPropertyValue('--col'), blocks[1].style.getPropertyValue('--cols')]).toEqual(['1', '2'])
     // Not today: no current-time line, no now/next marks.
     expect(cal.querySelector('.mbr-ql-cal-now')).toBeNull()
     expect(document.querySelector('li.mbr-agenda-now, li.mbr-agenda-next')).toBeNull()

@@ -10,9 +10,10 @@
  */
 import { css, html, nothing, type TemplateResult } from 'lit'
 import { ICON_SM, icon, iconCalendarDays } from '../icons.js'
-import { formatDate, isoWeekOf } from './month-grid.js'
+import { formatDate } from './month-grid.js'
 import type { DateKey } from './note-date.js'
-import { adjacent, findPeriod, type PeriodKind, type PeriodicIndex } from './periodic.js'
+import { periodKeysContaining } from './period.js'
+import { adjacent, findPeriod, lowerBound, type PeriodKind, type PeriodicIndex } from './periodic.js'
 
 /** One "This …" row. */
 export interface CalendarRow {
@@ -41,26 +42,28 @@ const ROW_LABELS: Readonly<Record<PeriodKind, string>> = {
 /** Recent daily notes listed. */
 export const RECENT_DAILY = 7
 
-/** The current period key of each kind for `today`. */
-function currentKeys(today: DateKey): Record<PeriodKind, string> {
-  const year = today.slice(0, 4)
-  return {
-    day: today,
-    week: isoWeekOf(today).key,
-    month: today.slice(0, 7),
-    quarter: `${year}-Q${Math.floor((Number(today.slice(5, 7)) - 1) / 3) + 1}`,
-    year,
-  }
-}
+/** The last model built per index: the widgets re-render often, and the inputs rarely change. */
+const modelCache = new WeakMap<PeriodicIndex, { today: DateKey; locale: string; model: CalendarSectionModel | null }>()
 
 /**
  * The section for `index` on `today`, or `null` when the repository has no
  * periodic notes (the section is then not drawn at all). A row is listed only
  * for a kind the repository has; when the current period has no note it links
- * the latest one before it (else the earliest), saying so.
+ * the latest one before it (else the earliest), saying so. The current
+ * periods are Rust's `Period::containing` of today (`periodKeysContaining`).
+ * Memoized per (index, today, locale).
  */
 export function calendarSectionModel(index: PeriodicIndex, today: DateKey, locale: string): CalendarSectionModel | null {
-  const keys = currentKeys(today)
+  const cached = modelCache.get(index)
+  if (cached && cached.today === today && cached.locale === locale) return cached.model
+  const model = buildModel(index, today, locale)
+  modelCache.set(index, { today, locale, model })
+  return model
+}
+
+function buildModel(index: PeriodicIndex, today: DateKey, locale: string): CalendarSectionModel | null {
+  const keys = periodKeysContaining(today)
+  if (!keys) return null
   const dayLabel = (date: DateKey, weekday: boolean): string =>
     formatDate(date, locale, weekday ? { weekday: 'short', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric' })
   const rows: CalendarRow[] = []
@@ -81,9 +84,11 @@ export function calendarSectionModel(index: PeriodicIndex, today: DateKey, local
     })
   }
   if (rows.length === 0) return null
-  const past = index.day.filter((e) => e.period <= today)
-  const recent = past
-    .slice(-RECENT_DAILY)
+  // Day notes are sorted: the last RECENT_DAILY up to and including today.
+  const at = lowerBound(index.day, today)
+  const end = at + (index.day[at]?.period === today ? 1 : 0)
+  const recent = index.day
+    .slice(Math.max(0, end - RECENT_DAILY), end)
     .reverse()
     .map((e) => ({ label: dayLabel(e.period, true), url: e.url }))
   return { rows, recent }
@@ -98,8 +103,32 @@ export interface CalendarSectionOptions {
 
 /** The section's body: the period rows, recent daily notes and "Calendar…". */
 export function renderCalendarSection(model: CalendarSectionModel, options: CalendarSectionOptions): TemplateResult {
-  // prettier-ignore
-  return html`<ul class="mbr-cal-rows">${model.rows.map((r) => html`<li><a href=${options.resolveUrl(r.url)} title=${r.latest ? `No note yet; the latest is ${r.latest}` : r.label}>${r.label}</a>${r.latest ? html` <a class="mbr-cal-latest" href=${options.resolveUrl(r.url)}>(none — latest: ${r.latest})</a>` : nothing}</li>`)}${model.recent.length ? html`<li class="mbr-cal-recent"><span class="mbr-cal-sub">Recent daily notes</span><ul>${model.recent.map((d) => html`<li><a href=${options.resolveUrl(d.url)}>${d.label}</a></li>`)}</ul></li>` : nothing}${options.onOpenCalendar ? html`<li><button type="button" class="mbr-cal-open" title="Calendar (c)" @click=${options.onOpenCalendar}>${icon(iconCalendarDays, { size: ICON_SM })}<span>Calendar…</span></button></li>` : nothing}</ul>`
+  const row = (r: CalendarRow): TemplateResult => html`
+    <li>
+      <a href=${options.resolveUrl(r.url)} title=${r.latest ? `No note yet; the latest is ${r.latest}` : r.label}>${r.label}</a>
+      ${r.latest ? html`<a class="mbr-cal-latest" href=${options.resolveUrl(r.url)}>(none — latest: ${r.latest})</a>` : nothing}
+    </li>
+  `
+  const recent = model.recent.length
+    ? html`
+        <li class="mbr-cal-recent">
+          <span class="mbr-cal-sub">Recent daily notes</span>
+          <ul>
+            ${model.recent.map((d) => html`<li><a href=${options.resolveUrl(d.url)}>${d.label}</a></li>`)}
+          </ul>
+        </li>
+      `
+    : nothing
+  const open = options.onOpenCalendar
+    ? html`
+        <li>
+          <button type="button" class="mbr-cal-open" title="Calendar (c)" @click=${options.onOpenCalendar}>
+            ${icon(iconCalendarDays, { size: ICON_SM })}<span>Calendar…</span>
+          </button>
+        </li>
+      `
+    : nothing
+  return html`<ul class="mbr-cal-rows">${model.rows.map(row)}${recent}${open}</ul>`
 }
 
 /** Styles for {@link renderCalendarSection}, for each widget's shadow root. */

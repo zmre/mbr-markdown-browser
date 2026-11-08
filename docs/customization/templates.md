@@ -206,9 +206,8 @@ window.__MBR_CONFIG__ = {
   guiMode: true,        // true only in native window (-g)
   searchEndpoint: "/.mbr/search",
   basePath: "",         // relative path prefix for static builds
-  calendar: {           // the [calendar] table (snake_case), on every page
-    enabled: true, periods: ["day", "week", "month", "quarter", "year"],
-    periodic_folders: [], date_fields: ["date", "created"],
+  calendar: {           // the browser's half of the [calendar] table (snake_case), on every page
+    enabled: true, date_fields: ["date", "created"],
     week_start: "locale", companion: "auto", agenda_chips: true
   }
 };

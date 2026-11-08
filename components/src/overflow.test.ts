@@ -126,27 +126,32 @@ describe('theme.css: nothing widens the page', () => {
   })
 
   it('reserves the docked companion column by padding, with the same gutter, only at its widths', () => {
-    const cases = [
-      {
-        media: '@media screen and (min-width: 1280px)',
-        body: 'html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single))',
-      },
-      { media: '@media screen and (min-width: 1440px)', body: 'html:not(.mbr-companion-hidden) body.mbr-has-companion' },
+    // The width rules only say that the column docks; the layout is written once.
+    const widths = [
+      { media: '@media screen and (min-width: 1280px)', body: 'body.mbr-has-companion:not(:has(> mbr-browse-single))' },
+      { media: '@media screen and (min-width: 1440px)', body: 'body.mbr-has-companion' },
     ]
-    for (const { media, body } of cases) {
-      const reserve = rulesFor(body).find((r) => declaration(r, 'padding-right'))
-      expect(reserve && declaration(reserve, 'padding-right'), body).toBe('var(--mbr-companion-width)')
-      expect(reserve?.conditions).toEqual([media])
-      const column = rulesFor(`${body} > mbr-calendar`)[0]
-      expect(column && declaration(column, 'position')).toBe('fixed')
-      expect(column && declaration(column, 'width')).toBe('var(--mbr-companion-width)')
-      for (const child of ['header', 'nav.breadcrumbs', 'main', 'footer']) {
-        const gutter = rulesFor(`${body} > ${child}`).find((r) => declaration(r, 'padding-inline'))
-        expect(gutter && declaration(gutter, 'padding-inline'), child).toBe('var(--pico-spacing)')
-        expect(gutter?.conditions).toEqual([media])
-      }
+    for (const { media, body } of widths) {
+      const docks = rulesFor(body).find((r) => declaration(r, '--mbr-companion-docked'))
+      expect(docks && declaration(docks, '--mbr-companion-docked'), body).toBe('1')
+      expect(docks?.conditions).toEqual([media])
+    }
+    const docked = 'html:not(.mbr-companion-hidden) body.mbr-has-companion'
+    const reserve = rulesFor(docked).find((r) => declaration(r, 'padding-right'))
+    expect(reserve && declaration(reserve, 'padding-right')).toBe('var(--mbr-inset-right)')
+    expect(reserve && declaration(reserve, '--mbr-inset-right')).toBe('calc(var(--mbr-companion-docked, 0) * var(--mbr-companion-width))')
+    expect(reserve?.conditions).toEqual([])
+    const column = rulesFor(`${docked} > mbr-calendar`)[0]
+    expect(column && declaration(column, 'display')).toBe('var(--mbr-companion-display, contents)')
+    expect(column && declaration(column, 'position')).toBe('fixed')
+    expect(column && declaration(column, 'width')).toBe('var(--mbr-companion-width)')
+    for (const child of ['header', 'nav.breadcrumbs', 'main', 'footer']) {
+      const gutter = rulesFor(`${docked} > ${child}`).find((r) => declaration(r, 'padding-inline'))
+      expect(gutter && declaration(gutter, 'padding-inline'), child).toBe('var(--pico-spacing)')
+      expect(gutter?.conditions).toEqual(['@media screen and (min-width: 1280px)'])
     }
   })
+
 
   it('keeps the marginalia dagger narrower than the 16px sidebar gutter', () => {
     const dagger = rulesFor('blockquote blockquote blockquote::before').find(

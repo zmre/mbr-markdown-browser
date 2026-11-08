@@ -21,7 +21,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::calendar::{CalendarConfig, CalendarNav, CompanionMode, PeriodKind};
+use crate::calendar::{CalendarConfig, CalendarNav, CompanionMode, PeriodKind, WeekStart};
 use crate::config::TagSource;
 use crate::edit_auth::content_hash;
 use crate::link_transform::make_relative_url;
@@ -114,7 +114,7 @@ pub struct PageChrome<'a> {
     pub root_dir: Option<&'a Path>,
     /// The repository's `[calendar]` table, published as
     /// `__MBR_CONFIG__.calendar` (the `d` key works on every page).
-    pub calendar: &'a CalendarConfig,
+    pub calendar: &'a CalendarChrome,
 }
 
 /// Inserts the shared chrome key set into a template context.
@@ -155,16 +155,72 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
     insert_calendar_config(ctx, chrome.calendar);
 }
 
-/// Inserts `calendar_config`, the `[calendar]` table as script-safe JSON for
-/// `_head.html`'s `__MBR_CONFIG__.calendar`, and `calendar_enabled`, which
-/// gates `_footer.html`'s `<mbr-calendar>` and `_head.html`'s pre-paint
-/// companion preference.
-pub fn insert_calendar_config(ctx: &mut HashMap<String, Value>, calendar: &CalendarConfig) {
-    let json = serde_json::to_string(calendar).unwrap_or_else(|_| "{}".to_string());
-    ctx.insert(
-        "calendar_config".to_string(),
-        json!(crate::templates::escape_json_for_script(&json)),
-    );
+/// The `[calendar]` table as every page publishes it, prepared **once** per
+/// server or build rather than serialized on every render.
+///
+/// Carries `__MBR_CONFIG__.calendar` already serialized and escaped for an
+/// inline `<script>`, plus the two settings page assembly itself reads.
+/// The published object is the browser's half of the table only: `periods`
+/// and `periodic_folders` are applied at scan time ([`CalendarRules`]) and
+/// nothing in the browser reads them, so they are left out here — not with
+/// a `skip_serializing` on [`CalendarConfig`], whose serialized form is also
+/// figment's defaults layer and the mobile core's config comparison.
+///
+/// [`CalendarRules`]: crate::calendar::CalendarRules
+#[derive(Debug, Clone)]
+pub struct CalendarChrome {
+    enabled: bool,
+    companion: CompanionMode,
+    script_json: String,
+}
+
+impl CalendarChrome {
+    pub fn new(config: &CalendarConfig) -> Self {
+        /// The browser's half of [`CalendarConfig`], in its wire spelling.
+        #[derive(serde::Serialize)]
+        struct Published<'a> {
+            enabled: bool,
+            date_fields: &'a [String],
+            week_start: WeekStart,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            week_numbers: Option<bool>,
+            companion: CompanionMode,
+            agenda_chips: bool,
+        }
+        let published = Published {
+            enabled: config.enabled,
+            date_fields: &config.date_fields,
+            week_start: config.week_start,
+            week_numbers: config.week_numbers,
+            companion: config.companion,
+            agenda_chips: config.agenda_chips,
+        };
+        let json = serde_json::to_string(&published).unwrap_or_else(|_| "{}".to_string());
+        Self {
+            enabled: config.enabled,
+            companion: config.companion,
+            script_json: crate::templates::escape_json_for_script(&json),
+        }
+    }
+
+    /// `[calendar] enabled`.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl Default for CalendarChrome {
+    fn default() -> Self {
+        Self::new(&CalendarConfig::default())
+    }
+}
+
+/// Inserts `calendar_config`, the browser's half of the `[calendar]` table as
+/// script-safe JSON for `_head.html`'s `__MBR_CONFIG__.calendar`, and
+/// `calendar_enabled`, which gates `_footer.html`'s `<mbr-calendar>` and
+/// `_head.html`'s pre-paint companion preference.
+fn insert_calendar_config(ctx: &mut HashMap<String, Value>, calendar: &CalendarChrome) {
+    ctx.insert("calendar_config".to_string(), json!(calendar.script_json));
     ctx.insert("calendar_enabled".to_string(), json!(calendar.enabled));
 }
 
@@ -172,29 +228,31 @@ pub fn insert_calendar_config(ctx: &mut HashMap<String, Value>, calendar: &Calen
 /// `design/calendar.md`): a **day** note under `companion = "auto"`. The
 /// window width is the stylesheet's business; this only decides whether the
 /// page asks for the column, so the space is reserved before any script runs.
-pub fn companion_docks(nav: Option<&CalendarNav>, calendar: &CalendarConfig) -> bool {
-    calendar.enabled
-        && calendar.companion == CompanionMode::Auto
-        && nav.is_some_and(|nav| nav.kind == PeriodKind::Day)
+///
+/// No `enabled` check: a page has a [`CalendarNav`] only when it is a
+/// periodic note, and with the calendar off no note is
+/// ([`crate::calendar::CalendarRules`]).
+fn companion_docks(nav: Option<&CalendarNav>, companion: CompanionMode) -> bool {
+    companion == CompanionMode::Auto && nav.is_some_and(|nav| nav.kind == PeriodKind::Day)
 }
 
 /// Inserts `calendar_companion: true` when [`companion_docks`]; the template
 /// renderer folds it into the `<body>` class list as `mbr-has-companion`
 /// (`templates::COMPANION_BODY_CLASS`), so a custom `.mbr/index.html` that
 /// renders `{{ style }}` gets the column without a change.
-pub fn insert_calendar_companion(
+fn insert_calendar_companion(
     ctx: &mut HashMap<String, Value>,
     nav: Option<&CalendarNav>,
-    calendar: &CalendarConfig,
+    calendar: &CalendarChrome,
 ) {
-    if companion_docks(nav, calendar) {
+    if companion_docks(nav, calendar.companion) {
         ctx.insert("calendar_companion".to_string(), json!(true));
     }
 }
 
 /// Inserts `calendar_nav` (drawn by `_calendar_nav.html`) for a periodic
 /// note, with its URLs in `url_mode`'s form. Nothing for any other page.
-pub fn insert_calendar_nav(
+fn insert_calendar_nav(
     ctx: &mut HashMap<String, Value>,
     nav: Option<&CalendarNav>,
     url_mode: &UrlMode,
@@ -445,8 +503,8 @@ pub struct MarkdownContextOptions<'a> {
     pub root_dir: Option<&'a Path>,
     /// The repository's `[slides]` defaults (`config.slides`).
     pub slides: &'a SlideSettings,
-    /// The repository's `[calendar]` table (`config.calendar`).
-    pub calendar: &'a CalendarConfig,
+    /// The repository's `[calendar]` table (`config.calendar`), prepared once.
+    pub calendar: &'a CalendarChrome,
 }
 
 /// Builds the `extra_context` map shared by server-mode and static-build
@@ -800,7 +858,7 @@ mod tests {
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: Some(("pre ", " suf")),
                 root_dir: Some(Path::new("/repo/root")),
-                calendar: &CalendarConfig::default(),
+                calendar: &CalendarChrome::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -837,7 +895,7 @@ mod tests {
                 tasks_default_include: IncludeFilter::Tasks,
                 title_affixes: None,
                 root_dir: None,
-                calendar: &CalendarConfig::default(),
+                calendar: &CalendarChrome::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(true)));
@@ -865,7 +923,7 @@ mod tests {
                 // Static builds never have a live repo to scope storage
                 // against.
                 root_dir: None,
-                calendar: &CalendarConfig::default(),
+                calendar: &CalendarChrome::default(),
             },
         );
         assert_eq!(ctx.get("server_mode"), Some(&json!(false)));
@@ -1039,8 +1097,8 @@ mod tests {
         assert!(!ctx.contains_key("error_message"));
     }
 
-    static DEFAULT_CALENDAR: std::sync::LazyLock<CalendarConfig> =
-        std::sync::LazyLock::new(CalendarConfig::default);
+    static DEFAULT_CALENDAR: std::sync::LazyLock<CalendarChrome> =
+        std::sync::LazyLock::new(CalendarChrome::default);
 
     fn markdown_opts<'a>(
         sources: &'a [TagSource],
@@ -1231,21 +1289,18 @@ mod tests {
             title: "2026-10".to_string(),
         }])
         .nav(&Period::parse_key("2026-10").unwrap());
-        let with = |companion| CalendarConfig {
-            companion,
-            ..CalendarConfig::default()
+        let with = |companion| {
+            CalendarChrome::new(&CalendarConfig {
+                companion,
+                ..CalendarConfig::default()
+            })
         };
 
-        assert!(companion_docks(Some(&day), &with(CompanionMode::Auto)));
-        assert!(!companion_docks(Some(&month), &with(CompanionMode::Auto)));
-        assert!(!companion_docks(None, &with(CompanionMode::Auto)));
-        assert!(!companion_docks(Some(&day), &with(CompanionMode::OnDemand)));
-        assert!(!companion_docks(Some(&day), &with(CompanionMode::Off)));
-        let disabled = CalendarConfig {
-            enabled: false,
-            ..CalendarConfig::default()
-        };
-        assert!(!companion_docks(Some(&day), &disabled));
+        assert!(companion_docks(Some(&day), CompanionMode::Auto));
+        assert!(!companion_docks(Some(&month), CompanionMode::Auto));
+        assert!(!companion_docks(None, CompanionMode::Auto));
+        assert!(!companion_docks(Some(&day), CompanionMode::OnDemand));
+        assert!(!companion_docks(Some(&day), CompanionMode::Off));
 
         let mut ctx = HashMap::new();
         insert_calendar_companion(&mut ctx, Some(&day), &with(CompanionMode::Auto));
@@ -1258,39 +1313,41 @@ mod tests {
     #[test]
     fn test_calendar_enabled_flag_follows_config() {
         let mut ctx = HashMap::new();
-        insert_calendar_config(&mut ctx, &CalendarConfig::default());
+        insert_calendar_config(&mut ctx, &CalendarChrome::default());
         assert_eq!(ctx.get("calendar_enabled"), Some(&json!(true)));
         let mut ctx = HashMap::new();
         let off = CalendarConfig {
             enabled: false,
             ..CalendarConfig::default()
         };
-        insert_calendar_config(&mut ctx, &off);
+        insert_calendar_config(&mut ctx, &CalendarChrome::new(&off));
         assert_eq!(ctx.get("calendar_enabled"), Some(&json!(false)));
     }
 
     #[test]
     fn test_calendar_config_is_script_safe_json() {
         let config = CalendarConfig {
-            periodic_folders: vec!["</script><b>".into()],
+            date_fields: vec!["</script><b>".into()],
+            periodic_folders: vec!["journal".into()],
             ..CalendarConfig::default()
         };
         let mut ctx = HashMap::new();
-        insert_calendar_config(&mut ctx, &config);
+        insert_calendar_config(&mut ctx, &CalendarChrome::new(&config));
         let raw = ctx["calendar_config"].as_str().unwrap();
         assert!(!raw.contains("</script>"), "{raw}");
         let parsed: Value = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed["enabled"], json!(true));
-        assert_eq!(
-            parsed["periods"],
-            json!(["day", "week", "month", "quarter", "year"])
-        );
+        assert_eq!(parsed["date_fields"], json!(["</script><b>"]));
         assert_eq!(parsed["companion"], json!("auto"));
         assert_eq!(parsed["week_start"], json!("locale"));
+        assert_eq!(parsed["agenda_chips"], json!(true));
         assert!(
             parsed.get("week_numbers").is_none(),
             "unset = decided by the browser"
         );
+        // Applied at scan time; nothing in the browser reads them.
+        assert!(parsed.get("periods").is_none(), "{raw}");
+        assert!(parsed.get("periodic_folders").is_none(), "{raw}");
     }
 
     fn slides_ctx(

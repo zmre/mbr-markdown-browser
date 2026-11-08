@@ -15,20 +15,30 @@ describe('dayTaskCounts', () => {
       {
         days: { '2026-10-30': { open: 2, overdue: true }, '2026-11-02': { open: 1, overdue: false } },
         undated_in_day_notes: { '2026-11-02': 3, '2026-10-29': 1, '2026-11-05': 2 },
-      },
-      '2026-10-31'
+      }
     )
     expect(Object.fromEntries(counts)).toEqual({
       '2026-10-30': { open: 2, overdue: true },
       '2026-11-02': { open: 4, overdue: false },
-      // Undated only, in the past: red, like any past day with open tasks.
-      '2026-10-29': { open: 1, overdue: true },
+      // Undated only, in the past: no due date, so not overdue.
+      '2026-10-29': { open: 1, overdue: false },
       '2026-11-05': { open: 2, overdue: false },
     })
   })
 
+  it('takes overdue from the server only: a past day of scheduled tasks stays plain', () => {
+    // The server sends `overdue: false` for a past day whose open tasks were
+    // all placed by their scheduled date ("plan to start", not a deadline).
+    const counts = dayTaskCounts({
+      days: { '2026-10-20': { open: 3, overdue: false }, '2026-10-21': { open: 1, overdue: true } },
+      undated_in_day_notes: { '2026-10-20': 2 },
+    })
+    expect(counts.get('2026-10-20')).toEqual({ open: 5, overdue: false })
+    expect(counts.get('2026-10-21')).toEqual({ open: 1, overdue: true })
+  })
+
   it('draws nothing for a day whose placed tasks are all done', () => {
-    expect(dayTaskCounts({ days: { '2026-10-30': { open: 0, overdue: false } } }, '2026-10-31').size).toBe(0)
+    expect(dayTaskCounts({ days: { '2026-10-30': { open: 0, overdue: false } } }).size).toBe(0)
   })
 })
 
@@ -48,6 +58,7 @@ describe('createTaskMarkers', () => {
       to: '2026-11-08',
       statuses: ['open'],
       limit: 0,
+      today: '2026-10-31',
     })
     await markers.source('2026-10-26', '2026-12-06')
     expect(fetchImpl).toHaveBeenCalledTimes(2)

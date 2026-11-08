@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { evaluateDateExpr, parseDateExpr, rangeContains } from './date-expr.js'
+import { EMPTY_RANGE, evaluateDateExpr, isEmptyRange, parseDateExpr, rangeContains } from './date-expr.js'
 import { addDays } from './note-date.js'
 
 interface Case {
   expr: string
   today?: string
   invalid?: boolean
+  empty?: boolean
   from?: string | null
   to?: string | null
 }
@@ -31,6 +32,10 @@ describe('date expressions (shared table with Rust)', () => {
       const got = evaluateDateExpr(c.expr, today)
       if (c.invalid) {
         expect(got).toBeNull()
+      } else if (c.empty) {
+        expect(got).toEqual(EMPTY_RANGE)
+        expect(isEmptyRange(got!)).toBe(true)
+        for (const day of ['1000-01-01', '2026-11-06', '9999-12-31']) expect(rangeContains(got!, day), day).toBe(false)
       } else {
         expect(got).toEqual({ from: c.from ?? null, to: c.to ?? null })
       }
@@ -82,7 +87,12 @@ describe('date expression invariants', () => {
                     : a.slice(0, 4)
       const range = evaluateDateExpr(expr, b)
       expect(range, expr).not.toBeNull()
+      if (range && isEmptyRange(range)) {
+        expect(range, expr).toEqual(EMPTY_RANGE)
+        continue
+      }
       if (range?.from && range.to) expect(range.from <= range.to, `${expr}: ${range.from} > ${range.to}`).toBe(true)
+      for (const key of [range?.from, range?.to]) if (key) expect(key, expr).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     }
   })
 

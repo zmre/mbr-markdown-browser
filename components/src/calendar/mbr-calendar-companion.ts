@@ -8,15 +8,20 @@
  *
  * Everything stateful is injected by the trigger (this chunk must not import
  * `shared.ts`): `siteIndex`, `fetchPageHtml`, `resolveUrl`, `navigate`,
- * `reveal`, `config`, `tasksEndpoint`, `editEnabled`. The page's own agenda is
- * parsed from the live DOM (`root`); another day's from that day note's HTML,
- * fetched and parsed by the same parser (`day-agenda.ts`).
+ * `reveal`, `config`, `taskMarkers`. The page's own agenda arrives parsed
+ * (`pageEntries`, from the trigger's `enhancePage`); another day's is that day
+ * note's HTML, fetched and parsed by the same parser (`day-agenda.ts`).
  *
  * Which day is shown first: the note's own day on a day note. On any other
  * note that has agenda entries, the agenda is that note's, titled "Times in
  * this note" with no date claim (§11 O5: a log note's single date says
  * nothing about when its times happened); picking a day or Today switches to
  * that day. Otherwise today.
+ *
+ * Cost per page: the periodic index is built once per `site.json`
+ * (`periodicIndexOf`), and notes are bucketed by day only for the days on
+ * screen (the month grid, plus the selected day), with each day's dot count
+ * computed once per bucketing — not per cell per minute.
  *
  * No editing (D13): blocks only navigate.
  */
@@ -26,14 +31,15 @@ import { ICON_BUTTON_CSS } from '../controls.js'
 import { ICON_SM, icon, iconX } from '../icons.js'
 import type { MarkdownFile } from '../sorting.js'
 import { DEFAULT_CALENDAR_CONFIG, type CalendarConfig } from './config.js'
-import { agendaEntries, type AgendaEntry } from './agenda-parse.js'
-import { layoutAgenda, visibleRange } from './agenda-layout.js'
+import type { AgendaEntry } from './agenda-parse.js'
+import { blockStyle, nowLineTop, timelineModel, type TimelineItem } from './agenda-layout.js'
 import { agendaFragment } from './agenda-page.js'
-import { loadDayAgenda, type FetchPageHtml } from './day-agenda.js'
+import { loadDayAgenda, type AgendaSummary, type FetchPageHtml } from './day-agenda.js'
 import { bucketByDate, groupDayNotes, type DayBuckets } from './day-notes.js'
-import { formatDate, monthGrid, monthOf, periodStart, resolveWeekStart, type MonthKey } from './month-grid.js'
+import { onMinute } from './minute-clock.js'
+import { formatDate, gridMonthRange, monthOf, periodStart, resolveWeekStart, type MonthKey } from './month-grid.js'
 import { todayKey, type DateKey } from './note-date.js'
-import { buildPeriodicIndex, findPeriod, periodKindOf, type PeriodicIndex } from './periodic.js'
+import { findPeriod, periodKindOf, periodicIndexOf, type PeriodicIndex } from './periodic.js'
 import {
   COMPANION_CLOSE_EVENT,
   type CompanionPlacement,
@@ -50,28 +56,16 @@ declare global {
   }
 }
 
-/** Pixels per minute on the timeline (40px an hour). */
-const PX_PER_MINUTE = 40 / 60
 /** Width of the hour-label gutter. */
 const GUTTER = '2.6rem'
-const MINUTE_MS = 60_000
 
-/** The indexes derived from `site.json`, built once per page. */
-interface SiteData {
-  readonly index: PeriodicIndex
+/** Notes bucketed for the days on screen, and each day's dot count. */
+interface DayWindow {
+  readonly from: DateKey
+  readonly to: DateKey
   readonly buckets: DayBuckets
-}
-
-/** Built once per `markdown_files` array: the companion may be re-created. */
-const siteDataCache = new WeakMap<readonly MarkdownFile[], SiteData>()
-
-function siteDataFor(files: readonly MarkdownFile[]): SiteData {
-  let data = siteDataCache.get(files)
-  if (!data) {
-    data = { index: buildPeriodicIndex(files), buckets: bucketByDate(files) }
-    siteDataCache.set(files, data)
-  }
-  return data
+  /** Notes dated each day other than its own day note. */
+  readonly counts: ReadonlyMap<DateKey, number>
 }
 
 /** What the agenda section is showing. */
@@ -80,14 +74,14 @@ type DayAgenda =
   | { readonly kind: 'none' }
   | { readonly kind: 'loading'; readonly url: string }
   | { readonly kind: 'error'; readonly url: string }
-  | { readonly kind: 'fetched'; readonly url: string; readonly entries: readonly AgendaEntry[] }
+  | { readonly kind: 'fetched'; readonly url: string; readonly entries: readonly AgendaSummary[] }
 
 @customElement('mbr-calendar-companion')
 export class MbrCalendarCompanionElement extends LitElement {
   /** Docked column or drawer. */
   @property({ reflect: true }) placement: CompanionPlacement = 'drawer'
-  /** The note's rendered body (`main#wrapper`), or `null` off a note. */
-  @property({ attribute: false }) root: ParentNode | null = null
+  /** This page's agenda entries (the trigger's `enhancePage`); empty off a note. */
+  @property({ attribute: false }) pageEntries: readonly AgendaEntry[] = []
   /** `site.json` (the trigger hands over its shared fetch). */
   @property({ attribute: false }) siteIndex: () => Promise<SiteIndex | null> = () => Promise.resolve(null)
   /** Fetches a page's HTML, for another day's agenda. */
@@ -100,11 +94,7 @@ export class MbrCalendarCompanionElement extends LitElement {
   @property({ attribute: false }) reveal: (el: HTMLElement) => void = (el) => el.scrollIntoView()
   /** The `[calendar]` table. */
   @property({ attribute: false }) config: CalendarConfig = DEFAULT_CALENDAR_CONFIG
-  /** `POST /.mbr/tasks`, or `null` (tasks off, static build). Phase 6. */
-  @property({ attribute: false }) tasksEndpoint: string | null = null
-  /** Whether the page may write (unused until a later phase needs it). */
-  @property({ attribute: false }) editEnabled = false
-  /** Phase 6 hook: per-day task counts; `null` draws no rings. */
+  /** Per-day open-task counts; `null` (tasks off, static build) draws no rings. */
   @property({ attribute: false }) taskMarkers: TaskMarkerSource | null = null
   /** The page's site-absolute `url_path` (decoded), to recognise itself. */
   @property() currentPath = ''
@@ -115,7 +105,7 @@ export class MbrCalendarCompanionElement extends LitElement {
   /** The clock; tests pass a fixed one. */
   @property({ attribute: false }) now: () => Date = () => new Date()
 
-  @state() private _site: SiteData | null = null
+  @state() private _files: readonly MarkdownFile[] | null = null
   @state() private _month: MonthKey = ''
   /** The day shown; `null` = this note's own times ("Times in this note"). */
   @state() private _selected: DateKey | null = null
@@ -124,8 +114,9 @@ export class MbrCalendarCompanionElement extends LitElement {
   @state() private _minutes = 0
   @state() private _taskCounts: ReadonlyMap<DateKey, DayTaskCount> | null = null
 
-  private _pageEntries: readonly AgendaEntry[] = []
-  private _timer: number | null = null
+  private _window: DayWindow | null = null
+  private _windowFiles: readonly MarkdownFile[] | null = null
+  private _offMinute: (() => void) | null = null
   private _initialized = false
 
   /** Moves keyboard focus onto the mini month. */
@@ -145,18 +136,20 @@ export class MbrCalendarCompanionElement extends LitElement {
     return this.pagePeriod && periodKindOf(this.pagePeriod) === 'day' ? this.pagePeriod : null
   }
 
+  private get _index(): PeriodicIndex | null {
+    return this._files ? periodicIndexOf(this._files) : null
+  }
+
   override connectedCallback(): void {
     super.connectedCallback()
     this._tick()
-    this._timer = window.setInterval(() => this._tick(), MINUTE_MS)
-    document.addEventListener('visibilitychange', this._onVisibility)
+    this._offMinute = onMinute(() => this._tick())
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback()
-    if (this._timer !== null) window.clearInterval(this._timer)
-    this._timer = null
-    document.removeEventListener('visibilitychange', this._onVisibility)
+    this._offMinute?.()
+    this._offMinute = null
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {
@@ -165,28 +158,22 @@ export class MbrCalendarCompanionElement extends LitElement {
       return
     }
     this._initialized = true
-    this._pageEntries = this.root ? agendaEntries(this.root) : []
     const pageDay = this._pageDay
-    this._selected = pageDay ?? (this._pageEntries.length > 0 ? null : this._today)
+    this._selected = pageDay ?? (this.pageEntries.length > 0 ? null : this._today)
     const anchor = pageDay ?? (this.pagePeriod ? periodStart(this.pagePeriod) : null) ?? this._today
     this._month = monthOf(anchor)
     this._loadAgenda()
     void this.siteIndex()
       .then((site) => {
-        this._site = siteDataFor(site?.markdown_files ?? [])
+        this._files = site?.markdown_files ?? []
         this._loadAgenda()
         this._loadTaskCounts()
       })
       .catch((err: unknown) => console.warn('mbr-calendar: could not load the site index', err))
   }
 
-  private _onVisibility = (): void => {
-    if (!document.hidden) this._tick()
-  }
-
-  /** Keeps today and the current-time line fresh (skipped while hidden). */
+  /** Keeps today and the current-time line fresh (the bundle's one minute tick). */
   private _tick(): void {
-    if (typeof document !== 'undefined' && document.hidden && this._today) return
     const date = this.now()
     this._today = todayKey(date)
     this._minutes = date.getHours() * 60 + date.getMinutes()
@@ -194,16 +181,42 @@ export class MbrCalendarCompanionElement extends LitElement {
 
   /** The day note for `date`, if the repository has one. */
   private _dayNote(date: DateKey): string | null {
-    return this._site ? (findPeriod(this._site.index, date)?.url ?? null) : null
+    const index = this._index
+    return index ? (findPeriod(index, date)?.url ?? null) : null
+  }
+
+  /**
+   * The notes of the days on screen (the grid, and the selected day), bucketed
+   * once per window: a month change re-buckets, a minute tick does not.
+   */
+  private _days(): DayWindow | null {
+    const files = this._files
+    if (!files || !this._month) return null
+    const grid = gridMonthRange(this._month, this._weekStart())
+    const sel = this._selected
+    const from = sel && sel < grid.from ? sel : grid.from
+    const to = sel && sel > grid.to ? sel : grid.to
+    const w = this._window
+    if (w && w.from === from && w.to === to && this._windowFiles === files) return w
+    const buckets = bucketByDate(files, from, to)
+    const counts = new Map<DateKey, number>()
+    for (const [date, notes] of buckets) {
+      const daily = this._dayNote(date)
+      const n = daily ? notes.filter((f) => f.url_path !== daily).length : notes.length
+      if (n) counts.set(date, n)
+    }
+    this._windowFiles = files
+    this._window = { from, to, buckets, counts }
+    return this._window
   }
 
   private _loadAgenda(): void {
     const date = this._selected
     if (date === null || date === this._pageDay) {
-      this._agenda = { kind: 'page', entries: this._pageEntries }
+      this._agenda = { kind: 'page', entries: this.pageEntries }
       return
     }
-    if (!this._site) {
+    if (!this._files) {
       this._agenda = { kind: 'loading', url: '' }
       return
     }
@@ -213,7 +226,7 @@ export class MbrCalendarCompanionElement extends LitElement {
       return
     }
     if (url === this.currentPath) {
-      this._agenda = { kind: 'page', entries: this._pageEntries }
+      this._agenda = { kind: 'page', entries: this.pageEntries }
       return
     }
     this._agenda = { kind: 'loading', url }
@@ -228,13 +241,11 @@ export class MbrCalendarCompanionElement extends LitElement {
     )
   }
 
-  /** Phase 6: task rings for the visible grid, at idle, when a source exists. */
+  /** Task rings for the visible grid, at idle, when a source exists. */
   private _loadTaskCounts(): void {
     const source = this.taskMarkers
     if (!source || !this._month) return
-    const weeks = monthGrid(this._month, this._weekStart()).weeks
-    const from = weeks[0].days[0]
-    const to = weeks[weeks.length - 1].days[6]
+    const { from, to } = gridMonthRange(this._month, this._weekStart())
     const month = this._month
     const run = (): void => {
       void source(from, to).then(
@@ -252,21 +263,8 @@ export class MbrCalendarCompanionElement extends LitElement {
     return resolveWeekStart(this.config.weekStart, this.locale)
   }
 
-  private _dayMarks = (date: DateKey): DayMarks => {
-    const site = this._site
-    if (!site) return {}
-    const daily = findPeriod(site.index, date)?.url
-    const notes = (site.buckets.get(date) ?? []).filter((f) => f.url_path !== daily).length
-    const tasks = this._taskCounts?.get(date)
-    return {
-      ...(daily ? { dailyUrl: daily } : {}),
-      ...(notes ? { notes } : {}),
-      ...(tasks?.open ? { open: tasks.open, overdue: tasks.overdue } : {}),
-    }
-  }
-
   private _weekHref = (isoWeek: string): string | null => {
-    const url = this._site ? findPeriod(this._site.index, isoWeek)?.url : undefined
+    const url = this._dayNote(isoWeek)
     return url ? this.resolveUrl(url) : null
   }
 
@@ -310,47 +308,41 @@ export class MbrCalendarCompanionElement extends LitElement {
   }
 
   /** A block was clicked: this page's item is revealed, another day's opened. */
-  private _openEntry(entry: AgendaEntry): void {
+  private _openEntry(entry: AgendaSummary & { readonly li?: HTMLLIElement }): void {
     const agenda = this._agenda
     if (agenda.kind === 'fetched') {
       this.navigate(this.resolveUrl(agenda.url) + agendaFragment(entry.ordinal))
-    } else if (entry.li.isConnected) {
+    } else if (entry.li?.isConnected) {
       this.reveal(entry.li)
     }
   }
 
-  private _time(minutes: number): string {
-    const d = new Date(Date.UTC(1970, 0, 1, Math.floor(minutes / 60), minutes % 60))
-    try {
-      return new Intl.DateTimeFormat(this.locale, { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' }).format(d)
-    } catch {
-      return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`
-    }
-  }
-
-  private _span(entry: AgendaEntry): string {
-    return entry.end === undefined ? this._time(entry.start) : `${this._time(entry.start)}–${this._time(entry.end)}`
-  }
-
-  private _renderTimeline(entries: readonly AgendaEntry[], showNow: boolean): TemplateResult {
+  /** Page entries (live `<li>`s) or a fetched day's {@link AgendaSummary}s, as `agenda-layout.ts`'s timeline. */
+  private _renderTimeline(entries: readonly (AgendaSummary & { readonly li?: HTMLLIElement })[], showNow: boolean): TemplateResult {
     if (entries.length === 0) return html`<p class="muted">No times in this note.</p>`
-    const { from, to } = visibleRange(entries)
-    const hours = Array.from({ length: (to - from) / 60 + 1 }, (_, i) => from + i * 60)
-    const y = (m: number): number => (m - from) * PX_PER_MINUTE
-    const nowVisible = showNow && this._minutes >= from && this._minutes <= to
-    // prettier-ignore
+    const tl = timelineModel<TimelineItem & AgendaSummary & { readonly li?: HTMLLIElement }>(entries, this.locale)
+    const now = showNow ? nowLineTop(tl, this._minutes) : null
+    const hours = tl.hours.map(
+      (h) => html`<div class="hour" style=${`top:${h.top}px`} aria-hidden="true"><span>${h.label}</span></div>`
+    )
+    const blocks = tl.blocks.map((b) => {
+      const e = b.item
+      const cls = `block${b.open ? ' no-end' : ''}${e.task ? ` task ${e.task}` : ''}`
+      const check = e.task ? html`<span class="check" aria-hidden="true"></span>` : nothing
+      const details = e.details.map((d) => html`<span class="detail">${d}</span>`)
+      return html`<button type="button" class=${cls} style=${blockStyle(b)} title=${b.label} aria-label=${b.label} @click=${() => this._openEntry(e)}>
+        ${check}<span class="span">${b.time}</span> <span class="title">${e.title}</span>${details}
+      </button>`
+    })
     return html`
-      <div class="scroll"><div class="timeline" style=${`height:${y(to)}px`}>
-        ${hours.map((h) => html`<div class="hour" style=${`top:${y(h)}px`} aria-hidden="true"><span>${h < 1440 ? this._time(h).replace(/:00(?=\D|$)/, '') : ''}</span></div>`)}
-        ${layoutAgenda(entries).map((b) => {
-          const e = b.item
-          const label = [this._span(e), e.title, ...e.details].join(' · ')
-          const geometry = `top:${y(b.start)}px;height:${Math.max(y(b.end) - y(b.start), 18)}px;left:calc(${GUTTER} + (100% - ${GUTTER}) * ${b.column} / ${b.columns});width:calc((100% - ${GUTTER}) / ${b.columns} - 2px)`
-          return html`<button type="button" class=${`block${b.open ? ' no-end' : ''}${e.task ? ` task ${e.task}` : ''}`} style=${geometry} title=${label} aria-label=${label} @click=${() => this._openEntry(e)}>${e.task ? html`<span class="check" aria-hidden="true"></span>` : nothing}<span class="span">${this._time(e.start)}</span> <span class="title">${e.title}</span>${e.details.map((d) => html`<span class="detail">${d}</span>`)}</button>`
-        })}
-        ${nowVisible ? html`<div class="now" style=${`top:${y(this._minutes)}px`} aria-hidden="true"></div>` : nothing}
-      </div></div>
-      <ol class="sr-only">${entries.map((e) => html`<li>${this._span(e)} ${e.title}${e.task ? ` (${e.task})` : ''}${e.details.length ? `: ${e.details.join('; ')}` : ''}</li>`)}</ol>
+      <div class="scroll">
+        <div class="timeline" style=${`height:${tl.height}px`}>
+          ${hours} ${blocks} ${now !== null ? html`<div class="now" style=${`top:${now}px`} aria-hidden="true"></div>` : nothing}
+        </div>
+      </div>
+      <ol class="sr-only">
+        ${tl.spoken.map((line) => html`<li>${line}</li>`)}
+      </ol>
     `
   }
 
@@ -381,37 +373,65 @@ export class MbrCalendarCompanionElement extends LitElement {
         body = html`<p class="muted">No note for this day.</p>`
         break
     }
-    // prettier-ignore
+    const label = date === null ? heading : `Agenda for ${formatDate(date, this.locale, { dateStyle: 'full' })}`
+    const open =
+      dailyUrl && dailyUrl !== this.currentPath
+        ? html`<a class="open-note" href=${this.resolveUrl(dailyUrl)}>Open note →</a>`
+        : nothing
     return html`
-      <section class="agenda" aria-label=${date === null ? heading : `Agenda for ${formatDate(date, this.locale, { dateStyle: 'full' })}`}>
-        <h3>${date === null ? html`${heading}` : html`<time datetime=${date}>${heading}</time>`}${dailyUrl && dailyUrl !== this.currentPath ? html`<a class="open-note" href=${this.resolveUrl(dailyUrl)}>Open note →</a>` : nothing}</h3>
-        ${due ? html`<p class="due">${due} ${due === 1 ? 'task' : 'tasks'} due</p>` : nothing}
-        ${body}
+      <section class="agenda" aria-label=${label}>
+        <h3>${date === null ? heading : html`<time datetime=${date}>${heading}</time>`}${open}</h3>
+        ${due ? html`<p class="due">${due} ${due === 1 ? 'task' : 'tasks'} due</p>` : nothing} ${body}
       </section>
     `
   }
 
   private _renderNotes(): TemplateResult | typeof nothing {
     const date = this._selected
-    if (date === null || !this._site) return nothing
-    const groups = groupDayNotes(this._site.buckets.get(date) ?? [], this._dayNote(date))
+    const days = this._days()
+    if (date === null || !days) return nothing
+    const groups = groupDayNotes(days.buckets.get(date) ?? [], this._dayNote(date))
     if (groups.length === 0) return nothing
     const titled = groups.length > 1 || groups[0].type !== null
-    // prettier-ignore
     return html`
       <section class="notes" aria-label="Notes from this day">
         <h3>Notes from this day</h3>
-        ${groups.map((g) => html`${titled ? html`<h4>${g.type ?? 'Other'}</h4>` : nothing}<ul>${g.notes.map((n) => html`<li><a href=${this.resolveUrl(n.url)}>${n.title}</a>${n.folder ? html`<span class="folder">${n.folder}</span>` : nothing}</li>`)}</ul>`)}
+        ${groups.map(
+          (g) => html`
+            ${titled ? html`<h4>${g.type ?? 'Other'}</h4>` : nothing}
+            <ul>
+              ${g.notes.map(
+                (n) => html`<li>
+                  <a href=${this.resolveUrl(n.url)}>${n.title}</a>${n.folder ? html`<span class="folder">${n.folder}</span>` : nothing}
+                </li>`
+              )}
+            </ul>
+          `
+        )}
       </section>
     `
   }
 
   private _renderPanel(): TemplateResult {
     // `dayMarks` is a fresh closure each render: the mini month re-renders only
-    // when a property changes identity, and the task counts arrive later.
-    const weekNumbers = this.config.weekNumbers ?? (this._site ? this._site.index.week.length > 0 : false)
-    const monthUrl = this._site && this._month ? findPeriod(this._site.index, this._month)?.url : undefined
-    // prettier-ignore
+    // when a property changes identity, and the task counts arrive later. Each
+    // cell is two map lookups: the counts were taken when the window was bucketed.
+    const index = this._index
+    const days = this._days()
+    const weekNumbers = this.config.weekNumbers ?? (index ? index.week.length > 0 : false)
+    const monthUrl = index && this._month ? findPeriod(index, this._month)?.url : undefined
+    const taskCounts = this._taskCounts
+    const dayMarks = (date: DateKey): DayMarks => {
+      if (!index) return {}
+      const daily = findPeriod(index, date)?.url
+      const notes = days?.counts.get(date)
+      const tasks = taskCounts?.get(date)
+      return {
+        ...(daily ? { dailyUrl: daily } : {}),
+        ...(notes ? { notes } : {}),
+        ...(tasks?.open ? { open: tasks.open, overdue: tasks.overdue } : {}),
+      }
+    }
     return html`
       <div class="panel" @keydown=${this._onKeydown}>
         <mbr-calendar-month
@@ -421,7 +441,7 @@ export class MbrCalendarCompanionElement extends LitElement {
           .weekStart=${this._weekStart()}
           .weekNumbers=${weekNumbers}
           .locale=${this.locale}
-          .dayMarks=${(d: DateKey) => this._dayMarks(d)}
+          .dayMarks=${dayMarks}
           .weekHref=${this._weekHref}
           .monthHref=${monthUrl ? this.resolveUrl(monthUrl) : null}
           @mbr-calendar-select=${this._onSelect}
@@ -430,18 +450,21 @@ export class MbrCalendarCompanionElement extends LitElement {
           @mbr-calendar-today=${this._goToday}
         >
           <button slot="actions" type="button" class="mbr-icon-btn sm labeled today" @click=${this._goToday} title="Today (t)">Today</button>
-          <button slot="actions" type="button" class="mbr-icon-btn sm" @click=${this._close} aria-label="Close the calendar" title="Close (C)">${icon(iconX, { size: ICON_SM })}</button>
+          <button slot="actions" type="button" class="mbr-icon-btn sm" @click=${this._close} aria-label="Close the calendar" title="Close (C)">
+            ${icon(iconX, { size: ICON_SM })}
+          </button>
         </mbr-calendar-month>
-        ${this._renderAgenda()}
-        ${this._renderNotes()}
+        ${this._renderAgenda()} ${this._renderNotes()}
       </div>
     `
   }
 
   override render(): TemplateResult {
     if (this.placement === 'docked') return this._renderPanel()
-    // prettier-ignore
-    return html`<div class="backdrop" @click=${this._close}></div><div class="drawer" role="dialog" aria-modal="true" aria-label="Calendar">${this._renderPanel()}</div>`
+    return html`
+      <div class="backdrop" @click=${this._close}></div>
+      <div class="drawer" role="dialog" aria-modal="true" aria-label="Calendar">${this._renderPanel()}</div>
+    `
   }
 
   static override styles = [
@@ -565,6 +588,8 @@ export class MbrCalendarCompanionElement extends LitElement {
       }
       .block {
         position: absolute;
+        left: calc(${unsafeCSS(GUTTER)} + (100% - ${unsafeCSS(GUTTER)}) * var(--col) / var(--cols));
+        width: calc((100% - ${unsafeCSS(GUTTER)}) / var(--cols) - 2px);
         box-sizing: border-box;
         display: block;
         overflow: hidden;

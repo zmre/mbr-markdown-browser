@@ -211,6 +211,16 @@ describe('month cell overflow', () => {
     expect(overflowSplit(10, 2)).toEqual({ shown: 1, more: 9 })
     expect(overflowSplit(5, 1)).toEqual({ shown: 1, more: 4 })
   })
+
+  it('counts entries the cell was not handed only in the +N', () => {
+    expect(overflowSplit(2, 3, 2)).toEqual({ shown: 2, more: 0 })
+    // Two rows on hand, nine in all: one line goes to the +N.
+    expect(overflowSplit(2, 3, 9)).toEqual({ shown: 2, more: 7 })
+    expect(overflowSplit(1, 3, 9)).toEqual({ shown: 1, more: 8 })
+    expect(overflowSplit(5, 3, 9)).toEqual({ shown: 2, more: 7 })
+    expect(overflowSplit(0, 3, 4)).toEqual({ shown: 0, more: 4 })
+    expect(overflowSplit(3, 3, 3)).toEqual({ shown: 3, more: 0 })
+  })
 })
 
 describe('the key map', () => {

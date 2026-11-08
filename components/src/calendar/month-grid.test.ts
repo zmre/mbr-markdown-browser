@@ -22,16 +22,16 @@ afterEach(() => {
 describe('isoWeekOf', () => {
   it('labels 2026-12-28 … 2027-01-03 as 2026-W53 (2026 has 53 weeks)', () => {
     for (let i = 0; i < 7; i++) {
-      expect(isoWeekOf(addDays('2026-12-28', i)).key).toBe('2026-W53')
+      expect(isoWeekOf(addDays('2026-12-28', i))).toBe('2026-W53')
     }
-    expect(isoWeekOf('2027-01-04').key).toBe('2027-W01')
+    expect(isoWeekOf('2027-01-04')).toBe('2027-W01')
   })
 
   it('handles the classic edge years', () => {
-    expect(isoWeekOf('2020-12-31').key).toBe('2020-W53')
-    expect(isoWeekOf('2021-01-03').key).toBe('2020-W53')
-    expect(isoWeekOf('2025-12-29').key).toBe('2026-W01')
-    expect(isoWeekOf('2026-10-31').key).toBe('2026-W44')
+    expect(isoWeekOf('2020-12-31')).toBe('2020-W53')
+    expect(isoWeekOf('2021-01-03')).toBe('2020-W53')
+    expect(isoWeekOf('2025-12-29')).toBe('2026-W01')
+    expect(isoWeekOf('2026-10-31')).toBe('2026-W44')
   })
 
   it('round-trips with isoWeekStart', () => {
@@ -40,7 +40,7 @@ describe('isoWeekOf', () => {
     expect(isoWeekStart('2025-W53')).toBeNull()
     for (let d = '2024-01-01'; d < '2028-01-01'; d = addDays(d, 5)) {
       const week = isoWeekOf(d)
-      const start = isoWeekStart(week.key)!
+      const start = isoWeekStart(week)!
       expect(weekdayOf(start)).toBe(1)
       expect(start <= d && d <= addDays(start, 6)).toBe(true)
     }
@@ -64,7 +64,7 @@ describe('monthGrid', () => {
         // Every row is labelled with the ISO week of its Thursday.
         for (const week of grid.weeks) {
           const thursday = week.days.find((d) => weekdayOf(d) === 4)!
-          expect(week.isoWeek).toBe(isoWeekOf(thursday).key)
+          expect(week.isoWeek).toBe(isoWeekOf(thursday))
         }
       }
     })

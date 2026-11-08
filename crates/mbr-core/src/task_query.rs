@@ -42,6 +42,7 @@ use std::sync::Arc;
 use chrono::{NaiveDate, NaiveDateTime, Timelike};
 use serde::{Deserialize, Serialize};
 
+use crate::calendar::{Period, PeriodicIndex};
 use crate::task_index::FileTasks;
 use crate::tasks::{Task, TaskKind, TaskPriority, TaskStatus};
 
@@ -78,6 +79,14 @@ pub struct TaskQuery {
     pub from: Option<NaiveDate>,
     /// Last day of a [`TaskMode::Grid`] range, inclusive.
     pub to: Option<NaiveDate>,
+    /// The reader's local date, `YYYY-MM-DD`: what "overdue", "today" and
+    /// "tomorrow" mean in every mode (calendar buckets, the `due` filter, a
+    /// grid day's `overdue`, `overdue_before_range`, the grid's default
+    /// range). The browser always sends it, as it does to search, because
+    /// only it knows the reader's time zone. Absent or malformed → the
+    /// server's local date (the same lenient reading as search's `today`).
+    #[serde(deserialize_with = "crate::search::lenient_date")]
+    pub today: Option<NaiveDate>,
 }
 
 impl Default for TaskQuery {
@@ -93,6 +102,7 @@ impl Default for TaskQuery {
             limit: DEFAULT_TASK_LIMIT,
             from: None,
             to: None,
+            today: None,
         }
     }
 }
@@ -305,29 +315,10 @@ pub fn parse_task_query(q: &str) -> QueryTerms {
     terms
 }
 
-/// Normalizes a folder filter to a `/`-delimited prefix, or `None` for
-/// "everywhere".
-///
-/// Both slashes are forced on so the prefix test cannot half-match a sibling:
-/// `/doc` must not scope to `/docs/`. The repository root (`/` or an empty
-/// string) is treated as no filter at all.
-///
-/// # Examples
-///
-/// ```
-/// use mbr_core::task_query::normalize_folder;
-///
-/// assert_eq!(normalize_folder(Some("docs")).as_deref(), Some("/docs/"));
-/// assert_eq!(normalize_folder(Some("/docs/")).as_deref(), Some("/docs/"));
-/// assert_eq!(normalize_folder(Some("/")), None);
-/// assert_eq!(normalize_folder(None), None);
-/// ```
-pub fn normalize_folder(folder: Option<&str>) -> Option<String> {
-    let trimmed = folder?.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(format!("/{trimmed}/"))
+/// The folder filter as a scope ([`crate::url_path::normalize_folder`]), or
+/// `None` for "everywhere" (the repository root, `/` or an empty string).
+fn folder_scope(folder: Option<&str>) -> Option<String> {
+    Some(crate::url_path::normalize_folder(folder?)).filter(|scope| !scope.is_empty())
 }
 
 /// One task in a response: every [`Task`] field, plus where it lives.
@@ -418,7 +409,6 @@ struct Filters {
 
 impl Filters {
     fn new(query: &TaskQuery, today: NaiveDate) -> Self {
-        let grid = query.mode == TaskMode::Grid;
         Self {
             terms: parse_task_query(&query.q),
             // An empty selection is the spec's default view: incomplete only.
@@ -429,13 +419,13 @@ impl Filters {
             },
             priorities: query.priorities.clone(),
             // The grid places tasks by date itself, so a due filter could only
-            // hide days; and `include` is pinned as calendar mode pins it.
-            due: if grid { DueFilter::Any } else { query.due },
-            include: if grid {
-                IncludeFilter::Tasks
+            // hide days.
+            due: if query.mode == TaskMode::Grid {
+                DueFilter::Any
             } else {
-                query.include
+                query.due
             },
+            include: query.include,
             today,
             calendar: query.mode != TaskMode::Category,
         }
@@ -449,25 +439,24 @@ impl Filters {
     /// one **before** incrementing a bucket's `total`, so anything rejected
     /// cannot leak into a count or conjure a bucket that has no visible tasks:
     ///
-    /// - the `include` filter, which is a property of the entry and not of the
-    ///   view;
-    /// - calendar mode, which drops canceled tasks (no meaningful due date) and
-    ///   incomplete markers (no due date at all, and nothing to complete). A
-    ///   marker would otherwise pile into the "No due date" bucket, which is
-    ///   the one calendar heading that is a place for tasks whose deadline is
-    ///   still to be set.
+    /// - the calendar views (calendar and grid mode) take checkbox tasks only,
+    ///   never canceled ones (no meaningful date) and never incomplete
+    ///   markers (no date at all, and nothing to complete). A marker would
+    ///   otherwise pile into the "No due date" bucket, which is the one
+    ///   calendar heading that is a place for tasks whose deadline is still
+    ///   to be set. This is the **one** statement of that rule; the `include`
+    ///   filter has nothing to choose there and is not consulted;
+    /// - elsewhere, the `include` filter, which is a property of the entry and
+    ///   not of the view.
     ///
     /// Everything else about a marker falls out of the ordinary filters without
     /// a special case: its bucket is `NoDue`, its priority is `Normal` and its
     /// status is `Open`.
     fn admissible(&self, task: &Task) -> bool {
-        if !self.include.matches(task.kind) {
-            return false;
-        }
         if self.calendar {
             return task.kind == TaskKind::Task && task.status != TaskStatus::Canceled;
         }
-        true
+        self.include.matches(task.kind)
     }
 
     /// Every filter *except* status. This is the predicate the calendar-mode
@@ -495,6 +484,9 @@ impl Filters {
 ///
 /// `scan_in_progress` is left `false`; the handler fills it in from the repo,
 /// mirroring `search_handler`.
+///
+/// Answers the list modes: a [`TaskMode::Grid`] query has its own body and
+/// goes to [`run_grid_query`].
 pub fn run_query(
     files: &[Arc<FileTasks>],
     query: &TaskQuery,
@@ -502,7 +494,7 @@ pub fn run_query(
 ) -> TaskQueryResponse {
     let start = std::time::Instant::now();
     let filters = Filters::new(query, today);
-    let folder = normalize_folder(query.folder.as_deref());
+    let folder = folder_scope(query.folder.as_deref());
 
     let folders = folder_facets(files, folder_counter(&filters));
     let scoped: Vec<&Arc<FileTasks>> = files
@@ -510,9 +502,10 @@ pub fn run_query(
         .filter(|file| in_folder(file, folder.as_deref()))
         .collect();
 
-    let mut groups = match query.mode {
-        TaskMode::Category => group_by_file(&scoped, &filters),
-        TaskMode::Calendar | TaskMode::Grid => group_by_due(&scoped, &filters),
+    let mut groups = if filters.calendar {
+        group_by_due(&scoped, &filters)
+    } else {
+        group_by_file(&scoped, &filters)
     };
 
     let total_matches = groups.iter().map(|g| g.tasks.len()).sum();
@@ -527,12 +520,11 @@ pub fn run_query(
     }
 }
 
-/// Whether a file is inside the (already normalized) folder scope.
-///
-/// Prefix matching is what makes the scope include subfolders: `/docs/` matches
-/// `/docs/`, `/docs/notes/`, and everything below.
+/// Whether a file is inside the folder scope ([`folder_scope`]): the scope
+/// itself and everything below it, never a sibling that merely shares a
+/// prefix (`/doc` does not scope to `/docs/`).
 fn in_folder(file: &FileTasks, folder: Option<&str>) -> bool {
-    folder.is_none_or(|scope| file.folder().starts_with(scope))
+    folder.is_none_or(|scope| crate::url_path::folder_contains(scope, file.folder()))
 }
 
 /// Category mode: one group per file, tasks in source order.
@@ -704,34 +696,49 @@ fn folder_facets(
     files: &[Arc<FileTasks>],
     counts_task: impl Fn(&Task) -> bool,
 ) -> Vec<FolderFacet> {
-    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
-
+    let mut facets = FacetCounts::default();
     for file in files {
-        let matched = u32::try_from(file.tasks.iter().filter(|task| counts_task(task)).count())
-            .unwrap_or(u32::MAX);
-        if matched == 0 {
-            continue;
-        }
+        let matched = file.tasks.iter().filter(|task| counts_task(task)).count();
+        facets.add(file, matched);
+    }
+    facets.finish()
+}
 
+/// The running sums behind [`folder_facets`], for a caller that counts in a
+/// loop of its own (the grid folds them into its one pass).
+#[derive(Default)]
+struct FacetCounts<'a> {
+    counts: BTreeMap<&'a str, u32>,
+}
+
+impl<'a> FacetCounts<'a> {
+    /// Adds `matched` tasks of `file` to its folder and every ancestor.
+    fn add(&mut self, file: &'a FileTasks, matched: usize) {
+        if matched == 0 {
+            return;
+        }
+        let matched = u32::try_from(matched).unwrap_or(u32::MAX);
         let folder = file.folder();
         // `/docs/notes/` contributes to `/`, `/docs/` and `/docs/notes/`. Slice
         // boundaries land on `/`, which is ASCII, so this cannot split a
         // multi-byte character.
         for (index, byte) in folder.bytes().enumerate() {
             if byte == b'/' {
-                let ancestor = &folder[..=index];
-                *counts.entry(ancestor).or_insert(0) += matched;
+                let count = self.counts.entry(&folder[..=index]).or_insert(0);
+                *count = count.saturating_add(matched);
             }
         }
     }
 
-    counts
-        .into_iter()
-        .map(|(path, count)| FolderFacet {
-            path: path.to_string(),
-            count,
-        })
-        .collect()
+    fn finish(self) -> Vec<FolderFacet> {
+        self.counts
+            .into_iter()
+            .map(|(path, count)| FolderFacet {
+                path: path.to_string(),
+                count,
+            })
+            .collect()
+    }
 }
 
 /// The list modes' folder-facet predicate: what a group would show.
@@ -830,7 +837,7 @@ pub enum Placement {
 /// The done date counts only for a task whose checkbox says done: an open
 /// task carrying a stale stamp (the box unticked by hand) is still pending,
 /// and placing it on a past day would draw it as finished work.
-pub fn grid_placement(task: &Task) -> Option<(NaiveDateTime, bool, Placement)> {
+fn grid_placement(task: &Task) -> Option<(NaiveDateTime, bool, Placement)> {
     match task.status {
         TaskStatus::Canceled => None,
         TaskStatus::Done if task.done.is_some() => task
@@ -899,26 +906,48 @@ pub struct GridTaskHit {
     pub hit: TaskHit,
     /// The date that put the task on this day.
     pub placed_by: Placement,
-    /// `HH:MM` when the placing date carried a time or the text starts with
-    /// one; the day list's time order, and the label the grid draws.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub time: Option<String>,
+    /// The placing date's time of day, in minutes after midnight, when it
+    /// carried one (`@due(2026-08-05 09:30)`); sent as `time: "HH:MM"`, the
+    /// label the grid draws. A time at the start of the task's *text* only
+    /// orders the day's list (see [`GridDay::tasks`]); the client reads its
+    /// own agenda grammar for that.
+    #[serde(
+        rename = "time",
+        serialize_with = "serialize_clock_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub minutes: Option<u32>,
     /// The note's display title, for the grid's hover text.
     pub note: String,
+}
+
+/// `Some(570)` as `"09:30"`.
+fn serialize_clock_time<S: serde::Serializer>(
+    minutes: &Option<u32>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match minutes {
+        Some(m) => serializer.collect_str(&format_args!("{:02}:{:02}", m / 60, m % 60)),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// One day of a [`TaskGridResponse`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GridDay {
     /// The day's tasks that pass every filter, ordered: open before done, then
-    /// by time of day (timed first), then by priority (urgent first), then by
-    /// page and line. Truncated by `limit`; the counts are not.
+    /// by time of day (timed first; the placing date's time, else a time the
+    /// text starts with), then by priority (urgent first), then by page and
+    /// line. At most this day's share of `limit` (see [`spread_limit`]); the
+    /// counts are not truncated.
     pub tasks: Vec<GridTaskHit>,
     /// Open tasks placed on the day, by every filter except status.
     pub open: u32,
     /// Done tasks placed on the day, by every filter except status.
     pub done: u32,
-    /// The day is before today and still has open tasks.
+    /// The day is before today and still has an open task placed on it by its
+    /// **due** date. A task placed by its scheduled date ("plan to start")
+    /// never makes a day overdue, nor does a done one.
     pub overdue: bool,
 }
 
@@ -964,54 +993,129 @@ fn placed_in(
     grid_placement(task).filter(|(at, _, _)| (from..=to).contains(&at.date()))
 }
 
+/// The `url_path` of each **day note** of `from..=to`, with its date: one
+/// periodic-index lookup per day, at most [`MAX_GRID_DAYS`].
+fn day_notes_in(
+    periodic: Option<&PeriodicIndex>,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> HashMap<&str, NaiveDate> {
+    let Some(index) = periodic else {
+        return HashMap::new();
+    };
+    from.iter_days()
+        .take_while(|day| *day <= to)
+        .filter_map(|day| {
+            let note = index.get(&Period::day(day)?)?;
+            Some((note.url_path.as_str(), day))
+        })
+        .collect()
+}
+
+/// A task bound for a grid day's list, by reference until it survives the
+/// limit: only the rows a response returns are cloned into [`GridTaskHit`]s.
+struct GridRow<'a> {
+    file: &'a FileTasks,
+    task: &'a Task,
+    placed_by: Placement,
+    /// The placing date's time ([`GridTaskHit::minutes`]).
+    minutes: Option<u32>,
+    /// The display order's time: `minutes`, else the text's leading time.
+    sort_minutes: Option<u32>,
+}
+
+impl GridRow<'_> {
+    fn materialize(&self) -> GridTaskHit {
+        GridTaskHit {
+            hit: TaskHit {
+                task: self.task.clone(),
+                url_path: self.file.url_path.clone(),
+                path: crate::url_path::path_to_url(&self.file.raw_path),
+            },
+            placed_by: self.placed_by,
+            minutes: self.minutes,
+            note: self.file.display_title().to_string(),
+        }
+    }
+}
+
+/// A grid day while the query runs.
+#[derive(Default)]
+struct DayTally<'a> {
+    rows: Vec<GridRow<'a>>,
+    /// Rows passing every filter; equals `rows.len()` unless rows are not
+    /// being kept (`limit: 0`).
+    matched: usize,
+    open: u32,
+    done: u32,
+    /// Holds an open task placed by its due date: the only kind that can
+    /// make a day overdue (counted by every filter except status, like `open`).
+    open_due: bool,
+}
+
 /// Runs a [`TaskMode::Grid`] query.
 ///
-/// `day_notes` maps the `url_path` of each **day note** in the range to its
-/// date (the server reads it off the periodic index); it is consulted only for
-/// [`TaskGridResponse::undated_in_day_notes`]. Pure like [`run_query`]: `today`
+/// `periodic` is the repository's periodic-note index, from which the **day
+/// notes** of the range are read for
+/// [`TaskGridResponse::undated_in_day_notes`]; `None` (calendar off, index
+/// not built yet) reports no undated counts. Pure like [`run_query`]: `today`
 /// is a parameter and `scan_in_progress` is left for the handler.
 ///
-/// Filters: `q`, `folder`, `statuses` and `priorities` apply; `include` is
-/// pinned to tasks and `due` is ignored (see [`Filters::new`]). As in calendar
-/// mode, `open`/`done` count every filter except status, so a day's marker
-/// does not vanish when the view narrows to completed tasks.
+/// Filters: `q`, `folder`, `statuses` and `priorities` apply; `due` is
+/// ignored (see [`Filters::new`]) and, as in calendar mode, only checkbox
+/// tasks take part (`Filters::admissible`). As in calendar mode,
+/// `open`/`done` count every filter except status, so a day's marker does not
+/// vanish when the view narrows to completed tasks.
+///
+/// One pass over the tasks counts everything (days, undated, overdue, folder
+/// facets); only references are kept, and only the rows that survive each
+/// day's share of `limit` are cloned. `limit: 0` (the companion's day
+/// markers) keeps no rows at all.
 pub fn run_grid_query(
     files: &[Arc<FileTasks>],
     query: &TaskQuery,
     today: NaiveDate,
-    day_notes: &HashMap<String, NaiveDate>,
+    periodic: Option<&PeriodicIndex>,
 ) -> TaskGridResponse {
     let start = std::time::Instant::now();
     let filters = Filters::new(query, today);
     let (from, to) = grid_range(query.from, query.to, today);
-    let folder = normalize_folder(query.folder.as_deref());
+    let folder = folder_scope(query.folder.as_deref());
+    let day_notes = day_notes_in(periodic, from, to);
+    let keep_rows = query.limit > 0;
     // Overdue before the range is "overdue" only up to today: a range in the
     // future must not call next week's deadlines late.
     let overdue_cutoff = from.min(today);
 
-    let folders = folder_facets(files, |task| {
-        filters.admissible(task) && filters.matches(task) && placed_in(task, from, to).is_some()
-    });
-
-    let mut days: BTreeMap<NaiveDate, GridDay> = BTreeMap::new();
+    let mut days: BTreeMap<NaiveDate, DayTally<'_>> = BTreeMap::new();
     let mut undated: BTreeMap<NaiveDate, u32> = BTreeMap::new();
     let mut overdue_before_range = 0u32;
+    let mut facets = FacetCounts::default();
+    let mut total_matches = 0usize;
 
-    for file in files
-        .iter()
-        .filter(|file| in_folder(file, folder.as_deref()))
-    {
-        let path = crate::url_path::path_to_url(&file.raw_path);
-        let day_note = day_notes.get(&file.url_path).copied();
+    for file in files {
+        // Facets ignore the folder filter, so every file is read; only the
+        // ones in scope feed the grid itself.
+        let scoped = in_folder(file, folder.as_deref());
+        let day_note = scoped
+            .then(|| day_notes.get(file.url_path.as_str()).copied())
+            .flatten();
+        let mut shown_in_file = 0usize;
         for task in &file.tasks {
             if !filters.admissible(task) || !filters.matches_except_status(task) {
+                continue;
+            }
+            let placement = placed_in(task, from, to);
+            let shown = placement.is_some() && filters.matches_status(task);
+            shown_in_file += usize::from(shown);
+            if !scoped {
                 continue;
             }
             let open = task.status == TaskStatus::Open;
             if open && task.due.is_some_and(|due| due.date() < overdue_cutoff) {
                 overdue_before_range = overdue_before_range.saturating_add(1);
             }
-            let Some((at, has_time, placed_by)) = placed_in(task, from, to) else {
+            let Some((at, has_time, placed_by)) = placement else {
                 if let Some(date) = day_note.filter(|_| {
                     open && task.due.is_none() && task.scheduled.is_none() && task.done.is_none()
                 }) {
@@ -1019,48 +1123,54 @@ pub fn run_grid_query(
                 }
                 continue;
             };
-            let day = days.entry(at.date()).or_insert_with(|| GridDay {
-                tasks: Vec::new(),
-                open: 0,
-                done: 0,
-                overdue: false,
-            });
+            let day = days.entry(at.date()).or_default();
             if open {
                 day.open = day.open.saturating_add(1);
+                day.open_due |= placed_by == Placement::Due;
             } else {
                 day.done = day.done.saturating_add(1);
             }
-            if filters.matches_status(task) {
-                let minutes = if has_time {
-                    Some(at.hour() * 60 + at.minute())
-                } else {
-                    leading_minutes(&task.text)
-                };
-                day.tasks.push(GridTaskHit {
-                    hit: TaskHit {
-                        task: task.clone(),
-                        url_path: file.url_path.clone(),
-                        path: path.clone(),
-                    },
+            if !shown {
+                continue;
+            }
+            day.matched += 1;
+            total_matches += 1;
+            if keep_rows {
+                let minutes = has_time.then(|| at.hour() * 60 + at.minute());
+                day.rows.push(GridRow {
+                    file,
+                    task,
                     placed_by,
-                    time: minutes.map(|m| format!("{:02}:{:02}", m / 60, m % 60)),
-                    note: file.display_title().to_string(),
+                    minutes,
+                    sort_minutes: minutes.or_else(|| leading_minutes(&task.text)),
                 });
             }
         }
+        facets.add(file, shown_in_file);
     }
 
-    let mut remaining = query.limit;
-    let mut total_matches = 0usize;
+    let shares = spread_limit(
+        &days.values().map(|day| day.matched).collect::<Vec<_>>(),
+        query.limit,
+    );
     let days = days
         .into_iter()
-        .map(|(date, mut day)| {
-            day.overdue = date < today && day.open > 0;
-            day.tasks.sort_by(grid_order);
-            total_matches += day.tasks.len();
-            day.tasks.truncate(remaining);
-            remaining -= day.tasks.len();
-            (date.to_string(), day)
+        .zip(shares)
+        .map(|((date, mut day), share)| {
+            day.rows.sort_by(|a, b| {
+                grid_order(
+                    (a.task, a.sort_minutes, &a.file.url_path),
+                    (b.task, b.sort_minutes, &b.file.url_path),
+                )
+            });
+            day.rows.truncate(share);
+            let grid_day = GridDay {
+                tasks: day.rows.iter().map(GridRow::materialize).collect(),
+                open: day.open,
+                done: day.done,
+                overdue: date < today && day.open_due,
+            };
+            (date.to_string(), grid_day)
         })
         .collect();
 
@@ -1073,24 +1183,78 @@ pub fn run_grid_query(
             .map(|(date, count)| (date.to_string(), count))
             .collect(),
         overdue_before_range,
-        folders,
+        folders: facets.finish(),
         total_matches,
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         scan_in_progress: false,
     }
 }
 
-/// A grid day's display order; see [`GridDay::tasks`].
-fn grid_order(a: &GridTaskHit, b: &GridTaskHit) -> std::cmp::Ordering {
-    let rank = |hit: &GridTaskHit| u8::from(hit.hit.task.status != TaskStatus::Open);
+/// How many of each day's rows a grid response returns, `limit` in all.
+///
+/// The limit is shared out evenly (water-filling), never spent in date order:
+/// spent in order, a busy month gave every row to its first weeks and its last
+/// days drew counts and the overdue colour over empty cells. Each day gets
+/// `min(count, cap)` for the largest `cap` that fits, and what is left of the
+/// limit goes one row each to the earliest days still holding more, so the
+/// whole limit is used whenever there are that many rows. A day that keeps
+/// fewer rows than it has is drawn with "+N more" (the client knows `N` from
+/// the day's `open`/`done`). With fewer rows to give than days, the later days
+/// get none.
+///
+/// # Examples
+///
+/// ```
+/// use mbr_core::task_query::spread_limit;
+///
+/// assert_eq!(spread_limit(&[3, 1, 2], 10), vec![3, 1, 2]);
+/// assert_eq!(spread_limit(&[600, 5, 600], 500), vec![248, 5, 247]);
+/// assert_eq!(spread_limit(&[4, 4, 4], 2), vec![1, 1, 0]);
+/// ```
+pub fn spread_limit(counts: &[usize], limit: usize) -> Vec<usize> {
+    if counts.iter().sum::<usize>() <= limit {
+        return counts.to_vec();
+    }
+    let mut sorted = counts.to_vec();
+    sorted.sort_unstable();
+    // The fair cap: small days are taken whole while the rest can still each
+    // get at least as many; the first day that cannot sets the cap.
+    let mut remaining = limit;
+    let mut cap = 0;
+    for (i, &count) in sorted.iter().enumerate() {
+        let left = sorted.len() - i;
+        if count.saturating_mul(left) > remaining {
+            cap = remaining / left;
+            break;
+        }
+        remaining -= count;
+    }
+    let mut extra = limit - counts.iter().map(|&c| c.min(cap)).sum::<usize>();
+    counts
+        .iter()
+        .map(|&count| {
+            let bonus = usize::from(count > cap && extra > 0);
+            extra -= bonus;
+            count.min(cap) + bonus
+        })
+        .collect()
+}
+
+/// A grid day's display order (see [`GridDay::tasks`]), over a task, its
+/// sort time and its page.
+fn grid_order(
+    (a, a_minutes, a_url): (&Task, Option<u32>, &str),
+    (b, b_minutes, b_url): (&Task, Option<u32>, &str),
+) -> std::cmp::Ordering {
+    let rank = |task: &Task| u8::from(task.status != TaskStatus::Open);
     // `None` sorts after every time: untimed tasks follow the timed ones.
-    let time = |hit: &GridTaskHit| (hit.time.is_none(), hit.time.clone());
+    let time = |minutes: Option<u32>| (minutes.is_none(), minutes);
     rank(a)
         .cmp(&rank(b))
-        .then_with(|| time(a).cmp(&time(b)))
-        .then_with(|| b.hit.task.priority.cmp(&a.hit.task.priority))
-        .then_with(|| a.hit.url_path.cmp(&b.hit.url_path))
-        .then_with(|| a.hit.task.line.cmp(&b.hit.task.line))
+        .then_with(|| time(a_minutes).cmp(&time(b_minutes)))
+        .then_with(|| b.priority.cmp(&a.priority))
+        .then_with(|| a_url.cmp(b_url))
+        .then_with(|| a.line.cmp(&b.line))
 }
 
 #[cfg(test)]
@@ -1229,25 +1393,33 @@ mod tests {
         assert!(!parse_task_query("#work").matches(&task));
     }
 
-    // ---- normalize_folder ----------------------------------------------------
+    // ---- folder_scope ---------------------------------------------------------
 
     #[test]
-    fn folder_normalization_forces_both_slashes() {
-        for input in ["docs", "/docs", "docs/", "/docs/", "  /docs/  "] {
+    fn folder_scope_accepts_every_spelling() {
+        for input in [
+            "docs",
+            "/docs",
+            "docs/",
+            "/docs/",
+            "  /docs/  ",
+            "./docs",
+            "docs\\",
+        ] {
             assert_eq!(
-                normalize_folder(Some(input)).as_deref(),
-                Some("/docs/"),
+                folder_scope(Some(input)).as_deref(),
+                Some("docs"),
                 "for {input:?}"
             );
         }
     }
 
     #[test]
-    fn folder_normalization_treats_the_root_as_no_filter() {
+    fn folder_scope_treats_the_root_as_no_filter() {
         for input in ["", "/", "   ", "//"] {
-            assert_eq!(normalize_folder(Some(input)), None, "for {input:?}");
+            assert_eq!(folder_scope(Some(input)), None, "for {input:?}");
         }
-        assert_eq!(normalize_folder(None), None);
+        assert_eq!(folder_scope(None), None);
     }
 
     // ---- due_bucket ----------------------------------------------------------
@@ -2005,6 +2177,21 @@ mod tests {
     }
 
     #[test]
+    fn today_is_read_leniently() {
+        let read = |json: &str| -> Option<NaiveDate> {
+            serde_json::from_str::<TaskQuery>(json)
+                .expect("a malformed today never fails the query")
+                .today
+        };
+        assert_eq!(read(r#"{"today":"2026-11-06"}"#), Some(day(2026, 11, 6)));
+        assert_eq!(read("{}"), None);
+        assert_eq!(read(r#"{"today":null}"#), None);
+        assert_eq!(read(r#"{"today":"2026-13-01"}"#), None);
+        assert_eq!(read(r#"{"today":"11/06/2026"}"#), None);
+        assert_eq!(read(r#"{"today":20261106}"#), None);
+    }
+
+    #[test]
     fn the_no_due_filter_is_spelled_none_on_the_wire() {
         let parsed: TaskQuery = serde_json::from_str(r#"{"due":"none"}"#).expect("query");
         assert_eq!(parsed.due, DueFilter::NoDue);
@@ -2233,8 +2420,18 @@ mod tests {
         grid_query(day(2026, 8, 3), day(2026, 8, 9))
     }
 
-    fn no_day_notes() -> HashMap<String, NaiveDate> {
-        HashMap::new()
+    /// A periodic index holding one day note per `(url_path, date)`.
+    fn day_notes(notes: &[(&str, NaiveDate)]) -> PeriodicIndex {
+        PeriodicIndex::build(
+            notes
+                .iter()
+                .map(|(url, date)| crate::calendar::PeriodicEntry {
+                    period: Period::day(*date).expect("a day in range"),
+                    url_path: (*url).to_string(),
+                    raw_path: format!("{}.md", url.trim_matches('/')),
+                    title: date.to_string(),
+                }),
+        )
     }
 
     /// `(date, text)` of every placed task, in response order.
@@ -2284,7 +2481,7 @@ mod tests {
     #[test]
     fn grid_echoes_the_clamped_range() {
         let q = grid_query(day(2026, 12, 31), day(2026, 1, 1));
-        let response = run_grid_query(&[], &q, today(), &no_day_notes());
+        let response = run_grid_query(&[], &q, today(), None);
         assert_eq!(response.from, day(2026, 1, 1));
         assert_eq!(response.to, day(2026, 3, 3));
     }
@@ -2303,7 +2500,7 @@ mod tests {
              - [-] canceled @due(2026-08-05)\n\
              - [ ] no dates at all\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         assert_eq!(
             placed(&response),
             [
@@ -2337,7 +2534,7 @@ mod tests {
              - [x] completion [completion:: 2026-08-05]\n\
              - [ ] org\n  SCHEDULED: <2026-08-06 Thu>\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         let dates: Vec<String> = placed(&response).into_iter().map(|(d, _)| d).collect();
         assert_eq!(
             dates,
@@ -2353,7 +2550,7 @@ mod tests {
             None,
             "- [ ] before @due(2026-08-02)\n- [ ] inside @due(2026-08-09)\n- [ ] after @due(2026-08-10)\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         assert_eq!(placed(&response), [("2026-08-09".into(), "inside".into())]);
     }
 
@@ -2369,8 +2566,8 @@ mod tests {
             ),
             file("/notes/", "notes.md", None, "- [ ] undated elsewhere\n"),
         ];
-        let day_notes = HashMap::from([("/daily/2026-08-05/".to_string(), day(2026, 8, 5))]);
-        let response = run_grid_query(&files, &grid_week(), today(), &day_notes);
+        let day_notes = day_notes(&[("/daily/2026-08-05/", day(2026, 8, 5))]);
+        let response = run_grid_query(&files, &grid_week(), today(), Some(&day_notes));
         assert!(
             response.days.is_empty(),
             "D9: undated tasks are not plotted"
@@ -2391,19 +2588,19 @@ mod tests {
             None,
             "- [ ] call mum #home\n- [ ] write report\n",
         )];
-        let day_notes = HashMap::from([("/daily/2026-08-05/".to_string(), day(2026, 8, 5))]);
+        let day_notes = day_notes(&[("/daily/2026-08-05/", day(2026, 8, 5))]);
         let q = TaskQuery {
             q: "#home".into(),
             ..grid_week()
         };
-        let response = run_grid_query(&files, &q, today(), &day_notes);
+        let response = run_grid_query(&files, &q, today(), Some(&day_notes));
         assert_eq!(response.undated_in_day_notes["2026-08-05"], 1);
         let q = TaskQuery {
             folder: Some("/elsewhere/".into()),
             ..grid_week()
         };
         assert!(
-            run_grid_query(&files, &q, today(), &day_notes)
+            run_grid_query(&files, &q, today(), Some(&day_notes))
                 .undated_in_day_notes
                 .is_empty()
         );
@@ -2422,7 +2619,7 @@ mod tests {
              - [ ] morning @due(2026-08-05 09:30)\n\
              - [ ] high !! @due(2026-08-05)\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         let day = &response.days["2026-08-05"];
         let texts: Vec<&str> = day.tasks.iter().map(|t| t.hit.task.text.as_str()).collect();
         assert_eq!(
@@ -2436,9 +2633,16 @@ mod tests {
                 "done first in source"
             ]
         );
-        assert_eq!(day.tasks[0].time.as_deref(), Some("09:30"));
-        assert_eq!(day.tasks[1].time.as_deref(), Some("14:00"));
-        assert_eq!(day.tasks[2].time, None);
+        assert_eq!(
+            day.tasks[0].minutes,
+            Some(9 * 60 + 30),
+            "the due date's time"
+        );
+        assert_eq!(
+            day.tasks[1].minutes, None,
+            "a time in the text orders the list but is not sent"
+        );
+        assert_eq!(day.tasks[2].minutes, None);
     }
 
     #[test]
@@ -2454,13 +2658,83 @@ mod tests {
             statuses: vec![TaskStatus::Open],
             ..grid_week()
         };
-        let response = run_grid_query(&files, &q, today(), &no_day_notes());
+        let response = run_grid_query(&files, &q, today(), None);
         let fifth = &response.days["2026-08-05"];
         assert_eq!((fifth.open, fifth.done, fifth.tasks.len()), (2, 1, 2));
         // A day with only filtered-out tasks still reports its counts.
         let sixth = &response.days["2026-08-06"];
         assert_eq!((sixth.open, sixth.done, sixth.tasks.len()), (0, 1, 0));
         assert_eq!(response.total_matches, 2);
+    }
+
+    #[test]
+    fn spread_limit_shares_evenly_and_spends_the_whole_limit() {
+        assert_eq!(spread_limit(&[], 500), Vec::<usize>::new());
+        assert_eq!(
+            spread_limit(&[2, 0, 3], 5),
+            vec![2, 0, 3],
+            "everything fits"
+        );
+        assert_eq!(spread_limit(&[2, 0, 3], 0), vec![0, 0, 0]);
+        // Small days whole, the cap for the rest, the remainder to the first.
+        assert_eq!(spread_limit(&[10, 1, 10, 10], 20), vec![7, 1, 6, 6]);
+        assert_eq!(spread_limit(&[3, 3], 5), vec![3, 2]);
+    }
+
+    /// The regression: 42 days with 20 tasks each and the panel's limit of
+    /// 500. Spent in date order, the last 17 days returned no rows at all
+    /// while still reporting counts (and the overdue colour).
+    #[test]
+    fn grid_limit_is_spread_across_the_days_not_spent_in_date_order() {
+        let first = day(2026, 7, 27);
+        let body: String = (0..42u64)
+            .flat_map(|offset| {
+                let date = first + chrono::Days::new(offset);
+                (0..20).map(move |n| format!("- [ ] task {n} @due({date})\n"))
+            })
+            .collect();
+        let files = vec![file("/busy/", "busy.md", None, &body)];
+        let q = TaskQuery {
+            limit: 500,
+            ..grid_query(first, first + chrono::Days::new(41))
+        };
+        let response = run_grid_query(&files, &q, today(), None);
+        assert_eq!(response.days.len(), 42);
+        assert_eq!(response.total_matches, 42 * 20, "counted before the limit");
+        let rows: Vec<usize> = response.days.values().map(|d| d.tasks.len()).collect();
+        assert_eq!(rows.iter().sum::<usize>(), 500, "the whole limit is used");
+        assert!(
+            rows.iter().all(|&n| n == 11 || n == 12),
+            "every day gets its share: {rows:?}"
+        );
+        let last = &response.days["2026-09-06"];
+        assert_eq!((last.open, last.tasks.len()), (20, 11));
+        // The rows kept are the day's first ones in display order.
+        assert_eq!(last.tasks[0].hit.task.text, "task 0");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn spread_limit_is_fair_and_exact(
+            counts in proptest::collection::vec(0usize..60, 0..45),
+            limit in 0usize..700,
+        ) {
+            let shares = spread_limit(&counts, limit);
+            proptest::prop_assert_eq!(shares.len(), counts.len());
+            let total: usize = counts.iter().sum();
+            proptest::prop_assert_eq!(shares.iter().sum::<usize>(), total.min(limit));
+            for (&share, &count) in shares.iter().zip(&counts) {
+                proptest::prop_assert!(share <= count);
+            }
+            // Fair: a day cut short never has more than one row fewer than
+            // any other day.
+            let max = shares.iter().copied().max().unwrap_or(0);
+            for (&share, &count) in shares.iter().zip(&counts) {
+                if share < count {
+                    proptest::prop_assert!(share + 1 >= max, "{shares:?} from {counts:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2473,10 +2747,33 @@ mod tests {
              - [x] all done @due(2026-08-02)\n- [ ] today @due(2026-08-04)\n",
         )];
         let q = grid_query(day(2026, 8, 1), day(2026, 8, 7));
-        let response = run_grid_query(&files, &q, today(), &no_day_notes());
+        let response = run_grid_query(&files, &q, today(), None);
         assert!(response.days["2026-08-03"].overdue);
         assert!(!response.days["2026-08-02"].overdue, "nothing open");
         assert!(!response.days["2026-08-04"].overdue, "today is not overdue");
+    }
+
+    /// Scheduled means "plan to start", not a deadline: a past day holding
+    /// only open tasks placed by their scheduled date is not overdue, nor is
+    /// one holding only done work. A due task on the same day still is.
+    #[test]
+    fn grid_day_is_overdue_only_from_due_dates() {
+        let files = vec![file(
+            "/n/",
+            "n.md",
+            None,
+            "- [ ] plan it ⏳ 2026-08-02\n- [ ] plan more [scheduled:: 2026-08-02]\n\
+             - [x] finished ✅ 2026-08-01\n\
+             - [ ] planned ⏳ 2026-08-03\n- [ ] late @due(2026-08-03)\n",
+        )];
+        let q = grid_query(day(2026, 7, 27), day(2026, 8, 7));
+        let response = run_grid_query(&files, &q, today(), None);
+        let scheduled = &response.days["2026-08-02"];
+        assert_eq!(scheduled.open, 2);
+        assert!(!scheduled.overdue, "only scheduled tasks");
+        assert!(!response.days["2026-08-01"].overdue, "only done tasks");
+        assert!(response.days["2026-08-03"].overdue, "an open due task");
+        assert_eq!(response.overdue_before_range, 0, "scheduled never counts");
     }
 
     #[test]
@@ -2489,14 +2786,14 @@ mod tests {
              - [x] done late @due(2026-07-01)\n- [-] canceled late @due(2026-07-01)\n\
              - [ ] scheduled only ⏳ 2026-07-01\n- [ ] in range @due(2026-08-03)\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         assert_eq!(response.overdue_before_range, 2);
         let q = TaskQuery {
             priorities: vec![TaskPriority::High],
             ..grid_week()
         };
         assert_eq!(
-            run_grid_query(&files, &q, today(), &no_day_notes()).overdue_before_range,
+            run_grid_query(&files, &q, today(), None).overdue_before_range,
             1,
             "the other filters apply"
         );
@@ -2509,7 +2806,7 @@ mod tests {
             "- [ ] late @due(2026-08-03)\n- [ ] not yet @due(2026-08-20)\n",
         )];
         let next_month = grid_query(day(2026, 9, 1), day(2026, 9, 30));
-        let response = run_grid_query(&files, &next_month, today(), &no_day_notes());
+        let response = run_grid_query(&files, &next_month, today(), None);
         assert_eq!(
             response.overdue_before_range, 1,
             "due before today, not before `from`"
@@ -2528,8 +2825,66 @@ mod tests {
             due: DueFilter::NoDue,
             ..grid_week()
         };
-        let response = run_grid_query(&files, &q, today(), &no_day_notes());
+        let response = run_grid_query(&files, &q, today(), None);
         assert_eq!(placed(&response), [("2026-08-05".into(), "task".into())]);
+    }
+
+    /// `limit: 0` (the companion's day markers) keeps no rows but counts
+    /// exactly what a full query counts.
+    #[test]
+    fn a_zero_limit_grid_counts_like_a_full_one() {
+        let files = vec![
+            file(
+                "/a/x/",
+                "a/x.md",
+                None,
+                "- [ ] a @due(2026-08-03)\n- [x] b @due(2026-08-03)\n- [ ] late @due(2026-07-01)\n",
+            ),
+            file("/b/y/", "b/y.md", None, "- [ ] c @due(2026-08-05 10:00)\n"),
+        ];
+        let full = run_grid_query(&files, &grid_week(), today(), None);
+        let q = TaskQuery {
+            limit: 0,
+            ..grid_week()
+        };
+        let counts = run_grid_query(&files, &q, today(), None);
+        assert!(counts.days.values().all(|d| d.tasks.is_empty()));
+        assert_eq!(counts.total_matches, full.total_matches);
+        assert_eq!(counts.folders, full.folders);
+        assert_eq!(counts.overdue_before_range, full.overdue_before_range);
+        let tally = |r: &TaskGridResponse| -> Vec<(String, u32, u32, bool)> {
+            r.days
+                .iter()
+                .map(|(k, d)| (k.clone(), d.open, d.done, d.overdue))
+                .collect()
+        };
+        assert_eq!(tally(&counts), tally(&full));
+    }
+
+    /// The calendar views take checkbox tasks only, whatever `include` says:
+    /// one rule (`Filters::admissible`) for calendar and grid mode alike.
+    #[test]
+    fn calendar_views_take_tasks_whatever_include_says() {
+        let files = vec![marked_file(
+            "/n/",
+            "n.md",
+            "TODO: a marker\n\n- [ ] task @due(2026-08-05)\n",
+        )];
+        for include in [
+            IncludeFilter::All,
+            IncludeFilter::Tasks,
+            IncludeFilter::Markers,
+        ] {
+            let q = TaskQuery {
+                include,
+                ..calendar_query()
+            };
+            assert_eq!(
+                texts(&run_query(&files, &q, today())),
+                ["task"],
+                "{include:?}"
+            );
+        }
     }
 
     #[test]
@@ -2544,7 +2899,7 @@ mod tests {
             limit: 1,
             ..grid_week()
         };
-        let response = run_grid_query(&files, &q, today(), &no_day_notes());
+        let response = run_grid_query(&files, &q, today(), None);
         assert_eq!(response.total_matches, 3);
         assert_eq!(response.days["2026-08-03"].tasks.len(), 1);
         assert_eq!(response.days["2026-08-03"].open, 2);
@@ -2567,7 +2922,7 @@ mod tests {
             folder: Some("/a/".into()),
             ..grid_week()
         };
-        let response = run_grid_query(&files, &q, today(), &no_day_notes());
+        let response = run_grid_query(&files, &q, today(), None);
         assert_eq!(placed(&response), [("2026-08-05".into(), "in a".into())]);
         assert_eq!(
             response.overdue_before_range, 0,
@@ -2590,7 +2945,7 @@ mod tests {
             Some("Docs Home"),
             "- [ ] t @due(2026-08-05)\n",
         )];
-        let response = run_grid_query(&files, &grid_week(), today(), &no_day_notes());
+        let response = run_grid_query(&files, &grid_week(), today(), None);
         let hit = &response.days["2026-08-05"].tasks[0];
         assert_eq!(hit.note, "Docs Home");
         assert_eq!(hit.hit.path, "docs/index.md");
@@ -2602,15 +2957,21 @@ mod tests {
             "/daily/2026-08-05/",
             "daily/2026-08-05.md",
             None,
-            "- [ ] 09:00 call @due(2026-08-05)\n- [ ] undated\n",
+            "- [ ] 09:00 call @due(2026-08-05)\n- [ ] undated\n- [ ] timed @due(2026-08-05 14:05)\n",
         )];
-        let day_notes = HashMap::from([("/daily/2026-08-05/".to_string(), day(2026, 8, 5))]);
-        let response = run_grid_query(&files, &grid_week(), today(), &day_notes);
+        let day_notes = day_notes(&[("/daily/2026-08-05/", day(2026, 8, 5))]);
+        let response = run_grid_query(&files, &grid_week(), today(), Some(&day_notes));
         let mut json = serde_json::to_value(&response).expect("serializes");
         json["duration_ms"] = serde_json::json!(0);
         let hit = &json["days"]["2026-08-05"]["tasks"][0];
         assert_eq!(hit["placed_by"], "due");
-        assert_eq!(hit["time"], "09:00");
+        assert!(
+            hit.get("time").is_none(),
+            "C1: a time only in the text is not sent: {hit}"
+        );
+        let timed = &json["days"]["2026-08-05"]["tasks"][1];
+        assert_eq!(timed["time"], "14:05", "the placing date's time, HH:MM");
+        assert!(timed.get("minutes").is_none(), "{timed}");
         assert_eq!(hit["note"], "2026-08-05");
         assert_eq!(hit["path"], "daily/2026-08-05.md");
         assert_eq!(hit["url_path"], "/daily/2026-08-05/");
@@ -2620,7 +2981,7 @@ mod tests {
         day["tasks"] = serde_json::json!([]);
         assert_eq!(
             day,
-            serde_json::json!({"tasks": [], "open": 1, "done": 0, "overdue": false})
+            serde_json::json!({"tasks": [], "open": 2, "done": 0, "overdue": false})
         );
         assert_eq!(json["from"], "2026-08-03");
         assert_eq!(json["to"], "2026-08-09");
@@ -2629,7 +2990,7 @@ mod tests {
             serde_json::json!({"2026-08-05": 1})
         );
         assert_eq!(json["overdue_before_range"], 0);
-        assert_eq!(json["total_matches"], 1);
+        assert_eq!(json["total_matches"], 2);
         assert_eq!(json["scan_in_progress"], false);
         assert!(json.get("groups").is_none(), "the grid replaces `groups`");
         assert!(json["folders"].is_array());
@@ -2727,7 +3088,7 @@ mod tests {
                 let files = vec![file("/n/", "n.md", None, &body)];
                 let from = day(2026, 7, 20) + chrono::Days::new(start);
                 let q = grid_query(from, from + chrono::Days::new(len));
-                let response = run_grid_query(&files, &q, today(), &no_day_notes());
+                let response = run_grid_query(&files, &q, today(), None);
                 let (from, to) = (response.from, response.to);
                 prop_assert!((to - from).num_days() < i64::from(MAX_GRID_DAYS));
 
@@ -2748,7 +3109,18 @@ mod tests {
                     let date: NaiveDate = date.parse().expect("ISO key");
                     prop_assert!((from..=to).contains(&date));
                     prop_assert!(d.tasks.iter().all(|t| t.hit.task.status != TaskStatus::Canceled));
-                    prop_assert!(d.tasks.windows(2).all(|w| grid_order(&w[0], &w[1]) != std::cmp::Ordering::Greater));
+                    let key = |t: &GridTaskHit| {
+                        (
+                            t.hit.task.clone(),
+                            t.minutes.or_else(|| leading_minutes(&t.hit.task.text)),
+                            t.hit.url_path.clone(),
+                        )
+                    };
+                    let ordered = d.tasks.windows(2).all(|w| {
+                        let (a, b) = (key(&w[0]), key(&w[1]));
+                        grid_order((&a.0, a.1, &a.2), (&b.0, b.1, &b.2)) != std::cmp::Ordering::Greater
+                    });
+                    prop_assert!(ordered);
                 }
             }
         }

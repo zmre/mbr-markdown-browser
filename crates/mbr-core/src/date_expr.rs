@@ -10,7 +10,7 @@
 //!         | "last-month" | "this-year" | "-" N ("d" | "w" | "m" | "y")
 //! ```
 //!
-//! An expression resolves to a [`DateRange`] of calendar dates; the relative
+//! [`evaluate`] resolves an expression to a [`DateRange`] of calendar dates; the relative
 //! forms resolve against a `today` the caller supplies (the search request's,
 //! which is the reader's local date, else the server's).
 //!
@@ -32,6 +32,12 @@
 //!   A bare `..` constrains nothing and is not an expression.
 //! - The keywords and the `W`/`Q`/unit letters are ASCII case-insensitive;
 //!   digits are ASCII only.
+//! - **Nothing lies past 9999-12-31** (the last date a period, a note date or
+//!   a date key can name). An end past it is clamped to it, and a range that
+//!   *starts* past it (`>9999`, `>9999-12-31`, `>9999-W52`) is
+//!   [`DateRange::EMPTY`]: it matches nothing. The TypeScript side compares
+//!   date keys as strings, where `10000-01-01` would sort before `2026`, so
+//!   both sides normalize here rather than let a five-digit year exist.
 //!
 //! Pure, no I/O.
 
@@ -48,6 +54,12 @@ const MAX_COUNT_DIGITS: usize = 6;
 /// A relative start earlier than this year is treated as open-ended.
 const MIN_RELATIVE_YEAR: i32 = 1000;
 
+/// The last date an expression can name; see the module docs.
+const LAST_DATE: NaiveDate = NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date");
+
+/// The first date a period can name; [`DateRange::EMPTY`]'s `to`.
+const FIRST_DATE: NaiveDate = NaiveDate::from_ymd_opt(1000, 1, 1).expect("valid date");
+
 /// An inclusive range of calendar dates; `None` is an open end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DateRange {
@@ -56,6 +68,33 @@ pub struct DateRange {
 }
 
 impl DateRange {
+    /// The range that matches nothing: an expression starting past
+    /// 9999-12-31. `from` after `to`, so [`contains`](Self::contains) and
+    /// [`instants`](Self::instants) need no special case; spelled with dates
+    /// both languages can write (`components/src/calendar/date-expr.ts` has
+    /// the same constant).
+    pub const EMPTY: DateRange = DateRange {
+        from: Some(LAST_DATE),
+        to: Some(FIRST_DATE),
+    };
+
+    /// Whether no date lies in the range.
+    pub fn is_empty(&self) -> bool {
+        matches!((self.from, self.to), (Some(from), Some(to)) if from > to)
+    }
+
+    /// The canonical form: a start past [`LAST_DATE`] is [`Self::EMPTY`], an
+    /// end past it is clamped to it.
+    fn bounded(self) -> DateRange {
+        if self.from.is_some_and(|from| from > LAST_DATE) {
+            return DateRange::EMPTY;
+        }
+        DateRange {
+            from: self.from,
+            to: self.to.map(|to| to.min(LAST_DATE)),
+        }
+    }
+
     /// Whether `date` lies in the range.
     pub fn contains(&self, date: NaiveDate) -> bool {
         self.from.is_none_or(|from| date >= from) && self.to.is_none_or(|to| date <= to)
@@ -115,7 +154,7 @@ fn start_of_day<Tz: TimeZone>(date: NaiveDate, tz: &Tz) -> i64 {
 
 /// `>=`, `>`, `<=` or `<`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Comparison {
+enum Comparison {
     AtOrAfter,
     After,
     AtOrBefore,
@@ -124,7 +163,7 @@ pub enum Comparison {
 
 /// The unit of a `-N` count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CountUnit {
+enum CountUnit {
     Days,
     Weeks,
     Months,
@@ -133,7 +172,7 @@ pub enum CountUnit {
 
 /// The forms resolved against today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Relative {
+enum Relative {
     Today,
     Yesterday,
     ThisWeek,
@@ -150,7 +189,7 @@ pub enum Relative {
 
 /// A parsed date expression. See the module docs for the grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DateExpr {
+enum DateExpr {
     /// A whole period: `2026`, `2026-10`, `2026-10-31`, `2026-W44`, `2026-Q4`.
     Period(Period),
     /// `A..B`, `A..` or `..B`; at least one end is set, and `from` never
@@ -166,7 +205,7 @@ pub enum DateExpr {
 
 impl DateExpr {
     /// Parses a facet value, or `None` when it is not a date expression.
-    pub fn parse(value: &str) -> Option<DateExpr> {
+    fn parse(value: &str) -> Option<DateExpr> {
         if value.is_empty() || value.len() > MAX_EXPR_LEN || !value.is_ascii() {
             return None;
         }
@@ -191,7 +230,11 @@ impl DateExpr {
     }
 
     /// The dates the expression names, relative forms resolved against `today`.
-    pub fn resolve(&self, today: NaiveDate) -> DateRange {
+    fn resolve(&self, today: NaiveDate) -> DateRange {
+        self.resolve_unbounded(today).bounded()
+    }
+
+    fn resolve_unbounded(&self, today: NaiveDate) -> DateRange {
         match *self {
             DateExpr::Period(p) => period_range(p),
             DateExpr::Range { from, to } => DateRange {
@@ -203,9 +246,14 @@ impl DateExpr {
                     from: Some(p.start()),
                     to: None,
                 },
-                Comparison::After => DateRange {
-                    from: p.end().succ_opt(),
-                    to: None,
+                // `succ_opt` of 9999-12-31 is 10000-01-01, which `bounded`
+                // turns into the empty range.
+                Comparison::After => match p.end().succ_opt() {
+                    Some(from) => DateRange {
+                        from: Some(from),
+                        to: None,
+                    },
+                    None => DateRange::EMPTY,
                 },
                 Comparison::AtOrBefore => DateRange {
                     from: None,
@@ -221,7 +269,10 @@ impl DateExpr {
     }
 }
 
-/// Parses `value` and resolves it against `today` in one call.
+/// The dates a facet value names, relative forms resolved against `today`;
+/// `None` when it is not a date expression (the facet is then an ordinary
+/// substring facet). The module's one entry point: the parsed form never
+/// leaves it.
 pub fn evaluate(value: &str, today: NaiveDate) -> Option<DateRange> {
     DateExpr::parse(value).map(|expr| expr.resolve(today))
 }
@@ -361,6 +412,8 @@ mod tests {
         today: Option<String>,
         #[serde(default)]
         invalid: bool,
+        #[serde(default)]
+        empty: bool,
         from: Option<String>,
         to: Option<String>,
     }
@@ -379,6 +432,15 @@ mod tests {
             let got = evaluate(&case.expr, today);
             if case.invalid {
                 assert_eq!(got, None, "{:?} must not parse", case.expr);
+                continue;
+            }
+            if case.empty {
+                let got = got.unwrap_or_else(|| panic!("{:?} must parse", case.expr));
+                assert!(got.is_empty(), "{:?} must be empty, got {got:?}", case.expr);
+                assert_eq!(got, DateRange::EMPTY, "{:?}", case.expr);
+                for d in ["1000-01-01", "2026-11-06", "9999-12-31"] {
+                    assert!(!got.contains(date(d)), "{:?} contains {d}", case.expr);
+                }
                 continue;
             }
             let want = DateRange {
@@ -439,21 +501,31 @@ mod tests {
             let _ = evaluate(&s, date("2026-11-06"));
         }
 
-        /// A period expression is exactly that period.
+        /// A period expression is exactly that period (its end clamped to
+        /// 9999-12-31: the last ISO week of 9999 ends in 10000).
         #[test]
         fn period_expression_is_the_period(day in arb_date(), kind in arb_kind()) {
             let period = Period::of_date(day, kind);
             let range = evaluate(&period.key(), date("2026-11-06")).expect("period key parses");
-            prop_assert_eq!(range, DateRange { from: Some(period.start()), to: Some(period.end()) });
+            prop_assert_eq!(
+                range,
+                DateRange { from: Some(period.start()), to: Some(period.end().min(LAST_DATE)) }
+            );
         }
 
-        /// Every expression the grammar builds resolves with `from <= to`.
+        /// Every expression the grammar builds resolves with `from <= to`,
+        /// unless it is the one empty range, and never names a date past
+        /// 9999-12-31.
         #[test]
         fn from_never_after_to(expr in arb_expr(), today in arb_date()) {
             let range = evaluate(&expr, today).expect("generated expressions parse");
-            if let (Some(from), Some(to)) = (range.from, range.to) {
+            if range.is_empty() {
+                prop_assert_eq!(range, DateRange::EMPTY, "{}", expr);
+            } else if let (Some(from), Some(to)) = (range.from, range.to) {
                 prop_assert!(from <= to, "{expr}: {from} > {to}");
             }
+            prop_assert!(range.from.is_none_or(|d| d <= LAST_DATE), "{}", expr);
+            prop_assert!(range.to.is_none_or(|d| d <= LAST_DATE), "{}", expr);
         }
 
         /// The instant form agrees with the date form, for any offset.
@@ -472,6 +544,14 @@ mod tests {
                 .with_timezone(&tz)
                 .date_naive();
             prop_assert_eq!(range.instants(&tz).contains(secs), range.contains(local));
+        }
+    }
+
+    #[test]
+    fn empty_range_matches_no_instant() {
+        let i = DateRange::EMPTY.instants(&Utc);
+        for secs in [0, 1_700_000_000, 253_402_300_799] {
+            assert!(!i.contains(secs), "{secs}");
         }
     }
 

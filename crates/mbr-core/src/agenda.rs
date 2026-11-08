@@ -15,9 +15,11 @@
 //! time the source does not start with, a task's `!!` is stripped from its
 //! display text), so the source is parsed with the renderer's own options and
 //! each top-level list item's first line of text is tested, the way
-//! `agenda-parse.ts`'s `leadingText` reads the DOM. Before any parse, one regex
-//! over the whole source rejects notes that hold nothing time-like at all,
-//! which is almost every note.
+//! `agenda-parse.ts`'s `leadingText` reads the DOM. Before any parse, two
+//! cheap passes reject almost every note: one regex over the whole source
+//! for anything time-like at all, then one over the **list-item lines** only
+//! ([`ITEM_LINE`], [`item_line_may_have_time`]), so a time in prose, a
+//! heading or a frontmatter timestamp no longer forces the parse.
 //!
 //! `tests/fixtures/agenda-prefilter-cases.json` is the shared table: mbr-ffi's
 //! QuickLook tests render each case and hold this function to it, and
@@ -32,11 +34,25 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// Anything time-like anywhere, or an HTML character reference (which could
-/// spell one). A source without a match has no agenda and is not parsed.
+/// spell one: `&#58;`, `&colon;`). A source without a match has no agenda and
+/// is not parsed.
 static TIME_ANYWHERE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\d[:.]\d{2}|\d\s*[ap]\.?m|noon|midnight|&#")
+    Regex::new(r"(?i)\d[:.]\d{2}|\d\s*[ap]\.?m|noon|midnight|&(?:#|[a-z]+;)")
         .expect("time-anywhere regex is valid")
 });
+
+/// A line that can start a top-level list item: up to three spaces, a bullet
+/// (`-`, `*`, `+`) or an ordered marker (`1.`, `1)`), then whitespace or the
+/// end of the line. Group 1 is the rest of the line. A deeper indent is code
+/// or a nested item, a `>` a quoted one; neither is an agenda. CRLF-aware.
+static ITEM_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mR)^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$")
+        .expect("item line regex is valid")
+});
+
+/// Link destinations and reference labels (`](x)`, `][ref]`): not text.
+static LINK_TAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\]\([^)]*\)|\]\[[^\]]*\]").expect("link tail regex is valid"));
 
 /// The main bundle's `AGENDA_PREFILTER` (`components/src/calendar/agenda-scope.ts`):
 /// a cheap superset of the grammar, anchored at the start of an item's text.
@@ -64,23 +80,64 @@ pub fn may_have_agenda(source: &str) -> bool {
     if contains_li_tag(source) {
         return true;
     }
-    top_level_item_lines(source).any(|line| starts_time_like(&line))
+    ITEM_LINE
+        .captures_iter(source)
+        .any(|line| item_line_may_have_time(line.get(1).map_or("", |rest| rest.as_str())))
+        && top_level_item_lines(source).any(|line| starts_time_like(&line))
+}
+
+/// Whether the list-item line whose text after the marker is `rest` could
+/// give its item a time-like first line: a superset, by the line alone, of
+/// what [`top_level_item_lines`] can read there.
+///
+/// Yes when the line holds markup that hides text or spells it (`<` raw HTML
+/// or an autolink, `&` a character reference, `!` an image or a `!!`
+/// priority, `\` an escape, `[^` a footnote reference); when, with emphasis,
+/// code and link punctuation and a task box removed, it holds a time token
+/// anywhere (annotations stripped too, as a task displays); or when it holds
+/// no text at all, since a blank first line goes on to the item's next line
+/// (`-` alone, then `  09:00 Standup`).
+fn item_line_may_have_time(rest: &str) -> bool {
+    if rest.contains(['<', '&', '!', '\\']) || rest.contains("[^") {
+        return true;
+    }
+    let unboxed = TASK_BOX.replace(rest, "");
+    let text: String = LINK_TAIL
+        .replace_all(&unboxed, "")
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '~' | '`' | '[' | ']'))
+        .collect();
+    !text.chars().any(char::is_alphanumeric)
+        || TIME_ANYWHERE.is_match(&text)
+        || TIME_ANYWHERE.is_match(&tasks::strip_annotations(&text).0)
 }
 
 /// Whether one item's first line passes the prefilter, as written or as the
-/// renderer displays a task (box and annotations removed).
+/// renderer displays a task (box and annotations removed). [`TASK_BOX`] is
+/// tried only on a line that starts with one.
 fn starts_time_like(line: &str) -> bool {
     if AGENDA_PREFILTER.is_match(line) {
         return true;
     }
-    let unboxed = TASK_BOX.replace(line, "");
+    let unboxed = if line.trim_start().starts_with('[') {
+        TASK_BOX.replace(line, "")
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    };
     AGENDA_PREFILTER.is_match(&unboxed)
         || AGENDA_PREFILTER.is_match(&tasks::strip_annotations(&unboxed).0)
 }
 
+/// Whether `source` holds a real `<li` start tag: `<li`, ASCII
+/// case-insensitive, followed by whitespace, `>` or `/` (the bytes that end a
+/// tag name), so `<link>`, `<listing>` and the like do not force the full
+/// parse. A `<li` with nothing after it is no tag at all.
 fn contains_li_tag(source: &str) -> bool {
-    source.as_bytes().windows(3).any(|w| {
-        w[0] == b'<' && w[1].eq_ignore_ascii_case(&b'l') && w[2].eq_ignore_ascii_case(&b'i')
+    source.as_bytes().windows(4).any(|w| {
+        w[0] == b'<'
+            && w[1].eq_ignore_ascii_case(&b'l')
+            && w[2].eq_ignore_ascii_case(&b'i')
+            && (w[3].is_ascii_whitespace() || w[3] == b'>' || w[3] == b'/')
     })
 }
 
@@ -235,11 +292,31 @@ mod tests {
     #[test]
     fn accepts_one_to_three_spaces_of_indentation() {
         assert!(may_have_agenda("   - 09:00 Indented but top-level\n"));
+        assert!(may_have_agenda("  3) 09:00 Ordered with a paren\n"));
+        assert!(may_have_agenda("+\t09:00 Tab after the marker\n"));
     }
 
     #[test]
     fn accepts_raw_html_lists_wholesale() {
         assert!(may_have_agenda("<ul><li>09:00 Raw</li></ul>\n"));
+        assert!(may_have_agenda("<UL><LI>09:00 Upper</LI></UL>\n"));
+        assert!(may_have_agenda(
+            "<ul><li class=\"x\">09:00 Classy</li></ul>\n"
+        ));
+        assert!(may_have_agenda("<ul>\n<li\n>09:00 Broken tag</li></ul>\n"));
+    }
+
+    /// `<link>`, `<listing>` and a bare `<li` are not list items, so a note
+    /// with one and only prose times is rejected without the full parse.
+    #[test]
+    fn a_tag_merely_starting_with_li_is_not_a_list_item() {
+        assert!(!contains_li_tag("<link rel=\"stylesheet\" href=\"x.css\">"));
+        assert!(!contains_li_tag("<LISTING>x</LISTING>"));
+        assert!(!contains_li_tag("ends with <li"));
+        assert!(contains_li_tag("<li/>"));
+        assert!(!may_have_agenda(
+            "<link rel=\"stylesheet\" href=\"x.css\">\n\nWe met at 09:00.\n"
+        ));
     }
 
     #[test]
@@ -253,6 +330,60 @@ mod tests {
         ] {
             assert!(!may_have_agenda(source), "{source:?}");
         }
+    }
+
+    /// A time outside list items — prose, a heading, a frontmatter
+    /// timestamp — no longer costs a parse: the item-line pass rejects it.
+    #[test]
+    fn times_outside_item_lines_skip_the_parse() {
+        for rest in [
+            "Groceries",
+            "Call Bob",
+            "[ ] Pay rent",
+            "**Plan** the [trip](x.md)",
+        ] {
+            assert!(!item_line_may_have_time(rest), "{rest:?}");
+        }
+        assert!(!may_have_agenda(
+            "---\ncreated: 2026-01-01T09:00:00\n---\n\n# 09:00 sync\n\n- Groceries\n- Call Bob\n\nMet at 09:00.\n"
+        ));
+    }
+
+    /// Every way an item's displayed first line can come to start with a
+    /// time passes the item-line pass (the parse then decides).
+    #[test]
+    fn item_lines_that_may_display_a_time_pass() {
+        for rest in [
+            "09:00 Standup",
+            "**09:00** Standup",
+            "`09:00` Standup",
+            "[09](x):00 linked",
+            "[ ] 10:00 task",
+            "[-] 10:00 task",
+            "Standup at 09:00",
+            "9am",
+            "noon Lunch",
+            "",
+            "[ ]",
+            "**",
+            "![](x.png)",
+            "![photo][p]",
+            "<b>09</b>:00",
+            "9&colon;00",
+            "&#48;9:00",
+            "[^1] 09:00",
+            "!! 10:00",
+            "\\",
+        ] {
+            assert!(item_line_may_have_time(rest), "{rest:?}");
+        }
+    }
+
+    #[test]
+    fn reads_a_time_on_the_line_after_an_empty_marker() {
+        assert!(may_have_agenda("-\n  09:00 Late start\n"));
+        assert!(may_have_agenda("- ![](x.png)\n  09:00 After a photo\n"));
+        assert!(may_have_agenda("-\r\n  09:00 Windows line ends\r\n"));
     }
 
     #[test]

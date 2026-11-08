@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MarkdownFile } from '../sorting.ts'
+import { agendaEntries } from './agenda-parse.ts'
 import { DEFAULT_CALENDAR_CONFIG } from './config.ts'
 import { clearDayAgendaCache } from './day-agenda.ts'
 import { COMPANION_CLOSE_EVENT, type DayTaskCount, type TaskMarkerSource } from './types.ts'
@@ -64,7 +65,7 @@ async function mount(setup: Setup = {}) {
   const el = document.createElement('mbr-calendar-companion') as MbrCalendarCompanionElement
   Object.assign(el, {
     placement: 'docked',
-    root,
+    pageEntries: agendaEntries(root),
     siteIndex: () => Promise.resolve({ markdown_files: FILES }),
     fetchPageHtml,
     resolveUrl: (p: string) => `/base${p}`,
@@ -181,6 +182,17 @@ describe('another day (the fetched path)', () => {
     expect(fetchPageHtml).toHaveBeenCalledTimes(1)
   })
 
+  it('opens a fetched entry at its own ordinal, with no DOM kept from the fetch', async () => {
+    const page = `<html><body><main id="wrapper"><ul><li>09:00 First</li><li>not a time</li><li>14:00 Second</li></ul></main></body></html>`
+    const { el, navigate } = await mount({ fetchPageHtml: () => Promise.resolve(page) })
+    el.showDay('2026-10-30')
+    await settle(el)
+    const blocks = qa(el, '.block')
+    expect(blocks.map((b) => b.querySelector('.title')?.textContent)).toEqual(['First', 'Second'])
+    blocks[1].click()
+    expect(navigate).toHaveBeenCalledWith('/base/daily/2026-10-30/#mbr-agenda-2')
+  })
+
   it('says so when the day has no note, and when the fetch fails', async () => {
     const { el } = await mount({ fetchPageHtml: () => Promise.reject(new Error('offline')) })
     el.showDay('2026-10-29')
@@ -264,6 +276,18 @@ describe('<mbr-calendar-companion> task markers (§8.3)', () => {
     expect(grid.shadowRoot!.querySelector('[data-date="2026-10-30"] .ring.overdue')).not.toBeNull()
     expect(grid.shadowRoot!.querySelector('[data-date="2026-10-31"] .ring:not(.overdue)')).not.toBeNull()
     expect(q(el, '.agenda .due')?.textContent?.trim()).toBe('3 tasks due')
+  })
+
+  it('draws a past day plain when the source says it is not overdue (scheduled-only)', async () => {
+    const source = vi.fn<TaskMarkerSource>(() =>
+      Promise.resolve(new Map<string, DayTaskCount>([['2026-10-20', { open: 2, overdue: false }]]))
+    )
+    const { el } = await mount({ taskMarkers: source })
+    await settle(el)
+    const grid = month(el)
+    await grid.updateComplete
+    expect(grid.dayMarks('2026-10-20')).toMatchObject({ open: 2, overdue: false })
+    expect(grid.shadowRoot!.querySelector('[data-date="2026-10-20"] .ring:not(.overdue)')).not.toBeNull()
   })
 
   it('asks again when the source is replaced (a task write made it stale)', async () => {

@@ -2,7 +2,12 @@
  * Pure helpers behind the search panel's note-type options and folder picker.
  * Chunk-side (`mbr-search-extras.min.js`): nothing here is needed until the
  * search modal opens, so none of it is paid for on page load.
+ *
+ * A query is read with `calendar/date-facets.ts`'s `queryTokens` / `facetOf`
+ * (pure; the mirror of the server's `query_tokens`), so `when:` inside a
+ * quoted value (`title:"a when:today"`) is part of that value here too.
  */
+import { facetOf, queryTokens } from '../calendar/date-facets.js'
 
 /** Case-insensitive, locale-independent ordering for folder and type lists. */
 function compareFolded(a: string, b: string): number {
@@ -91,10 +96,13 @@ export function typeFacetToken(type: string): string {
   return facetToken('type', type)
 }
 
-/** Matches every `key:` facet token, quoted or bare, case-insensitively. */
-function facetPattern(key: string): RegExp {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|\\s)${escaped}:("[^"]*"?|\\S*)`, 'gi')
+/**
+ * Whether `token` is a `key:` facet (key ASCII case-insensitive), or the bare
+ * `key:` of one still being typed.
+ */
+function isFacetToken(token: string, key: string): boolean {
+  const lower = key.toLowerCase()
+  return facetOf(token)?.key.toLowerCase() === lower || token.toLowerCase() === `${lower}:`
 }
 
 /**
@@ -103,7 +111,9 @@ function facetPattern(key: string): RegExp {
  * swaps rather than stacking two facets (which would both have to match).
  */
 export function withFacet(query: string, key: string, value: string | null): string {
-  const rest = query.replace(facetPattern(key), ' ').replace(/\s+/g, ' ').trim()
+  const rest = queryTokens(query)
+    .filter((token) => !isFacetToken(token, key))
+    .join(' ')
   if (value === null || !value.trim()) return rest
   const token = facetToken(key, value)
   return rest ? `${rest} ${token}` : token
@@ -116,11 +126,11 @@ export function withTypeFacet(query: string, type: string): string {
 
 /** The value of the last `key:` facet in `query`, unquoted, or `null`. */
 export function facetValue(query: string, key: string): string | null {
+  const lower = key.toLowerCase()
   let value: string | null = null
-  for (const m of query.matchAll(facetPattern(key))) {
-    const raw = m[2]
-    const unquoted = raw.startsWith('"') ? raw.replace(/^"|"$/g, '') : raw
-    if (unquoted) value = unquoted
+  for (const token of queryTokens(query)) {
+    const facet = facetOf(token)
+    if (facet && facet.key.toLowerCase() === lower) value = facet.value
   }
   return value
 }

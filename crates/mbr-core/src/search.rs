@@ -30,7 +30,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::calendar::{NoteCalendar, note_date};
 use crate::config::TagSource;
-use crate::date_expr::{DateExpr, DateRange, InstantRange};
+use crate::date_expr::{DateRange, InstantRange, evaluate};
 use crate::errors::SearchError;
 use crate::repo::{MarkdownInfo, OtherFileInfo, Repo};
 use crate::vault::VaultPath;
@@ -70,14 +70,6 @@ impl ParsedQuery {
     /// Returns true if the query is empty (no terms and no facets).
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty() && self.facets.is_empty()
-    }
-
-    /// Whether any facet is a date facet (`date:`/`created:`/`modified:`/
-    /// `when:` with a value that parses as a date expression).
-    pub fn has_date_facets(&self) -> bool {
-        self.facets.iter().any(|(key, value)| {
-            DateFacetKey::from_key(key).is_some() && DateExpr::parse(value).is_some()
-        })
     }
 }
 
@@ -301,17 +293,14 @@ impl<'q, Tz: TimeZone> FacetFilter<'q, Tz> {
         let mut text = Vec::new();
         let mut dates = Vec::new();
         for (key, value) in facets {
-            let date_facet =
-                DateFacetKey::from_key(key)
-                    .zip(DateExpr::parse(value))
-                    .map(|(key, expr)| {
-                        let range = expr.resolve(today);
-                        DateFacet {
-                            key,
-                            range,
-                            instants: range.instants(&tz),
-                        }
-                    });
+            let date_facet = DateFacetKey::from_key(key).and_then(|key| {
+                let range = evaluate(value, today)?;
+                Some(DateFacet {
+                    key,
+                    range,
+                    instants: range.instants(&tz),
+                })
+            });
             match date_facet {
                 Some(facet) => dates.push(facet),
                 None => text.push((key.as_str(), value.as_str())),
@@ -364,7 +353,8 @@ impl<'q, Tz: TimeZone> FacetFilter<'q, Tz> {
 
 /// `today` from a request: a `YYYY-MM-DD` string; anything else is ignored
 /// (the server's date is used), so a malformed value cannot fail the search.
-fn lenient_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D::Error> {
+/// Shared with [`crate::task_query::TaskQuery::today`].
+pub(crate) fn lenient_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D::Error> {
     let value = Option::<serde_json::Value>::deserialize(d)?;
     Ok(value
         .as_ref()
@@ -553,48 +543,96 @@ impl SearchEngine {
 
     /// Execute a search query and return results.
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResponse, SearchError> {
+        self.run(query, false)
+    }
+
+    /// The whole answer to `POST /.mbr/search`: [`Self::search`] plus, when
+    /// the query asks for other filetypes (`filetype` `all`, or anything but
+    /// markdown), a path-only match over every other file
+    /// ([`search_other_files`]: images, video, …, not just the searchable
+    /// PDFs and text files), merged in by score.
+    ///
+    /// Not for a query with a date facet: that path-only match knows nothing
+    /// of dates, and its re-sort by score would undo the date order; the
+    /// engine has already applied the date facets to other files.
+    pub fn search_with_other_paths(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchResponse, SearchError> {
+        self.run(query, true)
+    }
+
+    fn run(
+        &self,
+        query: &SearchQuery,
+        merge_other_paths: bool,
+    ) -> Result<SearchResponse, SearchError> {
         let start = std::time::Instant::now();
 
         // Parse the query to extract facets
         let parsed = parse_query(&query.q);
-
-        // Early return for empty queries
-        if parsed.is_empty() {
-            return Ok(SearchResponse {
-                query: query.q.clone(),
-                total_matches: 0,
-                results: Vec::new(),
-                duration_ms: 0,
-                scan_in_progress: false,
-                not_downloaded: 0,
-            });
-        }
-
         // Facets are split and date expressions resolved once per query.
         let today = query
             .today
             .unwrap_or_else(|| chrono::Local::now().date_naive());
         let filter = FacetFilter::new(&parsed.facets, today, chrono::Local);
 
+        let mut response = if parsed.is_empty() {
+            // Early return for empty queries
+            SearchResponse {
+                query: query.q.clone(),
+                total_matches: 0,
+                results: Vec::new(),
+                duration_ms: 0,
+                scan_in_progress: false,
+                not_downloaded: 0,
+            }
+        } else {
+            self.search_parsed(query, &parsed, &filter, start)?
+        };
+
+        if merge_other_paths && !filter.has_dates() && includes_other_filetypes(&query.filetype) {
+            response.results.extend(search_other_files(
+                &self.repo,
+                &query.q,
+                query.folder.as_deref(),
+                query.filetype.as_deref(),
+                query.limit,
+            ));
+            response.results.sort_by_key(|r| std::cmp::Reverse(r.score));
+            response.results.truncate(query.limit);
+            response.total_matches = response.results.len();
+        }
+        Ok(response)
+    }
+
+    /// [`Self::search`] for a non-empty query, its facets already split.
+    fn search_parsed<Tz: TimeZone>(
+        &self,
+        query: &SearchQuery,
+        parsed: &ParsedQuery,
+        filter: &FacetFilter<'_, Tz>,
+        start: std::time::Instant,
+    ) -> Result<SearchResponse, SearchError> {
         let mut all_results = Vec::new();
         let mut not_downloaded = 0;
 
         // Metadata search (always fast, data in memory)
         if query.scope != SearchScope::Content {
-            all_results.extend(self.search_metadata(query, &parsed, &filter)?);
-            all_results.extend(self.search_tag_pages(query, &parsed, &filter));
+            all_results.extend(self.search_metadata(query, parsed, filter)?);
+            all_results.extend(self.search_tag_pages(query, parsed, filter));
         }
 
         // Content search (requires file I/O) - only if we have search terms
         if query.scope != SearchScope::Metadata && !parsed.terms.is_empty() {
-            let content = self.search_content(query, &parsed, &filter)?;
+            let content = self.search_content(query, parsed, filter)?;
             not_downloaded = content.not_downloaded;
             all_results.extend(content.results);
         }
 
         // Search other files (PDFs, text files) when filetype is "all"
         if self.should_search_other_files(&query.filetype) {
-            all_results.extend(self.search_other_files_metadata(query, &parsed, &filter)?);
+            all_results.extend(self.search_other_files_metadata(query, parsed, filter)?);
         }
 
         // Deduplicate results (same file might match both metadata and content)
@@ -658,11 +696,7 @@ impl SearchEngine {
             // Apply facet filters - all facets must match
             .filter_map(|info| filter.match_note(info).map(|matched| (info, matched)))
             .filter_map(|(info, matched)| {
-                self.match_metadata(pattern.as_ref(), info, &mut matcher)
-                    .map(|result| SearchResult {
-                        matched_date: matched,
-                        ..result
-                    })
+                self.match_metadata(pattern.as_ref(), info, matched, &mut matcher)
             })
             .collect();
 
@@ -786,6 +820,7 @@ impl SearchEngine {
         &self,
         pattern: Option<&Pattern>,
         info: &MarkdownInfo,
+        matched_date: Option<MatchedDate>,
         matcher: &mut Matcher,
     ) -> Option<SearchResult> {
         // Helper to extract string from frontmatter value
@@ -824,7 +859,7 @@ impl SearchEngine {
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
-                matched_date: None,
+                matched_date,
             });
         };
 
@@ -887,7 +922,7 @@ impl SearchEngine {
                 snippet: None,
                 is_content_match: false,
                 filetype: "markdown".to_string(),
-                matched_date: None,
+                matched_date,
             })
         } else {
             None
@@ -956,13 +991,15 @@ impl SearchEngine {
         let results: Vec<SearchResult> = files
             .into_iter()
             .filter_map(|(info, matched)| {
-                self.search_file_content(&mut searcher, &matcher, &info, &mut not_downloaded)
-                    .ok()
-                    .flatten()
-                    .map(|result| SearchResult {
-                        matched_date: matched,
-                        ..result
-                    })
+                self.search_file_content(
+                    &mut searcher,
+                    &matcher,
+                    &info,
+                    matched,
+                    &mut not_downloaded,
+                )
+                .ok()
+                .flatten()
             })
             .collect();
 
@@ -981,6 +1018,7 @@ impl SearchEngine {
         searcher: &mut grep_searcher::Searcher,
         matcher: &grep_regex::RegexMatcher,
         info: &MarkdownInfo,
+        matched_date: Option<MatchedDate>,
         not_downloaded: &mut usize,
     ) -> Result<Option<SearchResult>, SearchError> {
         // `raw_path` is repo-relative: it names the file inside the
@@ -1082,7 +1120,7 @@ impl SearchEngine {
                 snippet,
                 is_content_match: true,
                 filetype: "markdown".to_string(),
-                matched_date: None,
+                matched_date,
             }))
         } else {
             Ok(None)
@@ -1189,11 +1227,7 @@ impl SearchEngine {
         let results: Vec<SearchResult> = files
             .into_iter()
             .filter_map(|(info, matched)| {
-                self.match_other_file(pattern.as_ref(), &info, &mut matcher)
-                    .map(|result| SearchResult {
-                        matched_date: matched,
-                        ..result
-                    })
+                self.match_other_file(pattern.as_ref(), &info, matched, &mut matcher)
             })
             .collect();
 
@@ -1207,6 +1241,7 @@ impl SearchEngine {
         &self,
         pattern: Option<&Pattern>,
         info: &OtherFileInfo,
+        matched_date: Option<MatchedDate>,
         matcher: &mut Matcher,
     ) -> Option<SearchResult> {
         let Some(pattern) = pattern else {
@@ -1223,7 +1258,7 @@ impl SearchEngine {
                 snippet: None,
                 is_content_match: false,
                 filetype: info.filetype().to_string(),
-                matched_date: None,
+                matched_date,
             });
         };
         let mut best_score: u32 = 0;
@@ -1279,7 +1314,7 @@ impl SearchEngine {
                 snippet,
                 is_content_match: info.extracted_text.is_some(),
                 filetype: info.filetype().to_string(),
-                matched_date: None,
+                matched_date,
             })
         } else {
             None
@@ -1339,6 +1374,13 @@ impl SearchEngine {
 
         seen.into_values().collect()
     }
+}
+
+/// Whether a `filetype` filter asks for files other than markdown: `all`, or
+/// any value but `markdown` (the path-only merge of
+/// [`SearchEngine::search_with_other_paths`]).
+fn includes_other_filetypes(filetype: &Option<String>) -> bool {
+    filetype.as_deref().is_some_and(|ft| ft != "markdown")
 }
 
 /// Order results: by score, highest first; or, for a query with a date facet
@@ -2361,14 +2403,15 @@ mod tests {
     #[test]
     fn facet_filter_splits_date_and_substring_facets_once() {
         let parsed = parse_query("Date:2026 when:-30d date:draft created:2026-13 tags:x");
-        assert!(parsed.has_date_facets());
         let filter = FacetFilter::new(&parsed.facets, date("2026-11-06"), chrono::Utc);
         assert_eq!(filter.dates.len(), 2);
         assert_eq!(
             filter.text,
             vec![("date", "draft"), ("created", "2026-13"), ("tags", "x")]
         );
-        assert!(!parse_query("date:draft tags:x").has_date_facets());
+        let parsed = parse_query("date:draft tags:x");
+        let filter = FacetFilter::new(&parsed.facets, date("2026-11-06"), chrono::Utc);
+        assert!(!filter.has_dates());
     }
 
     #[test]

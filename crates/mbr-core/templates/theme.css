@@ -2914,8 +2914,17 @@ main .mbr-fc-pie-unreviewed {
  * body child exactly when the server rendered it, so this is known before any
  * script runs). The body is padded by the same width, so nothing shifts when
  * the companion fills in. `html.mbr-companion-hidden` (set pre-paint by
- * `_head.html` from the reader's dismissal) collapses it. The breakpoints are
- * mirrored by `mbr-calendar.ts`'s COMPANION_DOCK_*_QUERY.
+ * `_head.html` from the reader's dismissal) collapses it.
+ *
+ * This file is the single source of truth for when the column docks: the two
+ * width rules below only say *that* it docks, by setting
+ * `--mbr-companion-docked: 1` (whatever the dismissal; `mbr-calendar.ts` reads
+ * it back to tell "dismissed" from "too narrow"), and the docked layout is
+ * written once, after them. The layout uses `--mbr-companion-display` for the
+ * one keyword-valued property; everything else in the column rule only
+ * matters once it is a box. While docked, `--mbr-inset-right` is the column's
+ * width, which the right-anchored floating buttons (`fab.ts`, the review and
+ * calendar buttons) add to their `right`, so none of them sits on the column.
  *
  * Padding, not a grid column: the sidebar layout is already a grid whose
  * auto-placed children (breadcrumbs, custom elements) would land in a new
@@ -2923,51 +2932,13 @@ main .mbr-fc-pie-unreviewed {
  *
  * The header, breadcrumbs, main and footer get Pico's gutter, as with the
  * sidebar: a container narrower than its max-width has no slack, and the
- * header's last `<ul>` pulls outward by a negative margin. */
+ * header's last `<ul>` pulls outward by a negative margin. Every page that
+ * can dock is >=1280px wide, where that gutter is also exactly what the
+ * sidebar layout gives them, so this needs no docked-only condition. */
 @media screen and (min-width: 1280px) {
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) {
-    padding-right: var(--mbr-companion-width);
-  }
-
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > mbr-calendar {
-    display: block;
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: var(--mbr-companion-width);
-    box-sizing: border-box;
-    padding-top: env(safe-area-inset-top, 0px);
-    border-left: 1px solid var(--pico-muted-border-color);
-    background: var(--pico-background-color);
-    z-index: 100;
-  }
-
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > header,
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > nav.breadcrumbs,
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > main,
-  html:not(.mbr-companion-hidden) body.mbr-has-companion:not(:has(> mbr-browse-single)) > footer {
-    padding-inline: var(--pico-spacing);
-  }
-}
-
-@media screen and (min-width: 1440px) {
-  html:not(.mbr-companion-hidden) body.mbr-has-companion {
-    padding-right: var(--mbr-companion-width);
-  }
-
-  html:not(.mbr-companion-hidden) body.mbr-has-companion > mbr-calendar {
-    display: block;
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: var(--mbr-companion-width);
-    box-sizing: border-box;
-    padding-top: env(safe-area-inset-top, 0px);
-    border-left: 1px solid var(--pico-muted-border-color);
-    background: var(--pico-background-color);
-    z-index: 100;
+  body.mbr-has-companion:not(:has(> mbr-browse-single)) {
+    --mbr-companion-docked: 1;
+    --mbr-companion-display: block;
   }
 
   html:not(.mbr-companion-hidden) body.mbr-has-companion > header,
@@ -2976,6 +2947,32 @@ main .mbr-fc-pie-unreviewed {
   html:not(.mbr-companion-hidden) body.mbr-has-companion > footer {
     padding-inline: var(--pico-spacing);
   }
+}
+
+@media screen and (min-width: 1440px) {
+  body.mbr-has-companion {
+    --mbr-companion-docked: 1;
+    --mbr-companion-display: block;
+  }
+}
+
+html:not(.mbr-companion-hidden) body.mbr-has-companion {
+  --mbr-inset-right: calc(var(--mbr-companion-docked, 0) * var(--mbr-companion-width));
+  padding-right: var(--mbr-inset-right);
+}
+
+html:not(.mbr-companion-hidden) body.mbr-has-companion > mbr-calendar {
+  display: var(--mbr-companion-display, contents);
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--mbr-companion-width);
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  border-left: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-background-color);
+  z-index: 100;
 }
 
 /* A playing slide deck covers the page: no column, no calendar button. */

@@ -116,5 +116,54 @@
     "entries": 1,
     "prefilter": true,
     "html": "<section>\n<ul><li>09:00 Raw HTML</li></ul>\n</section>\n"
+  },
+  {
+    "name": "link tag is not a list item",
+    "markdown": "<link rel=\"stylesheet\" href=\"x.css\">\n\nWe met at 09:00 and again at noon.\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<link rel=\"stylesheet\" href=\"x.css\">\n<p>We met at 09:00 and again at noon.</p>\n</section>\n"
+  },
+  {
+    "name": "uppercase raw html list",
+    "markdown": "<UL><LI>09:00 Upper case</LI></UL>\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<UL><LI>09:00 Upper case</LI></UL>\n</section>\n"
+  },
+  {
+    "name": "raw html list item with attributes",
+    "markdown": "<ul><li class=\"slot\">09:00 With a class</li></ul>\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<ul><li class=\"slot\">09:00 With a class</li></ul>\n</section>\n"
+  },
+  {
+    "name": "times outside list items",
+    "markdown": "---\ncreated: 2026-01-01T09:00:00\n---\n\n# 09:00 sync\n\n- Groceries\n- Call Bob\n\nMet at 09:00.\n",
+    "entries": 0,
+    "prefilter": false,
+    "html": "<section>\n<h1 id=\"09-00-sync\">09:00 sync</h1>\n<ul>\n<li>Groceries</li>\n<li>Call Bob</li>\n</ul>\n<p>Met at 09:00.</p>\n</section>\n"
+  },
+  {
+    "name": "item text on the line after the marker",
+    "markdown": "-\n  09:00 Late start\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<ul>\n<li>09:00 Late start</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "time spelled with a character reference",
+    "markdown": "- 9&colon;00 Standup\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<ul>\n<li>9:00 Standup</li>\n</ul>\n</section>\n"
+  },
+  {
+    "name": "ordered item with a paren",
+    "markdown": "1) 13:00 Lunch\n",
+    "entries": 1,
+    "prefilter": true,
+    "html": "<section>\n<ol>\n<li>13:00 Lunch</li>\n</ol>\n</section>\n"
   }
 ]

@@ -412,6 +412,8 @@ pub struct Builder {
     /// non-canonical URL to the canonical one, so getting this right at render
     /// time is the only chance.
     markdown_page_probe: mbr_core::link_transform::MarkdownPageProbe,
+    /// `__MBR_CONFIG__.calendar`, serialized once for every page.
+    calendar_chrome: page_context::CalendarChrome,
 }
 
 impl Builder {
@@ -440,6 +442,7 @@ impl Builder {
             ),
         );
 
+        let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Ok(Builder {
             config,
             templates,
@@ -449,6 +452,7 @@ impl Builder {
             build_link_index,
             frontmatter_errors,
             markdown_page_probe,
+            calendar_chrome,
         })
     }
 
@@ -1231,7 +1235,7 @@ impl Builder {
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
                 slides: &self.config.slides,
-                calendar: &self.config.calendar,
+                calendar: &self.calendar_chrome,
             },
             &page_context::UrlMode::RelativeToDepth(depth),
         );
@@ -1522,7 +1526,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
-                calendar: &self.config.calendar,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -1755,7 +1759,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
-                calendar: &self.config.calendar,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -1833,7 +1837,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
-                calendar: &self.config.calendar,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -2319,7 +2323,7 @@ impl Builder {
                 title_affixes: None,
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
-                calendar: &self.config.calendar,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -2411,7 +2415,7 @@ impl Builder {
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                     // No live repo to scope review storage against in a static build.
                     root_dir: None,
-                    calendar: &self.config.calendar,
+                    calendar: &self.calendar_chrome,
                 },
             );
 
@@ -3046,6 +3050,7 @@ mod tests {
             ),
         );
 
+        let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Builder {
             config,
             templates,
@@ -3055,6 +3060,7 @@ mod tests {
             build_link_index,
             frontmatter_errors,
             markdown_page_probe,
+            calendar_chrome,
         }
     }
 

@@ -2,19 +2,17 @@
  * Puts the day calendar into a QuickLook preview, or does nothing.
  *
  * Reads the payload `quicklook.rs` wrote, runs the agenda grammar over the
- * rendered note (`main#wrapper`), and draws only when both are there
- * (`shouldRender`). Then: the time chips in the body (`CSS.highlights`, when it
- * exists and `agenda_chips` is on), and on today's note the current-time line
- * and the now/next item marks, refreshed each minute.
+ * rendered note (`main#wrapper`), and draws only when there is a date and at
+ * least one entry. The page itself is enhanced by the calendar chunk's own
+ * `enhancePage` (time chips when `agenda_chips` is on; on today's note the
+ * now/next item marks), whose minute tick also moves the current-time line.
  */
 import { agendaEntries } from '../calendar/agenda-parse.js'
-import { AGENDA_TIME_HIGHLIGHT, markNowAndNext, paintTimeChips } from '../calendar/agenda-page.js'
+import { enhancePage } from '../calendar/agenda-page.js'
 import { todayKey } from '../calendar/note-date.js'
-import { placementFor, QUICKLOOK_CALENDAR_GLOBAL, readPayload, shouldRender, type Placement } from './model.js'
+import { placementFor, QUICKLOOK_CALENDAR_GLOBAL, readPayload, type Placement } from './model.js'
 import { renderDayCalendar, updateNowLine } from './render.js'
 import { BODY_COLUMN_CLASS, QUICKLOOK_CALENDAR_CSS, STYLE_ID } from './styles.js'
-
-const MINUTE_MS = 60_000
 
 export interface MountOptions {
   readonly doc?: Document
@@ -47,7 +45,7 @@ export function mountQuickLookCalendar(options: MountOptions = {}): MountedCalen
   const main = doc.querySelector<HTMLElement>('main#wrapper')
   if (!payload || !main) return null
   const entries = agendaEntries(main)
-  if (!shouldRender(payload, entries)) return null
+  if (entries.length === 0) return null
 
   if (!doc.getElementById(STYLE_ID)) {
     const style = doc.createElement('style')
@@ -66,29 +64,23 @@ export function mountQuickLookCalendar(options: MountOptions = {}): MountedCalen
   }
   win.addEventListener('resize', onResize)
 
-  const chips = payload.agendaChips && paintTimeChips(entries)
-
   // The current-time line and the now/next marks only while the note's day
-  // is today; checked each minute, so a preview left open past midnight
-  // drops them.
-  const tick = (): void => {
-    const date = clock()
-    const live = payload.date === todayKey(date)
-    const minutes = live ? date.getHours() * 60 + date.getMinutes() : null
-    updateNowLine(calendar, minutes)
-    if (payload.agendaChips) markNowAndNext(entries, minutes)
-  }
-  tick()
-  const timer = win.setInterval(tick, MINUTE_MS)
+  // is today: a preview left open past midnight drops them.
+  const page = enhancePage({
+    root: main,
+    entries,
+    agendaChips: payload.agendaChips,
+    pageDay: payload.date,
+    now: clock,
+    onTick: (minutes) => updateNowLine(calendar, minutes),
+  })
 
   return {
     calendar,
     placement: () => placement,
     dispose: () => {
-      win.clearInterval(timer)
+      page.dispose()
       win.removeEventListener('resize', onResize)
-      markNowAndNext(entries, null)
-      if (chips) CSS.highlights.delete(AGENDA_TIME_HIGHLIGHT)
       doc.body.classList.remove(BODY_COLUMN_CLASS)
       calendar.remove()
     },

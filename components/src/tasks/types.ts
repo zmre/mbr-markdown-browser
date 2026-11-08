@@ -66,6 +66,12 @@ export interface TaskQueryRequest {
   mode: TaskMode
   /** Cap on returned tasks across all groups. Never affects a count. */
   limit: number
+  /**
+   * The reader's local date, `YYYY-MM-DD` (`todayKey()`): what overdue,
+   * today and tomorrow mean. Optional server-side (absent or malformed →
+   * the server's date); the panel always sends it.
+   */
+  today: string
 }
 
 /**
@@ -264,7 +270,7 @@ export type Placement = 'done' | 'due' | 'scheduled'
 /** `task_query::GridTaskHit`: a {@link TaskHit} on a grid day. */
 export interface GridTaskHit extends TaskHit {
   placed_by: Placement
-  /** `HH:MM` when the placing date had a time or the text starts with one. */
+  /** `HH:MM` when the placing date had a time (never read from the text). */
   time?: string
   /** The note's display title. */
   note: string
@@ -272,13 +278,16 @@ export interface GridTaskHit extends TaskHit {
 
 /** `task_query::GridDay`. */
 export interface GridDay {
-  /** Open before done, then by time, then by priority; truncated by `limit`. */
+  /**
+   * Open before done, then by time, then by priority; at most this day's
+   * share of `limit` (the server spreads it across the days).
+   */
   tasks: GridTaskHit[]
   /** Open tasks placed that day (every filter except status). */
   open: number
   /** Done tasks placed that day (every filter except status). */
   done: number
-  /** A past day that still has open tasks. */
+  /** A past day that still has an open task placed by its due date (never by a scheduled one). */
   overdue: boolean
 }
 

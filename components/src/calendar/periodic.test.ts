@@ -28,15 +28,24 @@ const FILES: PeriodicSource[] = [
 ]
 
 describe('periodKindOf', () => {
-  it('recognizes canonical keys only', () => {
+  it('recognizes period keys, W and Q in either case (as Rust does)', () => {
     expect(periodKindOf('2026-10-31')).toBe('day')
     expect(periodKindOf('2026-W44')).toBe('week')
     expect(periodKindOf('2026-10')).toBe('month')
     expect(periodKindOf('2026-Q4')).toBe('quarter')
     expect(periodKindOf('2026')).toBe('year')
-    expect(periodKindOf('2026-w44')).toBeNull()
+    expect(periodKindOf('2026-w44')).toBe('week')
+    expect(periodKindOf('2026-q4')).toBe('quarter')
     expect(periodKindOf('20261031')).toBeNull()
     expect(periodKindOf('2026-Q5')).toBeNull()
+    expect(periodKindOf('2026-13')).toBeNull()
+    expect(periodKindOf('2025-W53')).toBeNull()
+  })
+
+  it('finds a note by a lower-case week or quarter key', () => {
+    const index = buildPeriodicIndex([note('/w/', '2026-W44'), note('/q/', '2026-Q4')])
+    expect(findPeriod(index, '2026-w44')?.url).toBe('/w/')
+    expect(findPeriod(index, '2026-q4')?.url).toBe('/q/')
   })
 })
 
@@ -91,18 +100,14 @@ describe('calendarConfigFrom', () => {
     expect(calendarConfigFrom('nope')).toEqual(DEFAULT_CALENDAR_CONFIG)
     const parsed = calendarConfigFrom({
       enabled: false,
-      periods: ['day', 'fortnight'],
       week_start: 'sunday',
       companion: 'sometimes',
       week_numbers: true,
-      periodic_folders: ['daily'],
     })
     expect(parsed.enabled).toBe(false)
-    expect(parsed.periods).toEqual(['day'])
     expect(parsed.weekStart).toBe('sunday')
     expect(parsed.companion).toBe('auto')
     expect(parsed.weekNumbers).toBe(true)
-    expect(parsed.periodicFolders).toEqual(['daily'])
     expect(parsed.agendaChips).toBe(true)
   })
 })

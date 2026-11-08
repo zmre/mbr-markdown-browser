@@ -26,7 +26,7 @@
 
 use mbr_core::agenda;
 use mbr_core::assets;
-use mbr_core::calendar::{self, CalendarRules, DateSource};
+use mbr_core::calendar::{self, CalendarRules};
 use mbr_core::config::{self, Config};
 use mbr_core::embedded_hljs;
 use mbr_core::embedded_pico;
@@ -435,6 +435,14 @@ struct QuickLookTarget {
     path: PathBuf,
     root_path: PathBuf,
     config: Config,
+    /// The note's canonical path relative to the canonical root, `None` for
+    /// a note outside its root (only possible with an explicit
+    /// `config_root`). Canonical so a root reached through a symlink
+    /// (macOS's `/tmp` -> `/private/tmp`) agrees with the note's own path;
+    /// computed once, in [`Self::locate`].
+    in_root: Option<PathBuf>,
+    /// The note's canonical file name: [`Self::raw_path`] outside the root.
+    file_name: PathBuf,
 }
 
 impl QuickLookTarget {
@@ -457,10 +465,20 @@ impl QuickLookTarget {
         // Load config for markdown extensions
         let config = Config::read(&root_path).unwrap_or_default();
 
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let note = canonical(&path);
+        let in_root = note
+            .strip_prefix(canonical(&root_path))
+            .ok()
+            .map(Path::to_path_buf);
+        let file_name = note.file_name().map(PathBuf::from).unwrap_or_default();
+
         Ok(Self {
             path,
             root_path,
             config,
+            in_root,
+            file_name,
         })
     }
 
@@ -569,23 +587,16 @@ impl QuickLookTarget {
         if !settings.enabled || !agenda::may_have_agenda(source) {
             return None;
         }
-        let resolved = CalendarRules::new(settings).resolve(&self.raw_path(), Some(frontmatter));
-        let (date, source) = match resolved {
-            Some(cal) => (
-                cal.date,
-                match cal.source {
-                    DateSource::Filename => DayDateSource::Filename,
-                    DateSource::Frontmatter => DayDateSource::Frontmatter,
-                },
-            ),
-            None => (
-                calendar::note_date(None, file_created_secs(&self.path)?, &chrono::Local)?,
-                DayDateSource::Birthtime,
-            ),
+        let date = match CalendarRules::new(settings).resolve(self.raw_path(), Some(frontmatter)) {
+            Some(cal) => cal.date,
+            None => {
+                // The scan's own birthtime (else mtime) reading.
+                let (_, created, _) = repo::file_details_from_path(&self.path).ok()?;
+                calendar::note_date(None, created, &chrono::Local)?
+            }
         };
         Some(DayCalendar {
             date,
-            source,
             week_start: settings.week_start,
             week_numbers: settings.week_numbers,
             agenda_chips: settings.agenda_chips,
@@ -595,12 +606,8 @@ impl QuickLookTarget {
     /// The note's path relative to its repository root, as the scan names it
     /// (`raw_path`), so periodic-folder rules apply as they do on the server.
     /// Just the file name for a note outside its root.
-    fn raw_path(&self) -> PathBuf {
-        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let note = canonical(&self.path);
-        note.strip_prefix(canonical(&self.root_path))
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|_| note.file_name().map(PathBuf::from).unwrap_or_default())
+    fn raw_path(&self) -> &Path {
+        self.in_root.as_deref().unwrap_or(&self.file_name)
     }
 
     /// Render `source` (this file's markdown, or the top of it) to HTML.
@@ -666,33 +673,14 @@ impl QuickLookTarget {
     }
 }
 
-/// Where a [`DayCalendar`]'s date came from (D1), for the page and for tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DayDateSource {
-    Filename,
-    Frontmatter,
-    /// The file's birthtime, else its mtime: no filename or frontmatter date.
-    Birthtime,
-}
-
-impl DayDateSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Filename => "filename",
-            Self::Frontmatter => "frontmatter",
-            Self::Birthtime => "birthtime",
-        }
-    }
-}
-
 /// What the QuickLook day calendar script is told about the note: its date
 /// and the `[calendar]` settings that shape the drawing. Published as
 /// `window.__MBR_QUICKLOOK_CALENDAR__` ahead of the script
 /// (`components/src/quicklook-calendar/model.ts` reads it).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct DayCalendar {
+    /// `YYYY-MM-DD`.
     date: chrono::NaiveDate,
-    source: DayDateSource,
     week_start: calendar::WeekStart,
     week_numbers: Option<bool>,
     agenda_chips: bool,
@@ -704,34 +692,12 @@ const DAY_CALENDAR_GLOBAL: &str = "__MBR_QUICKLOOK_CALENDAR__";
 impl DayCalendar {
     /// `window.__MBR_QUICKLOOK_CALENDAR__ = {…};`, safe inside a `<script>`.
     fn script(&self) -> String {
-        let payload = serde_json::json!({
-            "date": self.date.format("%Y-%m-%d").to_string(),
-            "source": self.source.as_str(),
-            "week_start": self.week_start,
-            "week_numbers": self.week_numbers,
-            "agenda_chips": self.agenda_chips,
-        });
-        // `</` cannot end the script early once written `<\/`; nothing here
-        // holds one today, but the rule costs nothing.
-        let json = payload.to_string().replace("</", "<\\/");
-        format!("window.{DAY_CALENDAR_GLOBAL} = {json};\n")
+        let json = serde_json::to_string(self).unwrap_or_else(|_| "null".to_string());
+        format!(
+            "window.{DAY_CALENDAR_GLOBAL} = {};\n",
+            templates::escape_json_for_script(&json)
+        )
     }
-}
-
-/// Birthtime in unix seconds, else mtime: what the scan publishes as
-/// `created` (`vault::Entry::epoch_secs`).
-fn file_created_secs(path: &Path) -> Option<u64> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let secs = |t: std::time::SystemTime| {
-        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs())
-    };
-    metadata
-        .created()
-        .ok()
-        .and_then(secs)
-        .or_else(|| metadata.modified().ok().and_then(secs))
 }
 
 /// The longest prefix of `bytes` that ends at a line break, or all of `bytes`
@@ -3525,7 +3491,6 @@ mod tests {
         let html = preview_of(&path);
         let payload = calendar_payload(&html).expect("a payload");
         assert_eq!(payload["date"], "2026-11-03");
-        assert_eq!(payload["source"], "filename");
         assert_eq!(payload["week_start"], "locale");
         assert_eq!(payload["agenda_chips"], true);
         assert!(has_calendar_script(&html));
@@ -3568,7 +3533,6 @@ mod tests {
         );
         let payload = calendar_payload(&preview_of(&path)).expect("a payload");
         assert_eq!(payload["date"], "2026-10-05");
-        assert_eq!(payload["source"], "frontmatter");
     }
 
     #[test]
@@ -3580,7 +3544,6 @@ mod tests {
         );
         let payload = calendar_payload(&preview_of(&path)).expect("a payload");
         assert_eq!(payload["date"], "2026-09-01");
-        assert_eq!(payload["source"], "frontmatter");
     }
 
     #[test]
@@ -3592,17 +3555,15 @@ mod tests {
         );
         let payload = calendar_payload(&preview_of(&path)).expect("a payload");
         assert_eq!(payload["date"], "2026-11-03");
-        assert_eq!(payload["source"], "filename");
     }
 
     #[test]
     fn test_day_calendar_date_from_birthtime() {
         let (_dir, path) = calendar_repo("standup.md", OWNER_DAY, None);
         let payload = calendar_payload(&preview_of(&path)).expect("a payload");
-        let created = file_created_secs(Path::new(&path)).expect("a file time");
+        let (_, created, _) = repo::file_details_from_path(&path).expect("a file time");
         let expected = calendar::note_date(None, created, &chrono::Local).expect("a date");
         assert_eq!(payload["date"], expected.format("%Y-%m-%d").to_string());
-        assert_eq!(payload["source"], "birthtime");
     }
 
     #[test]
@@ -3651,7 +3612,6 @@ mod tests {
     fn test_day_calendar_payload_cannot_close_its_script() {
         let day = DayCalendar {
             date: chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
-            source: DayDateSource::Filename,
             week_start: calendar::WeekStart::Locale,
             week_numbers: None,
             agenda_chips: true,
@@ -3663,6 +3623,8 @@ mod tests {
         );
         assert!(!script.contains("</"), "{script}");
         assert!(script.contains(r#""week_numbers":null"#), "{script}");
+        assert!(script.contains(r#""date":"2026-11-03""#), "{script}");
+        assert!(!script.contains("source"), "C2: no `source`: {script}");
     }
 
     /// `tests/fixtures/agenda-prefilter-cases.json`: each case's markdown, the

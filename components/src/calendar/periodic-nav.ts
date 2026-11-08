@@ -13,7 +13,7 @@
 import { getCalendarConfig, resolveUrl, siteNav } from '../shared.js'
 import { showToast } from '../toast.js'
 import { todayKey } from './note-date.js'
-import { buildPeriodicIndex, todayDailyNote, type PeriodicIndex, type PeriodicSource } from './periodic.js'
+import { periodicIndexOf, todayDailyNote, type PeriodicIndex, type PeriodicSource } from './periodic.js'
 
 /** Where the files come from; replaced in tests. */
 type FilesLoader = () => Promise<readonly PeriodicSource[]>
@@ -23,6 +23,8 @@ const defaultLoader: FilesLoader = () =>
 
 let loadFiles: FilesLoader = defaultLoader
 let indexPromise: Promise<PeriodicIndex> | null = null
+/** The index once loaded, for synchronous gates ({@link knownHasDayNotes}). */
+let loaded: PeriodicIndex | null = null
 let navigate: (url: string) => void = (url) => window.location.assign(url)
 
 /** Test seams: the file source and the navigation. `null` restores both. */
@@ -32,19 +34,33 @@ export function setPeriodicNavDeps(
   loadFiles = deps?.loadFiles ?? defaultLoader
   navigate = deps?.navigate ?? ((url) => window.location.assign(url))
   indexPromise = null
+  loaded = null
 }
 
-/** The page's periodic index, built once. A failed load is retried next time. */
+/**
+ * The page's periodic index: `periodic.ts`'s `periodicIndexOf`, memoized per
+ * `site.json` array, so this, the browse widgets and the calendar chunk build
+ * one index per page between them. A failed load is retried next time.
+ */
 export function periodicIndex(): Promise<PeriodicIndex> {
   if (!indexPromise) {
     indexPromise = loadFiles()
-      .then(buildPeriodicIndex)
+      .then((files) => (loaded = periodicIndexOf(files)))
       .catch((err: unknown) => {
         indexPromise = null
+        loaded = null
         throw err
       })
   }
   return indexPromise
+}
+
+/**
+ * Whether the site has a day note, once {@link periodicIndex} has loaded:
+ * `null` until then (so `d` and the app's `today` are offered only once known).
+ */
+export function knownHasDayNotes(): boolean | null {
+  return loaded ? loaded.day.length > 0 : null
 }
 
 /** Whether the calendar keys are live on this page. */

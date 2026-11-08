@@ -4,26 +4,28 @@
  * `<mbr-calendar-week-grid>` (seven tall columns, every entry).
  *
  * Written for two hosts: the calendar overlay (notes, design/calendar.md §5.2)
- * and the phase 6 task grids (tasks, §8.2), which create them by tag name
+ * and the task panel's grids (tasks, §8.2), which create them by tag name
  * after `loadCalendarChunk()`. They know nothing about notes or tasks: a host
- * hands over `dayEntries(date)` ({@link GridEntry} data, already filtered),
- * `dayMarks(date)` (a `dailyUrl` shades the cell and links its number) and
- * the focused day, and owns the keyboard (`overlay-model.ts`'s
- * `overlayCommand` / `moveDay` are the shared key map). Events, all bubbling
- * and composed:
+ * hands over `dayEntries(date, limit)` ({@link GridEntry} links, already
+ * filtered; a host may stop at `limit`, and then says how many it has with
+ * `dayCount(date)`), `dayMarks(date)` (a `dailyUrl` shades the cell and links
+ * its number) and the focused day, and owns the keyboard (`month-grid.ts`'s
+ * `overlayCommand` / `moveDay` are the shared key map). A grid only ever
+ * draws what fits — a month cell its lines, a week column
+ * {@link WEEK_COLUMN_CAP} — and a `+N` for the rest, so a day holding
+ * thousands of notes costs a dozen elements. Events, all bubbling and
+ * composed:
  *
  * - `mbr-calendar-focus` `{date}` — a day was clicked;
- * - `mbr-calendar-day` `{date, anchor}` — a month cell or its `+N` was
- *   clicked: the host opens its day popover at `anchor`;
- * - `mbr-calendar-entry` `{date, key}` — an entry without an `href` was
- *   clicked (an entry with one is a plain link).
+ * - `mbr-calendar-day` `{date, anchor}` — a month cell or a `+N` was
+ *   clicked: the host opens its day popover at `anchor`.
  *
  * Accessibility (§9): `role="grid"`, rows, a roving tabindex on the day
  * cells, and each cell's `aria-label` spells the date and what it holds.
  */
 import { LitElement, css, html, nothing, type CSSResultGroup, type TemplateResult } from 'lit'
 import { property, state } from 'lit/decorators.js'
-import { dayLabel } from './mbr-calendar-month.js'
+import { dayLabel, emitCalendarEvent, renderWeekNumber } from './mbr-calendar-month.js'
 import { formatDate, monthGrid, monthOf, weekdayLabels, weekdayOf, type MonthKey, type Weekday } from './month-grid.js'
 import { addDays, type DateKey } from './note-date.js'
 import { cellLines, overflowSplit } from './overlay-model.js'
@@ -44,6 +46,9 @@ const CELL_CHROME_PX = 5
 
 const NONE: readonly GridEntry[] = Object.freeze([])
 
+/** Most entries a week column draws before its `+N`. */
+export const WEEK_COLUMN_CAP = 60
+
 /** What both grids share: inputs, the entry line, events, focus. */
 abstract class GridBase extends LitElement {
   /** The focused day (roving tabindex). */
@@ -52,8 +57,13 @@ abstract class GridBase extends LitElement {
   @property() today: DateKey = ''
   /** BCP 47 locale for day and month names. */
   @property() locale = 'en-US'
-  /** A day's entries, in display order. */
-  @property({ attribute: false }) dayEntries: (date: DateKey) => readonly GridEntry[] = () => NONE
+  /** A day's entries, in display order; the grid draws at most `limit` of them. */
+  @property({ attribute: false }) dayEntries: (date: DateKey, limit: number) => readonly GridEntry[] = () => NONE
+  /**
+   * How many entries a day has, for a host whose `dayEntries` stops at
+   * `limit`; omitted = the length of what `dayEntries` returned.
+   */
+  @property({ attribute: false }) dayCount: ((date: DateKey) => number) | null = null
   /**
    * A day's marks: `dailyUrl` shades the cell and `overdue` reddens its
    * number (the task grids). A host whose entries are not notes passes
@@ -73,11 +83,36 @@ abstract class GridBase extends LitElement {
   }
 
   protected emit(type: string, detail: Record<string, unknown>): void {
-    this.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }))
+    emitCalendarEvent(this, type, detail)
   }
 
-  protected label(date: DateKey, entries: readonly GridEntry[], marks: DayMarks): string {
-    return dayLabel(date, this.locale, { notes: entries.length, ...marks }, this.today)
+  /**
+   * What a day cell draws when it has room for `lines` entries: the entries,
+   * the `+N` after them, and the cell's spoken label.
+   */
+  protected cellContent(date: DateKey, lines: number): { entries: readonly GridEntry[]; more: number; marks: DayMarks; label: string } {
+    const all = this.dayEntries(date, lines)
+    const marks = this.dayMarks(date)
+    const count = this.dayCount ? this.dayCount(date) : all.length
+    const { shown, more } = overflowSplit(Math.min(all.length, count), lines, count + (marks.hidden ?? 0))
+    return {
+      entries: all.length > shown ? all.slice(0, shown) : all,
+      more,
+      marks,
+      label: dayLabel(date, this.locale, { notes: count, ...marks }, this.today),
+    }
+  }
+
+  /** A day's `+N`: a click opens the host's day popover on the cell. */
+  protected renderMore(date: DateKey, more: number): TemplateResult | typeof nothing {
+    if (!more) return nothing
+    const open = (e: Event): void => {
+      e.stopPropagation()
+      const cell = (e.currentTarget as Element).closest<HTMLElement>('[data-date]')
+      this.emit('mbr-calendar-focus', { date })
+      if (cell) this.emit('mbr-calendar-day', { date, anchor: cell })
+    }
+    return html`<button type="button" class="more" tabindex="-1" aria-label=${`${more} more`} @click=${open}>+${more}</button>`
   }
 
   protected cellClass(date: DateKey, marks: DayMarks, extra = ''): string {
@@ -85,20 +120,18 @@ abstract class GridBase extends LitElement {
   }
 
   protected renderNumber(marks: DayMarks, text: string): TemplateResult {
-    // prettier-ignore
-    return marks.dailyUrl ? html`<a class="num" href=${marks.dailyUrl} tabindex="-1" title="Open the daily note">${text}</a>` : html`<span class="num">${text}</span>`
+    return marks.dailyUrl
+      ? html`<a class="num" href=${marks.dailyUrl} tabindex="-1" title="Open the daily note">${text}</a>`
+      : html`<span class="num">${text}</span>`
   }
 
-  protected renderEntry(date: DateKey, e: GridEntry): TemplateResult {
+  protected renderEntry(e: GridEntry): TemplateResult {
     const dot =
       e.status !== undefined
         ? html`<i class=${`check ${e.status}`}></i>`
         : html`<i class="dot" style=${e.color === null || e.color === undefined ? '' : `background:var(--mbr-cal-type-${e.color})`}></i>`
     const body = html`${dot}${e.time ? html`<span class="time">${e.time}</span>` : nothing}<span class="t">${e.title}</span>`
-    // prettier-ignore
-    return e.href
-      ? html`<a class=${`entry ${e.status ?? ''}`} href=${e.href} tabindex="-1" title=${e.tooltip ?? e.title}>${body}</a>`
-      : html`<button type="button" class=${`entry ${e.status ?? ''}`} tabindex="-1" title=${e.tooltip ?? e.title} @click=${(ev: Event) => { ev.stopPropagation(); this.emit('mbr-calendar-entry', { date, key: e.key }) }}>${body}</button>`
+    return html`<a class=${`entry ${e.status ?? ''}`} href=${e.href} tabindex="-1" title=${e.tooltip ?? e.title}>${body}</a>`
   }
 
   static override styles: CSSResultGroup = css`
@@ -281,27 +314,47 @@ export class MbrCalendarMonthGridElement extends GridBase {
   }
 
   private _cell(date: DateKey): TemplateResult {
-    const entries = this.dayEntries(date)
-    const marks = this.dayMarks(date)
-    const { shown, more } = overflowSplit(entries.length, this._lines)
-    const day = (anchor: HTMLElement): void => this.emit('mbr-calendar-day', { date, anchor })
-    // prettier-ignore
-    return html`<div role="gridcell" class=${this.cellClass(date, marks, monthOf(date) === this.month ? '' : ' outside')} data-date=${date} tabindex=${date === this.focused ? 0 : -1} aria-label=${this.label(date, entries, marks)} @click=${(e: Event) => { if ((e.target as Element).closest('a')) return; this.emit('mbr-calendar-focus', { date }); day(e.currentTarget as HTMLElement) }}>${this.renderNumber(marks, String(Number(date.slice(8))))}${entries.slice(0, shown).map((e) => this.renderEntry(date, e))}${more ? html`<button type="button" class="more" tabindex="-1" aria-label=${`${more} more`}>+${more}</button>` : nothing}</div>`
-  }
-
-  private _weekNumber(isoWeek: string): TemplateResult {
-    const href = this.weekHref(isoWeek)
-    const n = String(Number(isoWeek.slice(6)))
-    // prettier-ignore
-    return href ? html`<a role="rowheader" class="wk has-note" href=${href} title=${`Week ${n}`}>${n}</a>` : html`<span role="rowheader" class="wk" title=${`Week ${n}`}>${n}</span>`
+    const { entries, more, marks, label } = this.cellContent(date, this._lines)
+    const onClick = (e: Event): void => {
+      if ((e.target as Element).closest('a')) return
+      this.emit('mbr-calendar-focus', { date })
+      this.emit('mbr-calendar-day', { date, anchor: e.currentTarget as HTMLElement })
+    }
+    return html`
+      <div
+        role="gridcell"
+        class=${this.cellClass(date, marks, monthOf(date) === this.month ? '' : ' outside')}
+        data-date=${date}
+        tabindex=${date === this.focused ? 0 : -1}
+        aria-label=${label}
+        @click=${onClick}
+      >
+        ${this.renderNumber(marks, String(Number(date.slice(8))))}${entries.map((e) => this.renderEntry(e))}${this.renderMore(date, more)}
+      </div>
+    `
   }
 
   override render(): TemplateResult | typeof nothing {
     if (!this.month) return nothing
     const grid = monthGrid(this.month, this.weekStart)
     const wk = this.weekNumbers ? ' with-weeks' : ''
-    // prettier-ignore
-    return html`<div role="grid" class=${`grid${wk}`} aria-label=${formatDate(`${this.month}-01`, this.locale, { month: 'long', year: 'numeric' })}><div role="row" class="labels">${wk ? html`<span></span>` : nothing}${weekdayLabels(this.weekStart, this.locale, 'short').map((l) => html`<span role="columnheader" class="dow">${l}</span>`)}</div><div class="body">${grid.weeks.map((w) => html`<div role="row" class="week">${wk ? this._weekNumber(w.isoWeek) : nothing}${w.days.map((d) => this._cell(d))}</div>`)}</div></div>`
+    return html`
+      <div role="grid" class=${`grid${wk}`} aria-label=${formatDate(`${this.month}-01`, this.locale, { month: 'long', year: 'numeric' })}>
+        <div role="row" class="labels">
+          ${wk ? html`<span></span>` : nothing}
+          ${weekdayLabels(this.weekStart, this.locale, 'short').map((l) => html`<span role="columnheader" class="dow">${l}</span>`)}
+        </div>
+        <div class="body">
+          ${grid.weeks.map(
+            (w) => html`
+              <div role="row" class="week">
+                ${wk ? renderWeekNumber(w.isoWeek, this.weekHref(w.isoWeek)) : nothing}${w.days.map((d) => this._cell(d))}
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `
   }
 
   static override styles = [
@@ -359,12 +412,30 @@ export class MbrCalendarWeekGridElement extends GridBase {
     if (!this.start) return nothing
     const days = Array.from({ length: 7 }, (_, i) => addDays(this.start, i))
     const labels = weekdayLabels(weekdayOf(this.start), this.locale, 'short')
-    // prettier-ignore
-    return html`<div role="grid" class="grid" aria-label=${`Week of ${formatDate(this.start, this.locale, { dateStyle: 'long' })}`}><div role="row" class="cols">${days.map((date, i) => {
-      const entries = this.dayEntries(date)
-      const marks = this.dayMarks(date)
-      return html`<div role="gridcell" class=${this.cellClass(date, marks)} data-date=${date} tabindex=${date === this.focused ? 0 : -1} aria-label=${this.label(date, entries, marks)} @click=${(e: Event) => { if (!(e.target as Element).closest('a')) this.emit('mbr-calendar-focus', { date }) }}><div class="dh"><span class="dow">${labels[i]}</span>${this.renderNumber(marks, String(Number(date.slice(8))))}</div><div class="list">${entries.map((e) => this.renderEntry(date, e))}</div></div>`
-    })}</div></div>`
+    const column = (date: DateKey, i: number): TemplateResult => {
+      const { entries, more, marks, label } = this.cellContent(date, WEEK_COLUMN_CAP)
+      const onClick = (e: Event): void => {
+        if (!(e.target as Element).closest('a')) this.emit('mbr-calendar-focus', { date })
+      }
+      return html`
+        <div
+          role="gridcell"
+          class=${this.cellClass(date, marks)}
+          data-date=${date}
+          tabindex=${date === this.focused ? 0 : -1}
+          aria-label=${label}
+          @click=${onClick}
+        >
+          <div class="dh"><span class="dow">${labels[i]}</span>${this.renderNumber(marks, String(Number(date.slice(8))))}</div>
+          <div class="list">${entries.map((e) => this.renderEntry(e))}${this.renderMore(date, more)}</div>
+        </div>
+      `
+    }
+    return html`
+      <div role="grid" class="grid" aria-label=${`Week of ${formatDate(this.start, this.locale, { dateStyle: 'long' })}`}>
+        <div role="row" class="cols">${days.map(column)}</div>
+      </div>
+    `
   }
 
   static override styles = [

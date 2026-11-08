@@ -791,7 +791,7 @@ defaults below. Applies in every mode, static builds included.
 | Option | Values | Default | Meaning |
 |--------|--------|---------|---------|
 | `enabled` | bool | `true` | Master switch for periodic navigation (the bar at the top of a periodic note and the `d` / `[` / `]` keys) and the calendar views. Off, notes still get a date (`calendar.date` in `site.json`), but no note is periodic. |
-| `periods` | array of `day`, `week`, `month`, `quarter`, `year` | all five | Which file-name forms make a note periodic. A note named `1984.md` is a year note unless `year` is left out (or `periodic_folders` excludes it). |
+| `periods` | array of `day`, `week`, `month`, `quarter`, `year` | all five | Which file-name forms make a note periodic. A note named `1984.md` is a year note unless `year` is left out (or `periodic_folders` excludes it). `[]` turns periodic detection off. |
 | `periodic_folders` | array of repository-relative folders | `[]` (anywhere) | Restrict periodic detection to these folders and their subfolders. |
 | `date_fields` | array of frontmatter keys | `["date", "created"]` | Frontmatter fields consulted, in order, when the file name carries no date. Dot keys reach nested maps (`taxonomy.published`). |
 | `week_start` | `locale`, `monday`, `sunday`, `saturday` | `locale` | First column of every calendar grid. `locale` follows the reader's locale (Sunday for `en-US`, Monday for most others). |
@@ -808,6 +808,21 @@ date_fields = ["date", "published"]
 week_start = "monday"
 ```
 
+**Which notes are periodic.** By default, any note whose file name is a period
+is periodic, wherever it is: `books/1984.md` becomes the year note for 1984,
+and a second such note (`films/1984.md`) gets a "duplicate period" warning in
+its page errors. To change that:
+
+- **Narrow it** to the folders that hold your journal:
+  `periodic_folders = ["journal"]` (subfolders included). `books/1984.md` is
+  then an ordinary note.
+- **Turn periodic detection off**: `periods = []`. No note is periodic, so
+  there is no periodic navigation bar and no duplicate warnings, but a day file
+  name (`2026-10-31.md`) still dates its note, and the calendar views, date
+  search and the companion (as a drawer: it docks only on day notes) keep
+  working.
+- **Turn the whole calendar off**: `enabled = false`.
+
 A note that fails the `periods` / `periodic_folders` filter is not periodic,
 but a **day** file name (`2026-10-31.md`) still dates it; other period names
 outside the filter (`1984.md`) do not.
@@ -821,10 +836,13 @@ so changing it rescans.
 `MBR_CALENDAR__ENABLED=false`, `MBR_CALENDAR__PERIODS='["day","week"]'`; or the
 whole table, `MBR_CALENDAR='{enabled=false}'`. There are no CLI flags.
 
-The table reaches the page as `window.__MBR_CONFIG__.calendar` (snake_case, as
-written here). `week_start`, `week_numbers`, `companion` and `agenda_chips` are
-read by the calendar UI in the browser; `periods`, `periodic_folders` and
-`date_fields` are applied by mbr when it scans the repository.
+The browser's half of the table reaches every page as
+`window.__MBR_CONFIG__.calendar` (snake_case, as written here): `enabled`,
+`date_fields`, `week_start`, `week_numbers` (when set), `companion` and
+`agenda_chips`. `periods` and `periodic_folders` are applied by mbr when it
+scans the repository and are not published; `date_fields` is applied there
+too. A `periodic_folders` entry may be written `journal`, `./journal/`,
+`/journal` or `journal\` (the same folder).
 
 ### Review Settings
 

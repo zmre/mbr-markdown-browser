@@ -13,7 +13,7 @@
  */
 
 import { evaluateDateExpr, rangeContains, type DateRange } from './date-expr.js'
-import { localDateOf, noteDate, parseDateKey, type DateKey, type NoteCalendar } from './note-date.js'
+import { localDateOf, localDayBounds, parseDateKey, type DateKey, type NoteCalendar } from './note-date.js'
 
 /** The facet keys with date semantics (matched case-insensitively). */
 export type DateFacetKey = 'date' | 'created' | 'modified' | 'when'
@@ -24,6 +24,12 @@ const DATE_FACET_KEYS: ReadonlySet<string> = new Set<DateFacetKey>(['date', 'cre
 export interface DateFacet {
   readonly key: DateFacetKey
   readonly range: DateRange
+  /**
+   * `range` as unix-second bounds `[from, to)` in the reader's zone, taken
+   * once per query: a timestamp is tested with two comparisons and turned
+   * into a date only when it matched.
+   */
+  readonly bounds: { readonly from: number; readonly to: number }
 }
 
 /** Which of a file's dates a result matched on (the server's `DateField`). */
@@ -108,7 +114,7 @@ export function splitDateFacets(query: string, today: DateKey): SplitQuery {
     const facet = facetOf(token)
     const key = facet?.key.toLowerCase()
     const range = facet && key && DATE_FACET_KEYS.has(key) ? evaluateDateExpr(facet.value, today) : null
-    if (range) facets.push({ key: key as DateFacetKey, range })
+    if (range) facets.push({ key: key as DateFacetKey, range, bounds: localDayBounds(range.from, range.to) })
     else text.push(token)
   }
   return { text: text.join(' '), facets }
@@ -130,17 +136,26 @@ export function matchDateFacets(file: DatedFile, facets: readonly DateFacet[]): 
 }
 
 function matchOne(file: DatedFile, facet: DateFacet): MatchedDate | null {
-  const check = (date: DateKey | null, field: DateField): MatchedDate | null =>
-    date !== null && rangeContains(facet.range, date) ? { date, field } : null
+  /** A timestamp in the facet's bounds, as the local date it falls on. */
+  const stamp = (seconds: number | undefined, field: DateField): MatchedDate | null =>
+    typeof seconds === 'number' && seconds >= facet.bounds.from && seconds < facet.bounds.to
+      ? { date: localDateOf(seconds)!, field }
+      : null
+  /** `noteDate`'s rule: `calendar.date` (a string compare), else the birthtime. */
+  const noteDateMatch = (): MatchedDate | null => {
+    const date = file.calendar?.date
+    if (date === undefined) return stamp(file.created, 'date')
+    return rangeContains(facet.range, date) ? { date, field: 'date' } : null
+  }
   switch (facet.key) {
     case 'date':
-      return check(noteDate(file), 'date')
+      return noteDateMatch()
     case 'created':
-      return check(localDateOf(file.created), 'created')
+      return stamp(file.created, 'created')
     case 'modified':
-      return check(localDateOf(file.modified), 'modified')
+      return stamp(file.modified, 'modified')
     case 'when':
-      return check(noteDate(file), 'date') ?? check(localDateOf(file.modified), 'modified')
+      return noteDateMatch() ?? stamp(file.modified, 'modified')
   }
 }
 
@@ -188,6 +203,17 @@ export function formatMatchedDate(matched: MatchedDate, locale?: string): string
   const parts = parseDateKey(matched.date)
   if (!parts) return FIELD_PREFIX[matched.field] + matched.date
   const when = new Date(Date.UTC(parts.year, parts.month - 1, parts.day))
-  const text = new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeZone: 'UTC' }).format(when)
-  return FIELD_PREFIX[matched.field] + text
+  return FIELD_PREFIX[matched.field] + mediumDate(locale).format(when)
+}
+
+/** One medium-date formatter per locale: a result list formats twenty at a time. */
+const mediumDates = new Map<string | undefined, Intl.DateTimeFormat>()
+
+function mediumDate(locale: string | undefined): Intl.DateTimeFormat {
+  let fmt = mediumDates.get(locale)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeZone: 'UTC' })
+    mediumDates.set(locale, fmt)
+  }
+  return fmt
 }

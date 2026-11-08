@@ -1,7 +1,8 @@
 /**
  * A note's calendar date, and date-only arithmetic.
  *
- * Pure, no imports: safe for the main bundle and for any lazy chunk.
+ * Pure, importing only `period.ts`'s day-number arithmetic: safe for the main
+ * bundle and for any lazy chunk.
  *
  * `noteDate` is the **only** place the client falls back from the date the
  * server resolved (`site.json`'s `calendar.date`: filename, then frontmatter;
@@ -14,6 +15,8 @@
  * arithmetic here can be thrown off by a daylight-saving change (never add
  * 86 400 000 ms to a timestamp to get "tomorrow").
  */
+
+import { daysFromCivil, daysInMonth, keyOfDays } from './period.js'
 
 /** A `YYYY-MM-DD` calendar date. */
 export type DateKey = string
@@ -44,14 +47,9 @@ export function dateKey(year: number, month: number, day: number): DateKey {
   return `${String(year).padStart(4, '0')}-${pad2(month)}-${pad2(day)}`
 }
 
-/** The local calendar date of `date`, in the reader's time zone. */
-export function localDateKey(date: Date): DateKey {
-  return dateKey(date.getFullYear(), date.getMonth() + 1, date.getDate())
-}
-
-/** Today's date key in the reader's time zone. */
+/** The local calendar date of `now` (default: today), in the reader's time zone. */
 export function todayKey(now: Date = new Date()): DateKey {
-  return localDateKey(now)
+  return dateKey(now.getFullYear(), now.getMonth() + 1, now.getDate())
 }
 
 /**
@@ -61,7 +59,27 @@ export function todayKey(now: Date = new Date()): DateKey {
 export function localDateOf(epochSeconds: number | undefined | null): DateKey | null {
   if (typeof epochSeconds !== 'number' || !Number.isFinite(epochSeconds)) return null
   const date = new Date(epochSeconds * 1000)
-  return Number.isNaN(date.getTime()) ? null : localDateKey(date)
+  return Number.isNaN(date.getTime()) ? null : todayKey(date)
+}
+
+/**
+ * The unix-second bounds `[from, to)` of the reader's local days `first` to
+ * `last` (inclusive; `null` = open): `localDateOf(t)` lies in the range
+ * exactly when `from <= t < to`. Lets a scan over thousands of timestamps
+ * compare numbers and build a date key only for a hit. A day whose midnight
+ * does not exist locally starts at its first instant, as `Date` resolves it.
+ */
+export function localDayBounds(first: DateKey | null, last: DateKey | null): { from: number; to: number } {
+  const startOf = (key: DateKey, plusDays: number): number => {
+    const [y, m, d] = key.split('-').map(Number)
+    const date = new Date(y, m - 1, d + plusDays)
+    date.setFullYear(y, m - 1, d + plusDays) // years 0–99 are not 1900–1999
+    return date.getTime() / 1000
+  }
+  return {
+    from: first === null ? -Infinity : startOf(first, 0),
+    to: last === null ? Infinity : startOf(last, 1),
+  }
 }
 
 /**
@@ -73,6 +91,18 @@ export function noteDate(file: DatedNote): DateKey | null {
   return file.calendar?.date ?? localDateOf(file.created)
 }
 
+/**
+ * The day a note sits on in a calendar: {@link noteDate}, except that a week,
+ * month, quarter or year note sits on none — its date is only its period's
+ * first day, and it is reached through the week-number and period links.
+ * A day note sits on its own day. The one rule behind the companion's day
+ * buckets and the overlay's "Note date" plot.
+ */
+export function noteDayOf(file: DatedNote): DateKey | null {
+  const period = file.calendar?.period
+  return period && !DATE_KEY.test(period) ? null : noteDate(file)
+}
+
 /** The parts of a valid date key, or `null`. Rejects `2026-02-30`. */
 export function parseDateKey(key: string): { year: number; month: number; day: number } | null {
   const m = DATE_KEY.exec(key)
@@ -80,20 +110,20 @@ export function parseDateKey(key: string): { year: number; month: number; day: n
   const year = Number(m[1])
   const month = Number(m[2])
   const day = Number(m[3])
-  const probe = new Date(Date.UTC(year, month - 1, day))
-  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
-    return null
-  }
-  return { year, month, day }
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month) ? { year, month, day } : null
+}
+
+/** The day number (days since 1970-01-01) of a date key. Throws on an invalid key. */
+export function dayNumber(key: DateKey): number {
+  const parts = parseDateKey(key)
+  if (!parts) throw new RangeError(`not a date key: ${key}`)
+  return daysFromCivil(parts.year, parts.month, parts.day)
 }
 
 /**
- * `key` plus `days` days (negative goes back), by calendar arithmetic in UTC,
- * where every day has 24 hours. Throws on an invalid key.
+ * `key` plus `days` days (negative goes back), by calendar arithmetic on day
+ * numbers, where every day has 24 hours. Throws on an invalid key.
  */
 export function addDays(key: DateKey, days: number): DateKey {
-  const parts = parseDateKey(key)
-  if (!parts) throw new RangeError(`not a date key: ${key}`)
-  const moved = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days))
-  return dateKey(moved.getUTCFullYear(), moved.getUTCMonth() + 1, moved.getUTCDate())
+  return keyOfDays(dayNumber(key) + days)
 }

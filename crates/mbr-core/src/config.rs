@@ -3603,6 +3603,17 @@ mod tests {
         assert!(Config::read(repo.path()).is_err());
     }
 
+    /// `periods = []` is "no note is periodic", not "use the default": an
+    /// empty list in config.toml must survive the merge over the defaults.
+    #[test]
+    fn test_config_read_calendar_empty_periods_turns_periodic_detection_off() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[calendar]\nperiods = []\n"));
+        let config = Config::read(repo.path()).expect("an empty periods list must load");
+        assert!(config.calendar.periods.is_empty());
+        assert!(config.calendar.enabled, "the calendar itself stays on");
+    }
+
     #[test]
     fn test_config_read_calendar_table() {
         use crate::calendar::{CompanionMode, PeriodKind, WeekStart};

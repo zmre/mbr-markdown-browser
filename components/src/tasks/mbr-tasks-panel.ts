@@ -39,16 +39,15 @@ import {
   gridDay,
   gridDayMarks,
   gridEntries,
+  gridHiddenCount,
   gridIsEmpty,
   gridRange,
-  gridTitle,
-  stepGrid,
   taskKey,
   type GridView,
 } from './task-grid.js'
 import { positionAnchored } from '../anchored-popover.js'
-import { localDateKey, type DateKey } from '../calendar/note-date.js'
-import { formatDate, monthOf, type Weekday } from '../calendar/month-grid.js'
+import { todayKey, type DateKey } from '../calendar/note-date.js'
+import { formatDate, monthOf, moveDay, overlayCommand, viewTitle, type Weekday } from '../calendar/month-grid.js'
 import type { CalendarChunk } from '../calendar-chunk.js'
 import type { DayMarks, GridEntry } from '../calendar/types.js'
 import type { MbrCalendarMonthGridElement } from '../calendar/mbr-calendar-grid.js'
@@ -216,7 +215,8 @@ export class MbrTasksPanelElement extends LitElement {
 
   /**
    * Today, for overdue marking and date headings. A property so tests can pin
-   * it; the server does its own bucketing against its own clock.
+   * it. Sent as the request's `today`, so the server buckets and marks
+   * overdue against the reader's date rather than its own clock.
    */
   @property({ attribute: false })
   today: Date = new Date()
@@ -281,10 +281,8 @@ export class MbrTasksPanelElement extends LitElement {
   @state() private _error: string | null = null
   /** The last `mode: "grid"` answer; `_response` keeps the list's. */
   @state() private _grid: TaskGridResponse | null = null
-  /** The loaded calendar chunk, once a grid view has asked for it. */
-  @state() private _calendar: CalendarChunk | null = null
-  /** The calendar chunk failed to load: the grid views say so. */
-  @state() private _calendarFailed = false
+  /** The calendar chunk (the grids' elements): not yet loaded, loaded, or failed (the grid views say so). */
+  @state() private _calendar: 'ready' | 'failed' | null = null
   /** Below {@link NARROW_QUERY}: Month shows as Week. */
   @state() private _narrow = false
   /** A grid day's task list, open over the grid, and its focused row. */
@@ -379,7 +377,7 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   override firstUpdated() {
-    this._gridFocus = localDateKey(this.today)
+    this._gridFocus = todayKey(this.today)
     this._applyDefaultInclude()
     this._applyCurrentFolder()
     this._input?.focus()
@@ -461,6 +459,7 @@ export class MbrTasksPanelElement extends LitElement {
       include: this._effectiveInclude,
       mode: this._mode,
       limit: TASK_LIMIT,
+      today: todayKey(this.today),
     }
     const view = this._gridView
     if (!view) return body
@@ -685,9 +684,7 @@ export class MbrTasksPanelElement extends LitElement {
   /** Loads the calendar chunk once; the grids are its elements. */
   private async _ensureCalendar(): Promise<void> {
     if (this._calendar || !this.loadCalendarChunk) return
-    const chunk = await this.loadCalendarChunk()
-    if (chunk) this._calendar = chunk
-    else this._calendarFailed = true
+    this._calendar = (await this.loadCalendarChunk()) ? 'ready' : 'failed'
   }
 
   /**
@@ -1030,19 +1027,19 @@ export class MbrTasksPanelElement extends LitElement {
   }
 
   /**
-   * Keys in the Week and Month views: the calendar overlay's map
-   * (design/calendar.md §5.5), read through the chunk's own `overlayCommand`
-   * and `moveDay` so the two cannot drift.
+   * Keys in the Week and Month views: the calendar key map
+   * (design/calendar.md §5.5), `month-grid.ts`'s `overlayCommand` and
+   * `moveDay`, which the overlay and the mini month read too.
    *
-   * The filter field keeps its characters: there, only `↓` / `Enter` (into
-   * the grid) and PageUp / PageDown (page the range) are taken. Once a day
+   * The filter field keeps its characters: there, only non-character keys
+   * are read through the map, and only `↓` / `Enter` (into the grid) and
+   * PageUp / PageDown (page the range) are taken. Once a day
    * cell has focus, the letters are grid keys too. A day's task list (Enter,
    * or a click on a cell) is where `Space` / `x` toggle and `Enter` opens,
    * as in the list; on a day holding exactly one task they act on it directly.
    */
   private _handleGridKey(e: KeyboardEvent) {
     const view = this._gridView
-    const chunk = this._calendar
     if (!view) return
     const target = realTarget(e)
     const tag = target?.tagName ?? ''
@@ -1052,12 +1049,13 @@ export class MbrTasksPanelElement extends LitElement {
     }
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
       if (target?.id !== 'tasks-filter') return
-      if (e.key === 'ArrowDown' || e.key === 'Enter') {
+      const command = e.key.length > 1 ? overlayCommand(e.key) : null
+      if (command === 'down' || command === 'open') {
         e.preventDefault()
         this._focusGridCell()
-      } else if (e.key === 'PageUp' || e.key === 'PageDown') {
+      } else if (command === 'prev' || command === 'next') {
         e.preventDefault()
-        this._setGridFocus(stepGrid(view, this._gridFocus, e.key === 'PageUp' ? -1 : 1))
+        this._setGridFocus(moveDay(command, view, this._gridFocus)!)
       }
       return
     }
@@ -1075,8 +1073,8 @@ export class MbrTasksPanelElement extends LitElement {
       else this._toggleDone(tasks[0])
       return
     }
-    const command = chunk?.overlayCommand(e.key) ?? null
-    if (!command || !chunk) return
+    const command = overlayCommand(e.key)
+    if (!command) return
     switch (command) {
       case 'open':
         e.preventDefault()
@@ -1084,7 +1082,7 @@ export class MbrTasksPanelElement extends LitElement {
         return
       case 'today':
         e.preventDefault()
-        this._setGridFocus(localDateKey(this.today), { focusCell: true })
+        this._setGridFocus(todayKey(this.today), { focusCell: true })
         return
       case 'month':
       case 'week':
@@ -1099,7 +1097,7 @@ export class MbrTasksPanelElement extends LitElement {
         this._input?.focus()
         return
       default: {
-        const next = chunk.moveDay(command, view, this._gridFocus)
+        const next = moveDay(command, view, this._gridFocus)
         if (!next) return
         e.preventDefault()
         this._setGridFocus(next, { focusCell: true })
@@ -1507,13 +1505,27 @@ export class MbrTasksPanelElement extends LitElement {
     const grid = this._grid
     const overdue = grid?.overdue_before_range ?? 0
     const unit = view === 'week' ? 'week' : 'month'
-    // prettier-ignore
-    const header = html`<div class="grid-header"><button type="button" class="mbr-icon-btn sm" aria-label=${`Previous ${unit}`} title=${`Previous ${unit} ([)`} @click=${() => this._setGridFocus(stepGrid(view, this._gridFocus, -1))}>${icon(iconChevronLeft, { size: ICON_SM })}</button><strong class="grid-title">${gridTitle(view, this._gridFocus, this.weekStart, locale)}</strong><button type="button" class="mbr-icon-btn sm" aria-label=${`Next ${unit}`} title=${`Next ${unit} (])`} @click=${() => this._setGridFocus(stepGrid(view, this._gridFocus, 1))}>${icon(iconChevronRight, { size: ICON_SM })}</button><button type="button" class="mbr-icon-btn sm labeled" title="Today (t)" @click=${() => this._setGridFocus(localDateKey(this.today))}>Today</button>${overdue > 0 ? html`<button type="button" class="overdue-chip" title="List the overdue tasks" @click=${() => this._showOverdue()}>Overdue (${overdue})</button>` : nothing}</div>`
+    const page = (command: 'prev' | 'next') => () => this._setGridFocus(moveDay(command, view, this._gridFocus)!)
+    const header = html`
+      <div class="grid-header">
+        <button type="button" class="mbr-icon-btn sm" aria-label=${`Previous ${unit}`} title=${`Previous ${unit} ([)`} @click=${page('prev')}>
+          ${icon(iconChevronLeft, { size: ICON_SM })}
+        </button>
+        <strong class="grid-title">${viewTitle(view, this._gridFocus, this.weekStart, locale)}</strong>
+        <button type="button" class="mbr-icon-btn sm" aria-label=${`Next ${unit}`} title=${`Next ${unit} (])`} @click=${page('next')}>
+          ${icon(iconChevronRight, { size: ICON_SM })}
+        </button>
+        <button type="button" class="mbr-icon-btn sm labeled" title="Today (t)" @click=${() => this._setGridFocus(todayKey(this.today))}>Today</button>
+        ${overdue > 0
+          ? html`<button type="button" class="overdue-chip" title="List the overdue tasks" @click=${() => this._showOverdue()}>Overdue (${overdue})</button>`
+          : nothing}
+      </div>
+    `
     return html`<div class="grid-area">${header}<div class="grid-body">${this._renderGridBody(view, locale)}</div>${this._renderDayPopover(locale)}</div>`
   }
 
   private _renderGridBody(view: GridView, locale: string): TemplateResult {
-    if (this._calendarFailed) return html`<div class="results-error">The calendar could not be loaded.</div>`
+    if (this._calendar === 'failed') return html`<div class="results-error">The calendar could not be loaded.</div>`
     if (this._error) return html`<div class="results-error">${this._error}</div>`
     const grid = this._grid
     if (!this._calendar || !grid) {
@@ -1527,8 +1539,8 @@ export class MbrTasksPanelElement extends LitElement {
     const href = (hit: TaskHit) => safeHref(taskHref(hit, this.resolveHref))
     const statusOf = (hit: TaskHit) => this._statusOf(hit)
     const entries = (date: DateKey): readonly GridEntry[] => gridEntries(gridDay(grid, date), statusOf, href)
-    const marks = (date: DateKey): DayMarks => gridDayMarks(gridDay(grid, date))
-    const today = localDateKey(this.today)
+    const marks = (date: DateKey): DayMarks => gridDayMarks(gridDay(grid, date), this._statuses)
+    const today = todayKey(this.today)
     const onFocus = (e: CustomEvent<{ date: DateKey }>) => {
       this._gridFocus = e.detail.date
       this._dayPopover = null
@@ -1537,11 +1549,31 @@ export class MbrTasksPanelElement extends LitElement {
     }
     const onDay = (e: CustomEvent<{ date: DateKey; anchor: HTMLElement }>) => this._openDay(e.detail.date, e.detail.anchor)
     if (view === 'week') {
-      // prettier-ignore
-      return html`<mbr-calendar-week-grid .start=${gridRange('week', this._gridFocus, this.weekStart).from} .focused=${this._gridFocus} .today=${today} .locale=${locale} .dayEntries=${entries} .dayMarks=${marks} @mbr-calendar-focus=${onFocus}></mbr-calendar-week-grid>`
+      return html`
+        <mbr-calendar-week-grid
+          .start=${gridRange('week', this._gridFocus, this.weekStart).from}
+          .focused=${this._gridFocus}
+          .today=${today}
+          .locale=${locale}
+          .dayEntries=${entries}
+          .dayMarks=${marks}
+          @mbr-calendar-focus=${onFocus}
+        ></mbr-calendar-week-grid>
+      `
     }
-    // prettier-ignore
-    return html`<mbr-calendar-month-grid .month=${monthOf(this._gridFocus)} .focused=${this._gridFocus} .today=${today} .weekStart=${this.weekStart} .locale=${locale} .dayEntries=${entries} .dayMarks=${marks} @mbr-calendar-focus=${onFocus} @mbr-calendar-day=${onDay}></mbr-calendar-month-grid>`
+    return html`
+      <mbr-calendar-month-grid
+        .month=${monthOf(this._gridFocus)}
+        .focused=${this._gridFocus}
+        .today=${today}
+        .weekStart=${this.weekStart}
+        .locale=${locale}
+        .dayEntries=${entries}
+        .dayMarks=${marks}
+        @mbr-calendar-focus=${onFocus}
+        @mbr-calendar-day=${onDay}
+      ></mbr-calendar-month-grid>
+    `
   }
 
   /** A grid day's tasks as the list's own cards: same checkboxes, same toggles. */
@@ -1549,8 +1581,30 @@ export class MbrTasksPanelElement extends LitElement {
     const pop = this._dayPopover
     if (!pop) return nothing
     const tasks = this._dayTasks(pop.date)
-    // prettier-ignore
-    return html`<div class="day-popover" role="dialog" aria-label=${formatDate(pop.date, locale, { dateStyle: 'full' })}><div class="day-popover-head"><strong>${formatDate(pop.date, locale, { weekday: 'long', month: 'long', day: 'numeric' })}</strong><button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${() => this._closeDay()}>${icon(iconX, { size: ICON_SM })}</button></div><div class="day-popover-list">${tasks.length === 0 ? html`<p class="results-empty">No tasks match these filters.</p>` : tasks.map((hit, i) => html`${this._renderCard(hit, i === this._popIndex, () => (this._popIndex = i))}<div class="day-popover-note">${hit.note}</div>`)}</div></div>`
+    const hidden = gridHiddenCount(gridDay(this._grid, pop.date), this._statuses)
+    const list =
+      tasks.length === 0 && hidden === 0
+        ? html`<p class="results-empty">No tasks match these filters.</p>`
+        : tasks.map(
+            (hit, i) => html`
+              ${this._renderCard(hit, i === this._popIndex, () => (this._popIndex = i))}
+              <div class="day-popover-note">${hit.note}</div>
+            `
+          )
+    return html`
+      <div class="day-popover" role="dialog" aria-label=${formatDate(pop.date, locale, { dateStyle: 'full' })}>
+        <div class="day-popover-head">
+          <strong>${formatDate(pop.date, locale, { weekday: 'long', month: 'long', day: 'numeric' })}</strong>
+          <button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${() => this._closeDay()}>${icon(iconX, { size: ICON_SM })}</button>
+        </div>
+        <div class="day-popover-list">
+          ${list}
+          ${hidden > 0
+            ? html`<p class="day-popover-more" title="Too many tasks to list them all: narrow the filters">+${hidden} more</p>`
+            : nothing}
+        </div>
+      </div>
+    `
   }
 
   protected override updated(): void {
@@ -1690,8 +1744,17 @@ export class MbrTasksPanelElement extends LitElement {
 
   private _renderFooter(): TemplateResult {
     if (this._gridView) {
-      // prettier-ignore
-      return html`<div class="tasks-footer"><span class="footer-hint"><span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> days</span><span><kbd>[</kbd><kbd>]</kbd> page</span><span><kbd>↵</kbd> list the day</span>${this.editEnabled ? html`<span><kbd>space</kbd> done</span>` : nothing}<span><kbd>esc</kbd> close</span></span></div>`
+      return html`
+        <div class="tasks-footer">
+          <span class="footer-hint">
+            <span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> days</span>
+            <span><kbd>[</kbd><kbd>]</kbd> page</span>
+            <span><kbd>↵</kbd> list the day</span>
+            ${this.editEnabled ? html`<span><kbd>space</kbd> done</span>` : nothing}
+            <span><kbd>esc</kbd> close</span>
+          </span>
+        </div>
+      `
     }
     return html`
       <div class="tasks-footer">
@@ -2130,6 +2193,13 @@ export class MbrTasksPanelElement extends LitElement {
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
+    }
+
+    .day-popover-more {
+      margin: 0.3rem 0 0 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--pico-muted-color, #888);
     }
 
     .results-meta {
