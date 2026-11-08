@@ -909,7 +909,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
           ${icon(iconChevronRight, { size: ICON_SM, className: 'chevron toggle-icon' })}
           <span class="section-title">Calendar</span>
         </button>
-        ${isExpanded ? html`<div class="section-content">${renderCalendarSection(model, {
+        ${isExpanded ? html`<div class="section-content calendar-section">${renderCalendarSection(model, {
           resolveUrl,
           onOpenCalendar: calendarOverlayAvailable() ? () => this._openCalendar({ label: 'All notes' }) : undefined,
         })}</div>` : nothing}
@@ -1524,6 +1524,14 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
     .section-content {
       padding: 0.25rem 0;
+    }
+
+    .calendar-section {
+      --mbr-cal-indent: 1.5rem;
+      --mbr-cal-sub-indent: 0.75rem;
+      --mbr-cal-row-y: 0.35rem;
+      --mbr-cal-color: var(--pico-color, #333);
+      --mbr-cal-hover-color: var(--pico-primary, #0d6efd);
     }
 
     .tree-content {

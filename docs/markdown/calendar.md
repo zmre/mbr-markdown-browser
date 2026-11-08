@@ -336,7 +336,7 @@ When the repository has periodic notes, the file browser (`-`) and the docked
 sidebar start with a **Calendar** section: **Today**, **This week**, **This
 month**, **This quarter** and **This year** link to the current periodic note
 of each kind the repository has (or, when there is none yet, to the latest
-one, saying so), followed by the last seven daily notes and **Calendar…**,
+one, saying so), followed by the last three daily notes and **Calendar…**,
 which opens the overlay.
 
 ## Searching by date
