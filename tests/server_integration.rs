@@ -1993,6 +1993,113 @@ async fn test_extensionless_link_targets_from_index_page() {
     assert_html_not_contains(&html, r#"href="Makefile/""#);
 }
 
+/// Every way an author spells a link to a page or a folder — relative or
+/// root-relative, with or without `.md` or a trailing slash, a folder with an
+/// index note or a plain listing — renders the canonical, slash-terminated
+/// href, and none of them is reported in `errors.json`. The reported defect
+/// was `[](../abc)` for `../abc.md`; the root-relative `[](/abc)` was emitted
+/// slashless and flagged `broken_internal_link`.
+#[tokio::test]
+async fn test_every_page_link_spelling_renders_canonical_and_clean() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/page.md",
+        "# Page\n\n\
+         [a](../abc) [b](../abc/) [c](../abc.md) [d](/abc) [e](/abc/) [f](/abc.md)\n\n\
+         [g](../abc#part) [h](/abc?x=1#part)\n\n\
+         [i](../withindex) [j](/withindex) [k](../noindex) [l](/noindex)\n\n\
+         [m](../LICENSE) [n](/LICENSE)\n",
+    );
+    repo.create_markdown("abc.md", "# Abc\n\n## Part\n");
+    repo.create_markdown("withindex/index.md", "# With Index");
+    repo.create_markdown("noindex/one.md", "# One");
+    repo.create_static_file("LICENSE", b"MIT");
+    // Linked only by the root-relative spelling.
+    repo.create_markdown("rooted.md", "# Rooted\n\n[abc](/abc)\n");
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/notes/page/").await;
+
+    for href in [
+        r#"href="../../abc/""#,
+        r#"href="/abc/""#,
+        r#"href="../../abc/#part""#,
+        r#"href="/abc/?x=1#part""#,
+        r#"href="../../withindex/""#,
+        r#"href="/withindex/""#,
+        r#"href="../../noindex/""#,
+        r#"href="/noindex/""#,
+        r#"href="../../LICENSE""#,
+        r#"href="/LICENSE""#,
+    ] {
+        assert_html_contains(&html, href);
+    }
+    for slashless in [
+        r#"href="../../abc""#,
+        r#"href="/abc""#,
+        r#"href="/withindex""#,
+        r#"href="../../noindex""#,
+        r#"href="/LICENSE/""#,
+    ] {
+        assert_html_not_contains(&html, slashless);
+    }
+
+    let json: serde_json::Value = server
+        .get("/notes/page/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.is_empty(),
+        "every spelling is a working link: {errors:?}"
+    );
+
+    // links.json lists each target at its canonical URL.
+    let links: serde_json::Value = server
+        .get("/notes/page/links.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let outbound: Vec<&str> = links["outbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["to"].as_str())
+        .collect();
+    for target in ["/abc/", "/withindex/", "/noindex/"] {
+        assert!(outbound.contains(&target), "{target} in {outbound:?}");
+    }
+    assert!(
+        !outbound.iter().any(|t| *t == "/abc" || *t == "/abc.md"),
+        "no non-canonical target: {outbound:?}"
+    );
+
+    // And the target shows both backlinks, the root-relative-only one
+    // included. The backlink index is built in the background; poll for it.
+    let mut sources: Vec<String> = Vec::new();
+    for _ in 0..50 {
+        let json: serde_json::Value = server.get("/abc/links.json").await.json().await.unwrap();
+        sources = json["inbound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["from"].as_str().map(str::to_string))
+            .collect();
+        if sources.iter().any(|s| s == "/rooted/") && sources.iter().any(|s| s == "/notes/page/") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        sources.iter().any(|s| s == "/rooted/") && sources.iter().any(|s| s == "/notes/page/"),
+        "/abc/ must show backlinks from /rooted/ and /notes/page/: {sources:?}"
+    );
+}
+
 // ==================== Page Error Reporting Tests ====================
 
 /// `errors.json` must judge the href that actually went into the HTML. A link
@@ -2001,13 +2108,14 @@ async fn test_extensionless_link_targets_from_index_page() {
 #[tokio::test]
 async fn test_errors_json_reports_non_canonical_and_escaping_links() {
     let repo = TestRepo::new();
-    // Raw HTML hrefs go through the link transform like markdown links, but a
-    // root-relative one is left as written in server mode, which is how a
-    // hand-authored non-canonical URL reaches the page. The relative escape
-    // gains the page's trailing-slash `../`, and is reported as emitted.
+    // Raw HTML hrefs go through the link transform like markdown links (a
+    // root-relative page link gains its trailing slash), but an *unquoted*
+    // value is left as written, which is how a hand-authored non-canonical URL
+    // still reaches the page. The relative escape gains the page's
+    // trailing-slash `../`, and is reported as emitted.
     repo.create_markdown(
         "docs/guide.md",
-        "# Guide\n\n<a href=\"/folder/file\">no trailing slash</a>\n\n\
+        "# Guide\n\n<a href=/folder/file>no trailing slash</a>\n\n\
          <a href=\"../../../escape/target/\">above root</a>\n\n\
          <a href=\"/folder/file/\">canonical</a>\n",
     );
@@ -11355,4 +11463,113 @@ async fn test_periodic_detection_default_narrowed_and_off() {
     assert_html_not_contains(&day_page, r#"class="mbr-calendar-nav""#);
     assert_html_contains(&day_page, r#"calendar: {"enabled":true"#);
     assert_html_contains(&day_page, "<mbr-calendar></mbr-calendar>");
+}
+
+// ============================================================================
+// Configuration reload (`mbr::live::LiveServer`)
+// ============================================================================
+
+/// A `LiveServer` the way `mbr -s` starts one: the repository's configuration
+/// with command-line-style overrides (the port, oembed off), read again the
+/// same way on every reload.
+async fn start_live_server(
+    root: PathBuf,
+) -> (
+    u16,
+    std::sync::Arc<mbr::live::LiveServer>,
+    tokio::task::JoinHandle<()>,
+) {
+    let port = find_available_port();
+    let read_config: mbr::live::ConfigReader = std::sync::Arc::new(move || {
+        let mut config = mbr::Config::read(&root)?;
+        config.port = port;
+        config.oembed_timeout_ms = 0;
+        Ok(config)
+    });
+    let config = read_config().expect("initial configuration");
+    let live = mbr::live::LiveServer::init(config, false, read_config).expect("init");
+    let serving = std::sync::Arc::clone(&live);
+    let handle = tokio::spawn(async move {
+        serving.start().await.expect("live server failed to start");
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    (port, live, handle)
+}
+
+async fn fetch_text(client: &reqwest::Client, port: u16, path: &str) -> String {
+    client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .send()
+        .await
+        .expect("request")
+        .text()
+        .await
+        .expect("body")
+}
+
+/// Cmd/Ctrl+R's path: an edited `.mbr/config.toml` is served on the same
+/// port after a reload, with no restart.
+#[tokio::test]
+async fn test_reloaded_config_is_served_on_the_same_port() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n");
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "title_prefix = \"Before | \"\n",
+    )
+    .unwrap();
+    let (port, live, _handle) = start_live_server(repo.path().to_path_buf()).await;
+    let client = mbr::http_client(Duration::from_secs(5));
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "Before | ");
+
+    std::fs::write(
+        repo.path().join(".mbr/config.toml"),
+        "title_prefix = \"After | \"\n",
+    )
+    .unwrap();
+    assert_eq!(live.reload().await, mbr::live::ReloadOutcome::Applied);
+
+    let html = fetch_text(&client, port, "/note/").await;
+    assert_html_contains(&html, "After | ");
+    assert_html_not_contains(&html, "Before | ");
+}
+
+/// Saving `.mbr/config.toml` changes what the running server serves, with no
+/// restart and no reload asked for: the watcher sees it. A broken save keeps
+/// the last good settings and shows the error on the page's error panel.
+#[cfg(feature = "watcher")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_saving_config_toml_changes_the_served_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown("note.md", "# Note\n");
+    let config_path = repo.path().join(".mbr/config.toml");
+    std::fs::write(&config_path, "title_prefix = \"Before | \"\n").unwrap();
+    let (port, _live, _handle) = start_live_server(repo.path().to_path_buf()).await;
+    let client = mbr::http_client(Duration::from_secs(5));
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "Before | ");
+
+    // Saved until the watcher (started in the background) reports it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut html = String::new();
+    while tokio::time::Instant::now() < deadline {
+        std::fs::write(&config_path, "title_prefix = \"After | \"\n").unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        html = fetch_text(&client, port, "/note/").await;
+        if html.contains("After | ") {
+            break;
+        }
+    }
+    assert_html_contains(&html, "After | ");
+
+    std::fs::write(&config_path, "title_prefix = [broken\n").unwrap();
+    let mut errors = String::new();
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        errors = fetch_text(&client, port, "/note/errors.json").await;
+        if errors.contains("config_parse_error") {
+            break;
+        }
+    }
+    assert!(errors.contains("config_parse_error"), "{errors}");
+    assert_html_contains(&fetch_text(&client, port, "/note/").await, "After | ");
 }

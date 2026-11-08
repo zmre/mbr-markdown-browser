@@ -1790,6 +1790,53 @@ fn invalid_static_folder(value: &str, reason: &str) -> ConfigError {
     ))))
 }
 
+impl Config {
+    /// Whether `other` configures the same thing as `self`, field for field
+    /// (compared in serialized form, so the `#[serde(skip)]` fields — the
+    /// CLI-named hidden directories and the mount switch, which come from the
+    /// invocation rather than the configuration — do not count). How a configuration reload tells a `config.toml` that was only
+    /// touched from one that changed.
+    pub fn same_settings(&self, other: &Config) -> bool {
+        match (serde_json::to_value(self), serde_json::to_value(other)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// What went wrong loading the configuration, in one line a reader can act
+/// on: what a configuration reload logs and puts in `errors.json`'s
+/// `config_parse_error`.
+///
+/// A parse failure's useful part — the file, key and line figment reports —
+/// is not in `ConfigError::ParseFailed`'s `Display` and not exposed as its
+/// `source`, so it is unwrapped here rather than changing the error's text
+/// (which the CLI prints when a launch fails).
+pub fn config_error_message(error: &crate::MbrError) -> String {
+    match error {
+        crate::MbrError::Config(ConfigError::ParseFailed(figment)) => {
+            format!("{error}: {figment}")
+        }
+        other => error_chain(other),
+    }
+}
+
+/// An error and its sources, one line; a source already part of the message
+/// is not repeated.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3792,5 +3839,35 @@ mod tests {
 
         assert_eq!(config.static_folder, "../static");
         assert_eq!(config.root_dir, content);
+    }
+
+    #[test]
+    fn test_same_settings_ignores_fields_that_are_not_configuration() {
+        let a = Config::default();
+        let b = Config {
+            explicit_hidden_dirs: vec![PathBuf::from(".scratch")],
+            no_symlink_mounts: true,
+            ..Config::default()
+        };
+        assert!(a.same_settings(&b));
+        let c = Config {
+            theme: "amber".to_string(),
+            ..Config::default()
+        };
+        assert!(!a.same_settings(&c));
+    }
+
+    #[test]
+    fn test_config_error_message_names_the_broken_key() {
+        let _guard = env_lock();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".mbr")).unwrap();
+        std::fs::write(repo.path().join(".mbr/config.toml"), "theme = [unclosed\n").unwrap();
+        let error = Config::read(repo.path()).expect_err("broken TOML must not load");
+        let message = config_error_message(&error);
+        // figment's detail (file and position) is unwrapped; Display alone
+        // says only "Failed to parse configuration".
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.len() > error.to_string().len(), "{message}");
     }
 }

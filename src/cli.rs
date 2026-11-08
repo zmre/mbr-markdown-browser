@@ -1,10 +1,12 @@
 use crate::config::{Config, IpArray};
-use crate::errors::ConfigError;
+use crate::errors::{ConfigError, MbrError};
 use clap::{ArgGroup, Parser};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Markdown browser and previewer
-#[derive(Parser, Debug)]
+// `Clone` so a server can keep the invocation and re-apply its overrides when
+// the configuration is reloaded ([`read_config`]).
+#[derive(Parser, Debug, Clone)]
 // `name` because clap otherwise takes it from the *package*
 // (`mbr-markdown-browser`), not the binary, so `mbr --version` printed
 // `mbr-markdown-browser X.Y.Z` and the usage line named a command that does not
@@ -353,6 +355,27 @@ pub fn apply_overrides(mut config: Config, args: &Args) -> Result<Config, Config
     }
 
     Ok(config)
+}
+
+/// Reads the configuration for `path` with every layer: the defaults (the
+/// GUI's when `gui`), `.mbr/config.toml`, `MBR_*`, then the command line's
+/// overrides. What `main` reads at launch and what a running server re-reads
+/// when its configuration is reloaded (`mbr_server::live`), so flags still
+/// beat the file after a reload.
+pub fn read_config(path: &Path, gui: bool, args: &Args) -> Result<Config, MbrError> {
+    let loaded = if gui {
+        Config::read_for_gui(path)?
+    } else {
+        Config::read(path)?
+    };
+    Ok(apply_overrides(loaded, args)?)
+}
+
+/// [`read_config`] for `path`, kept for a running server to call again when
+/// it reloads its configuration (Cmd/Ctrl+R in the GUI, a changed
+/// `.mbr/config.toml` on disk): the same path, mode and flags as at launch.
+pub fn config_reader(path: PathBuf, gui: bool, args: Args) -> crate::live::ConfigReader {
+    std::sync::Arc::new(move || read_config(&path, gui, &args))
 }
 
 #[cfg(test)]
@@ -993,5 +1016,68 @@ mod tests {
         // The default host is loopback, so enabling editing needs no token and
         // the re-`validate()` at the end of the override block succeeds.
         assert!(overridden(&["mbr", "-s", "--edit"]).edit_enabled);
+    }
+
+    /// A repository whose `.mbr/config.toml` holds `toml`.
+    fn repo_with_config(toml: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".mbr")).expect("mkdir");
+        std::fs::write(dir.path().join(".mbr/config.toml"), toml).expect("write");
+        dir
+    }
+
+    /// A configuration reload re-reads the file and re-applies the command
+    /// line, so a flag still beats the file afterwards.
+    #[test]
+    fn read_config_reapplies_the_command_line_on_every_read() {
+        let dir = repo_with_config("theme = \"amber\"\ntitle_prefix = \"File: \"\n");
+        let path = dir.path().canonicalize().expect("canonical");
+        let path_arg = path.to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["mbr", "-s", "--theme", "blue", path_arg.as_str()])
+            .expect("args");
+
+        let first = read_config(&path, false, &args).expect("first read");
+        assert_eq!(first.theme, "blue", "the flag beats the file");
+        assert_eq!(first.title_prefix, "File: ");
+
+        std::fs::write(
+            path.join(".mbr/config.toml"),
+            "theme = \"green\"\ntitle_prefix = \"Edited: \"\n",
+        )
+        .expect("rewrite");
+        let reread = read_config(&path, false, &args).expect("reread");
+        assert_eq!(reread.theme, "blue", "and still does after a reload");
+        assert_eq!(reread.title_prefix, "Edited: ", "the file's change applies");
+    }
+
+    /// The GUI re-reads over its own defaults (editing on), and `--no-edit`
+    /// still wins.
+    #[test]
+    fn read_config_keeps_the_gui_defaults_and_their_overrides() {
+        let dir = repo_with_config("title_prefix = \"x\"\n");
+        let path = dir.path().canonicalize().expect("canonical");
+        let plain = Args::try_parse_from(["mbr"]).expect("args");
+        assert!(read_config(&path, true, &plain).expect("gui").edit_enabled);
+        assert!(
+            !read_config(&path, false, &plain)
+                .expect("server")
+                .edit_enabled
+        );
+        let no_edit = Args::try_parse_from(["mbr", "--no-edit"]).expect("args");
+        assert!(
+            !read_config(&path, true, &no_edit)
+                .expect("gui")
+                .edit_enabled
+        );
+    }
+
+    #[test]
+    fn read_config_reports_a_broken_file() {
+        let dir = repo_with_config("theme = [\n");
+        let args = Args::try_parse_from(["mbr"]).expect("args");
+        assert!(matches!(
+            read_config(dir.path(), false, &args),
+            Err(MbrError::Config(ConfigError::ParseFailed(_)))
+        ));
     }
 }

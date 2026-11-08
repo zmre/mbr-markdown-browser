@@ -218,10 +218,15 @@ pub enum BrokenLinkReason {
     /// (RFC 3986 §5.2.4), so the reader lands on an unrelated page rather than
     /// seeing an error.
     EscapesSiteRoot,
-    /// The href reaches a *page* (`<dir>/index.html`) but does not end in `/`.
-    /// The page is served, so this looks fine — until the browser resolves that
-    /// page's own relative links against `<dir>/`'s parent instead of `<dir>/`
-    /// and every one of them 404s. A static host has no redirect to repair it.
+    /// The href reaches a *markdown page* (`<dir>/index.html` rendered from a
+    /// note) but does not end in `/`. The page is served, so this looks fine —
+    /// until the browser resolves that page's own relative links against
+    /// `<dir>/`'s parent instead of `<dir>/` and every one of them 404s. A
+    /// static host need not redirect to repair it.
+    ///
+    /// Only markdown pages, exactly as the server's `errors.json`
+    /// (`page_errors`) judges it: a section listing or tag page links
+    /// root-anchored, so a slashless href to one does no damage.
     MissingTrailingSlash,
 }
 
@@ -245,11 +250,14 @@ impl std::fmt::Display for BrokenLinkReason {
 /// `href_path` is the href with any `#fragment` / `?query` already removed; its
 /// trailing slash is what distinguishes "a page, addressed canonically" from
 /// "a page, addressed at a URL whose relative links will all break".
+/// `markdown_page_dirs` holds the output folders rendered from notes, the only
+/// targets that slash is demanded of.
 fn classify_link_target(
     path: &Path,
     href_path: &str,
     output_dir: &Path,
     valid_files: &HashSet<PathBuf>,
+    markdown_page_dirs: &HashSet<PathBuf>,
 ) -> Option<BrokenLinkReason> {
     // Checked before existence: an escaping link that happens to land on a real
     // file outside the output is still wrong, and one that lands on nothing
@@ -261,7 +269,8 @@ fn classify_link_target(
         return None;
     }
     if valid_files.contains(&path.join("index.html")) {
-        return (!href_path.ends_with('/')).then_some(BrokenLinkReason::MissingTrailingSlash);
+        let non_canonical = !href_path.ends_with('/') && markdown_page_dirs.contains(path);
+        return non_canonical.then_some(BrokenLinkReason::MissingTrailingSlash);
     }
     Some(BrokenLinkReason::Missing)
 }
@@ -406,12 +415,13 @@ pub struct Builder {
     /// mirroring broken-link reporting.
     frontmatter_errors: Arc<ConcurrentHashMap<String, String>>,
     /// Tells the link transform whether an extension-less target
-    /// (`[x](../folder/file)`) is a markdown page — and therefore needs the
-    /// trailing slash the URL convention requires — or a genuinely
+    /// (`[x](../folder/file)`, `[x](/folder/file)`) is a page or folder — and
+    /// therefore needs the trailing slash the URL convention requires — or a
+    /// genuinely
     /// extension-less static file. Static output has no server to redirect a
     /// non-canonical URL to the canonical one, so getting this right at render
     /// time is the only chance.
-    markdown_page_probe: mbr_core::link_transform::MarkdownPageProbe,
+    directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
     /// `__MBR_CONFIG__.calendar`, serialized once for every page.
     calendar_chrome: page_context::CalendarChrome,
 }
@@ -432,7 +442,7 @@ impl Builder {
 
         // Built once, not per file: every rendered page shares it and the
         // closure only holds a few small owned strings.
-        let markdown_page_probe = mbr_core::link_transform::filesystem_markdown_page_probe(
+        let directory_url_probe = mbr_core::link_transform::filesystem_directory_url_probe(
             OwnedPathResolverConfig::for_repo(
                 &repo,
                 &config.static_folder,
@@ -451,7 +461,7 @@ impl Builder {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
-            markdown_page_probe,
+            directory_url_probe,
             calendar_chrome,
         })
     }
@@ -895,7 +905,7 @@ impl Builder {
                     is_index_file: *is_index_file,
                     url_depth: None,
                     current_page_url: source_url.clone(),
-                    markdown_page_probe: None,
+                    directory_url_probe: None,
                 },
             );
 
@@ -1091,7 +1101,7 @@ impl Builder {
             is_index_file,
             url_depth: Some(url_depth(&info.url_path)),
             current_page_url: info.url_path.clone(),
-            markdown_page_probe: Some(self.markdown_page_probe.clone()),
+            directory_url_probe: Some(self.directory_url_probe.clone()),
         };
 
         tracing::debug!("build: rendering {}", path.display());
@@ -2561,6 +2571,16 @@ impl Builder {
             }
         }
 
+        // The folders rendered from notes: the only targets a missing trailing
+        // slash is reported for (see `BrokenLinkReason::MissingTrailingSlash`).
+        let markdown_page_dirs: HashSet<PathBuf> = self
+            .repo
+            .markdown_files
+            .pin()
+            .values()
+            .map(|info| self.output_dir.join(info.url_path.trim_matches('/')))
+            .collect();
+
         // Process files in parallel: read, parse HTML, extract + validate links
         html_files
             .par_iter()
@@ -2619,6 +2639,7 @@ impl Builder {
                                 &href_path,
                                 &self.output_dir,
                                 &valid_files,
+                                &markdown_page_dirs,
                             )
                         {
                             broken.push(BrokenLink {
@@ -3040,7 +3061,7 @@ mod tests {
         let build_link_index = Arc::new(ConcurrentHashMap::new());
         let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
 
-        let markdown_page_probe = mbr_core::link_transform::filesystem_markdown_page_probe(
+        let directory_url_probe = mbr_core::link_transform::filesystem_directory_url_probe(
             OwnedPathResolverConfig::for_repo(
                 &repo,
                 &config.static_folder,
@@ -3059,7 +3080,7 @@ mod tests {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
-            markdown_page_probe,
+            directory_url_probe,
             calendar_chrome,
         }
     }
@@ -3321,6 +3342,11 @@ mod tests {
 
     // -------------------- classify_link_target tests ----------------------
 
+    /// No output folder rendered from a note.
+    fn no_pages() -> HashSet<PathBuf> {
+        HashSet::new()
+    }
+
     /// Helper to build a HashSet of valid files from a directory (mirrors validate_links logic).
     fn build_valid_files(dir: &Path) -> HashSet<PathBuf> {
         WalkDir::new(dir)
@@ -3343,7 +3369,13 @@ mod tests {
 
         let valid_files = build_valid_files(&temp_path);
         assert_eq!(
-            classify_link_target(&file_path, "readme.html", &temp_path, &valid_files),
+            classify_link_target(
+                &file_path,
+                "readme.html",
+                &temp_path,
+                &valid_files,
+                &no_pages()
+            ),
             None
         );
     }
@@ -3359,7 +3391,7 @@ mod tests {
 
         let valid_files = build_valid_files(&temp_path);
         assert_eq!(
-            classify_link_target(&file_path, "LICENSE", &temp_path, &valid_files),
+            classify_link_target(&file_path, "LICENSE", &temp_path, &valid_files, &no_pages()),
             None
         );
     }
@@ -3376,7 +3408,7 @@ mod tests {
 
         let valid_files = build_valid_files(&temp_path);
         assert_eq!(
-            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files),
+            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files, &no_pages()),
             None
         );
     }
@@ -3395,12 +3427,51 @@ mod tests {
         std::fs::write(dir_path.join("index.html"), "content").unwrap();
 
         let valid_files = build_valid_files(&temp_path);
+        let pages = HashSet::from([dir_path.clone()]);
         assert_eq!(
-            classify_link_target(&dir_path, "../../folder/file", &temp_path, &valid_files),
+            classify_link_target(
+                &dir_path,
+                "../../folder/file",
+                &temp_path,
+                &valid_files,
+                &pages
+            ),
             Some(BrokenLinkReason::MissingTrailingSlash)
         );
         assert_eq!(
-            classify_link_target(&dir_path, "../../folder/file/", &temp_path, &valid_files),
+            classify_link_target(
+                &dir_path,
+                "../../folder/file/",
+                &temp_path,
+                &valid_files,
+                &pages
+            ),
+            None
+        );
+    }
+
+    /// A section listing (or tag page) is not a note: its links are
+    /// root-anchored, so a slashless href to it does no damage, and the
+    /// server's `errors.json` does not report one either. The two checkers
+    /// must agree.
+    #[test]
+    fn test_classify_link_target_listing_without_trailing_slash_is_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+
+        let dir_path = temp_path.join("folder");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        std::fs::write(dir_path.join("index.html"), "listing").unwrap();
+
+        let valid_files = build_valid_files(&temp_path);
+        assert_eq!(
+            classify_link_target(
+                &dir_path,
+                "../folder",
+                &temp_path,
+                &valid_files,
+                &no_pages()
+            ),
             None
         );
     }
@@ -3419,7 +3490,7 @@ mod tests {
         // This is important because the link indexer creates directories
         // with just links.json for pages that don't exist
         assert_eq!(
-            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files),
+            classify_link_target(&dir_path, "docs/", &temp_path, &valid_files, &no_pages()),
             Some(BrokenLinkReason::Missing)
         );
     }
@@ -3434,7 +3505,13 @@ mod tests {
         // Non-existent path
         let missing = temp_path.join("nonexistent");
         assert_eq!(
-            classify_link_target(&missing, "nonexistent", &temp_path, &valid_files),
+            classify_link_target(
+                &missing,
+                "nonexistent",
+                &temp_path,
+                &valid_files,
+                &no_pages()
+            ),
             Some(BrokenLinkReason::Missing)
         );
     }
@@ -3454,7 +3531,13 @@ mod tests {
 
         let valid_files = build_valid_files(temp.path());
         assert_eq!(
-            classify_link_target(&outside, "../secret.html", &output_dir, &valid_files),
+            classify_link_target(
+                &outside,
+                "../secret.html",
+                &output_dir,
+                &valid_files,
+                &no_pages()
+            ),
             Some(BrokenLinkReason::EscapesSiteRoot)
         );
     }
@@ -3474,14 +3557,26 @@ mod tests {
         // Path with trailing slash should check for index.html
         let path_with_slash = temp_path.join("docs/");
         assert_eq!(
-            classify_link_target(&path_with_slash, "docs/", &temp_path, &valid_files),
+            classify_link_target(
+                &path_with_slash,
+                "docs/",
+                &temp_path,
+                &valid_files,
+                &no_pages()
+            ),
             None
         );
 
         // Non-existent directory with trailing slash
         let missing_with_slash = temp_path.join("missing/");
         assert_eq!(
-            classify_link_target(&missing_with_slash, "missing/", &temp_path, &valid_files),
+            classify_link_target(
+                &missing_with_slash,
+                "missing/",
+                &temp_path,
+                &valid_files,
+                &no_pages()
+            ),
             Some(BrokenLinkReason::Missing)
         );
     }

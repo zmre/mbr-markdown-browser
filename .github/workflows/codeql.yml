@@ -72,7 +72,7 @@ jobs:
     # Builds the Rust static library via Nix so swiftc can link against it.
     - name: Install Nix
       if: matrix.language == 'swift'
-      uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3.24.1
+      uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
 
     - name: Setup Cachix
       if: matrix.language == 'swift'
@@ -94,7 +94,7 @@ jobs:
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4.38.2
+      uses: github/codeql-action/init@v4.39.3
       with:
         languages: ${{ matrix.language }}
         dependency-caching: true
@@ -162,6 +162,6 @@ jobs:
           apple/quicklook/MBRThumbnail/WebSnapshotter.swift
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4.38.2
+      uses: github/codeql-action/analyze@v4.39.3
       with:
         category: "/language:${{matrix.language}}"

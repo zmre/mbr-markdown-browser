@@ -234,9 +234,11 @@ main > section[data-theme="dark"] {
   padding: var(--pico-block-spacing-vertical) 0;
 }
 
-.subtitle main h1 + h2 {
-  margin-top: -0.8em;
+.subtitle main > section > h1:first-of-type + h2,
+.subtitle main > h1:first-of-type + h2 {
+  margin-top: -0.6em;
   padding-top: 0;
+  color: var(--pico-muted-color);
 }
 
 body > header {
@@ -852,6 +854,39 @@ li:has(> p > .mbr-task-check) {
   /* Vertically centre against the text rather than sitting on the baseline. */
   vertical-align: middle;
   margin-inline-end: 0.4em;
+}
+
+/*
+ * The checkbox stands in for the bullet, so it hangs in the bullet's gutter
+ * (the list's own padding, kept after `list-style: none` drops the marker) and
+ * a task's text starts in the same column as a plain item's text at every
+ * depth. Before, the checkbox sat where the text would have been, pushing the
+ * task's text one checkbox further in than its neighbours'. A negative start
+ * margin exactly as wide as the box and its gap does it, in the checkbox's own
+ * `em` (Pico's `width: 1.25em` is in that unit too), so it holds at any font
+ * size; a wrapped line then starts under the first line's text, a hanging
+ * indent for free. `:first-child` keeps it to the box the renderer puts at the
+ * head of the item (the second selector: a loose list's paragraph).
+ */
+li > .mbr-task-check:first-child,
+li > p:first-child > .mbr-task-check:first-child {
+  /* Pico's box width plus the gap set above. */
+  margin-inline-start: calc(-1 * (1.25em + 0.4em));
+}
+
+/* A kanban card is a box with no gutter: a task as a card's title keeps its
+ * checkbox inside the card (the page board and the slides' board alike). Card
+ * contents have their own gutter rule below. */
+:is(.kanban, .mbr-kanban-column)
+  > :is(ul, ol)
+  > li
+  > .mbr-task-check:first-child,
+:is(.kanban, .mbr-kanban-column)
+  > :is(ul, ol)
+  > li
+  > p:first-child
+  > .mbr-task-check:first-child {
+  margin-inline-start: 0;
 }
 
 /* Only when editing is on does `mbr-task-doc.ts` drop `disabled` and add this

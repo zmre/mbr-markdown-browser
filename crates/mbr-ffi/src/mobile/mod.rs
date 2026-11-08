@@ -338,7 +338,7 @@ impl LoadedConfig {
                 error: None,
             },
             Err(e) => {
-                let message = config_error_message(&e);
+                let message = mbr_core::config::config_error_message(&e);
                 tracing::warn!(
                     "{} not used, opening with the default configuration: {message}",
                     root.join(".mbr/config.toml").display()
@@ -350,36 +350,6 @@ impl LoadedConfig {
             }
         }
     }
-}
-
-/// What went wrong with the configuration, in one line a reader can act on.
-///
-/// A parse failure's useful part — the file, key and line figment reports —
-/// is not in `ConfigError::ParseFailed`'s `Display` and not exposed as its
-/// `source`, so it is unwrapped here rather than changing the desktop's
-/// error text.
-fn config_error_message(error: &mbr_core::MbrError) -> String {
-    match error {
-        mbr_core::MbrError::Config(mbr_core::errors::ConfigError::ParseFailed(figment)) => {
-            format!("{error}: {figment}")
-        }
-        other => error_chain(other),
-    }
-}
-
-/// An error and its sources, one line.
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let text = cause.to_string();
-        if !message.contains(&text) {
-            message.push_str(": ");
-            message.push_str(&text);
-        }
-        source = cause.source();
-    }
-    message
 }
 
 #[cfg_attr(target_vendor = "apple", uniffi::export)]
@@ -885,7 +855,7 @@ async fn rebuild(
         ConfigRead::NotDownloaded => return Ok(Rebuilt::NotDownloaded),
     };
     apply_mobile_overrides(&mut loaded.config, root);
-    if same_config(&loaded.config, &served.config) && loaded.error == served.config_error {
+    if loaded.config.same_settings(&served.config) && loaded.error == served.config_error {
         tracing::info!("config.toml changed on disk, but not its configuration");
         return Ok(Rebuilt::Unchanged);
     }
@@ -906,14 +876,6 @@ async fn rebuild(
         }
     );
     Ok(Rebuilt::New(Box::new(next)))
-}
-
-/// Whether two configurations are the same, field for field.
-fn same_config(a: &Config, b: &Config) -> bool {
-    match (serde_json::to_value(a), serde_json::to_value(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
 }
 
 /// Writes the repository's snapshot to `cache`, off the async threads.

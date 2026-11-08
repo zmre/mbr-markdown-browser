@@ -33,7 +33,7 @@ pub mod open_picker;
 #[cfg(feature = "watcher")]
 pub use mbr_server::watcher;
 #[cfg(feature = "server")]
-pub use mbr_server::{file_write, link_grep, link_rewrite, server};
+pub use mbr_server::{file_write, link_grep, link_rewrite, live, server};
 
 #[cfg(feature = "ssg")]
 pub use mbr_ssg::build;

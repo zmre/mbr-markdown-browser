@@ -321,7 +321,7 @@ docs/
     └── diagram.png
 ```
 
-The same goes for raw HTML in a note. A relative URL in a quoted `src`, `srcset`, `href` or `poster` attribute, such as `<img src="docs/images/hero.png" width="900">` in a README, resolves the way the equivalent markdown image or link does. In a `srcset` (`<source srcset="hero-dark.png 1x, hero-dark@2x.png 2x">` in a `<picture>`) each URL is resolved and its `1x`/`640w` descriptor kept. mbr adjusts it for the trailing-slash URL the page is served at and for static builds. A `.md` target in `href` becomes the page's URL. Absolute URLs, `#anchors`, `mailto:`, `data:` and the like are left as written. Unquoted values, `srcset` URLs that contain a comma, and an attribute whose name and value sit on different lines are not rewritten.
+The same goes for raw HTML in a note. A relative URL in a quoted `src`, `srcset`, `href` or `poster` attribute, such as `<img src="docs/images/hero.png" width="900">` in a README, resolves the way the equivalent markdown image or link does. In a `srcset` (`<source srcset="hero-dark.png 1x, hero-dark@2x.png 2x">` in a `<picture>`) each URL is resolved and its `1x`/`640w` descriptor kept. mbr adjusts it for the trailing-slash URL the page is served at and for static builds. A `.md` target in `href` becomes the page's URL, and a root-relative link to a page or folder (`/notes/abc`) gains its trailing slash. Other absolute URLs, `#anchors`, `mailto:`, `data:` and the like are left as written. Unquoted values, `srcset` URLs that contain a comma, and an attribute whose name and value sit on different lines are not rewritten.
 
 ### Static Folder
 

@@ -142,18 +142,28 @@ trailing-slash convention:
 | `../folder/file.md` | `../../folder/file/` | `/folder/file/` |
 | `photo.png` | `../photo.png` | `/docs/photo.png` |
 | `Makefile` | `../Makefile` | `/docs/Makefile` |
+| `../folder` (a folder) | `../../folder/` | `/folder/` |
 | `/docs/other/` | unchanged (server) | `/docs/other/` |
+| `/docs/other` | `/docs/other/` (server) | `/docs/other/` |
+| `/docs/other.md` | `/docs/other/` (server) | `/docs/other/` |
+| `/LICENSE` | unchanged (server) | `/LICENSE` |
 | `https://…`, `mailto:…` | unchanged | off-site |
+
+In a static build root-relative hrefs are additionally made relative to the
+page (`/docs/other` → `../../docs/other/` from `/docs/guide/`).
 
 The extra `../` on non-index pages compensates for the trailing slash; index
 pages already sit at a directory URL and get none.
 
-An **extension-less** target is ambiguous — `../folder/file` could be a markdown
-page or a file literally named `file`. Guessing either way corrupts the other
-(`LICENSE`, `Makefile`, `Dockerfile` are real, common link targets), so mbr asks
-the repository through the same path resolver a live request uses. Contexts with
-no repository — CLI and QuickLook rendering — treat an extension-less target as
-a static file.
+An **extension-less** target, relative or root-relative, is ambiguous —
+`../folder/file` could be a markdown page or a file literally named `file`.
+Guessing either way corrupts the other (`LICENSE`, `Makefile`, `Dockerfile` are
+real, common link targets), so mbr asks the repository through the same path
+resolver a live request uses (`directory_url_probe`). Anything served at a
+directory-style URL — a markdown page, a folder with or without an index note, a
+tag page — gets its trailing slash; a static file or a missing target is left as
+written. Contexts with no repository — CLI and QuickLook rendering — treat an
+extension-less target as a static file.
 
 ### Link validation
 
@@ -165,9 +175,12 @@ a static file.
 Both read the href that was actually emitted rather than re-deriving one from
 the markdown source: a checker that re-derives re-applies the same rules the
 transform used, so a transform defect is invisible to it by construction. Both
-report three kinds of problem — a target that does not exist, a page link
-missing its trailing slash, and a `../` chain that escapes the repository root
-(which browsers silently clamp).
+report three kinds of problem — a target that does not exist, a link to a
+markdown page missing its trailing slash, and a `../` chain that escapes the
+repository root (which browsers silently clamp). The trailing slash is demanded
+only of markdown pages, whose bodies hold links relative to their own location;
+a slashless link to a folder listing or tag page works (their links are
+site-anchored), and both checkers accept it.
 
 Links into mbr's own `/.mbr/` namespace are skipped in server/GUI mode: the
 media viewers (`/.mbr/videos/?path=…` and friends) and the JSON endpoints are

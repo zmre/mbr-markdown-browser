@@ -436,8 +436,8 @@ export class MbrPageErrorsElement extends LitElement {
       <section class="error-group">
         <h3>Configuration ignored (${items.length})</h3>
         <p>
-          <code>.mbr/config.toml</code> could not be loaded, so every page uses
-          the default settings until it is fixed.
+          <code>.mbr/config.toml</code> could not be loaded, so its current
+          contents are not in effect until it is fixed.
         </p>
         <ul>
           ${items.map(

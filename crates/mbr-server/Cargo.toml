@@ -28,6 +28,7 @@ media-metadata = ["mbr-core/media-metadata"]
 mbr-core.workspace = true
 
 aho-corasick.workspace = true
+arc-swap.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures.workspace = true

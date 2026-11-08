@@ -29,6 +29,13 @@ These are pulldown-cmark's built-in extensions:
 | [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$`, or a ` ```latex `, ` ```katex `, ` ```math ` or ` ```asciimath ` fence | LaTeX (or AsciiMath) via KaTeX; see [Math with KaTeX](#math-with-katex) |
 | [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
 
+Links to other notes work in every common spelling: `[x](../abc.md)`,
+`[x](../abc)`, `[x](../abc/)`, `[x](/abc)` and `[x](/abc.md)` all reach
+`abc.md`, and a link to a folder (`[x](../projects)`) reaches its index note or
+listing. mbr writes each one out at the page's canonical URL (`…/abc/`), so the
+link works the same in the server, the GUI and a static build. An extension-less
+target that is a real file (`[license](../LICENSE)`) is left as written.
+
 When several notes answer to one wikilink name, mbr picks the first
 (lexicographically smallest URL) and reports the ambiguity in the page-problems
 panel of the page containing the link — the only place that can say which note

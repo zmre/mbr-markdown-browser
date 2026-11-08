@@ -1987,7 +1987,7 @@ mod tests {
                     is_index_file: *is_index,
                     url_depth: None,
                     current_page_url: (*page_url).to_string(),
-                    markdown_page_probe: None,
+                    directory_url_probe: None,
                 },
                 None,
                 true,

@@ -278,6 +278,10 @@ struct LinkIndexConfig {
     index_file: String,
     markdown_extensions: Vec<String>,
     valid_tag_sources: HashSet<String>,
+    /// The page render's own probe (built from the same resolver
+    /// configuration, [`owned_resolver_config`]'s inputs), so an extension-less
+    /// or root-relative link is canonicalized here exactly as on the page.
+    directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
 }
 
 /// Parse one markdown file and record its contribution to the backlink index.
@@ -305,7 +309,7 @@ fn index_page_links(
         is_index_file,
         url_depth: None,
         current_page_url: url_path.to_string(),
-        markdown_page_probe: None,
+        directory_url_probe: Some(cfg.directory_url_probe.clone()),
     };
 
     match markdown::extract_outbound_links_from_vault(
@@ -1214,6 +1218,71 @@ pub struct Server {
     /// The templates the router renders with (shared: a reload is seen by
     /// every request), for [`Server::reload_templates`].
     templates: mbr_core::templates::Templates,
+    /// The change channel: the watcher, the server's own writes and every
+    /// live-reload WebSocket. Handed on to the next server by a configuration
+    /// reload ([`Server::reinit`]), so the sockets and the watcher outlive it.
+    file_change_tx: broadcast::Sender<mbr_core::change_event::FileChangeEvent>,
+    /// Set by [`Server::retire`]: the background tasks subscribed to
+    /// `file_change_tx` stop at their next idle point. Only a reload retires a
+    /// server — the channel it shares never closes, so nothing else would
+    /// stop them.
+    retired: tokio::sync::watch::Sender<bool>,
+    /// What [`Repo::init`] was given, to tell whether the next server may
+    /// keep this repository ([`Server::reinit`]). `None` for embedded storage,
+    /// which is never carried over this way.
+    repo_inputs: Option<serde_json::Value>,
+    /// What the watcher was started with, to tell whether the next server may
+    /// keep it.
+    #[cfg(feature = "watcher")]
+    watcher_inputs: serde_json::Value,
+    oembed_cache: Arc<OembedCache>,
+    oembed_cache_size: usize,
+    link_tracking: bool,
+}
+
+/// The inputs a [`Repo`] is built from, as one comparable value. Two servers
+/// with equal inputs index the same files the same way, so a configuration
+/// reload can keep the repository (and every index built over it) instead of
+/// rescanning. `None` for embedded storage.
+fn repo_inputs(config: &ServerConfig) -> Option<serde_json::Value> {
+    if config.embedded.is_some() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "base_dir": config.base_dir,
+        "static_folder": config.static_folder,
+        "markdown_extensions": config.markdown_extensions,
+        "ignore_dirs": config.ignore_dirs,
+        "ignore_globs": config.ignore_globs,
+        "index_file": config.index_file,
+        "tag_sources": config.tag_sources,
+        "relationship_types": config.relationship_types,
+        "explicit_hidden_dirs": config.explicit_hidden_dirs,
+        "symlink_mounts": config.symlink_mounts,
+        "calendar": config.calendar,
+    }))
+}
+
+/// The inputs the file watcher is started with ([`spawn_file_watcher`]).
+#[cfg(feature = "watcher")]
+fn watcher_inputs(config: &ServerConfig) -> serde_json::Value {
+    serde_json::json!({
+        "base_dir": config.base_dir,
+        "template_folder": config.template_folder,
+        "watcher_ignore_dirs": config.watcher_ignore_dirs,
+        "ignore_globs": config.ignore_globs,
+        "explicit_hidden_dirs": config.explicit_hidden_dirs,
+        "embedded": config.embedded.is_some(),
+    })
+}
+
+/// Resolves once `retired` is set by [`Server::retire`]. Never resolves when
+/// the server was dropped without being retired: a server that is merely
+/// dropped (a test keeping only its router) keeps its tasks, as it always has.
+async fn until_retired(retired: &mut tokio::sync::watch::Receiver<bool>) {
+    if retired.wait_for(|retired| *retired).await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Where the background thread parks the file watcher once it is running.
@@ -1346,6 +1415,8 @@ impl ChangeApplier {
         let relevant_events: Vec<_> = pending_events
             .into_iter()
             .filter(|event| match event.event {
+                // A configuration reload, not a file change.
+                mbr_core::change_event::ChangeEventType::Reloaded => false,
                 mbr_core::change_event::ChangeEventType::Created
                 | mbr_core::change_event::ChangeEventType::Deleted => true,
                 mbr_core::change_event::ChangeEventType::Modified => {
@@ -1635,9 +1706,11 @@ pub struct ServerConfig {
     /// [`EmbeddedStorage`].
     pub embedded: Option<EmbeddedStorage>,
     /// Why the repository's configuration could not be loaded, when the
-    /// embedder fell back to the defaults instead of failing (the iOS app).
-    /// Reported on every page's `errors.json` as `config_parse_error`.
-    /// Always `None` on the desktop, which refuses to start instead.
+    /// server runs without it instead of failing: the iOS app falls back to
+    /// the defaults, a [`crate::live::LiveServer`] reload keeps the last
+    /// configuration that loaded. Reported on every page's `errors.json` as
+    /// `config_parse_error`. `None` at a desktop launch, which refuses to
+    /// start on a broken file.
     pub config_problem: Option<String>,
 }
 
@@ -2460,9 +2533,110 @@ fn render_site_json(
     Ok(axum::body::Bytes::from(serde_json::to_vec(&value)?))
 }
 
+/// Announces the bound address once the listener is up.
+///
+/// In server mode (`-s`) the URL is the whole point of the command and the
+/// user is watching that terminal, so it goes to stdout unchanged. In GUI
+/// mode the window is the affordance and the banner is noise: on Windows a
+/// console-subsystem binary launched from Explorer gets a console window,
+/// and the line lands there, behind the webview the user is actually
+/// looking at. It becomes a `tracing::info!` instead, so `-v` still
+/// surfaces it while the default `warn` level keeps it hidden.
+///
+/// The decision reads the server's `gui_mode` rather than relying on which
+/// start method was called. `start_with_port_retry` happens to be GUI-only
+/// today, but that is incidental and would rot silently the first time a
+/// non-GUI caller wanted port retry.
+pub(crate) fn announce_listening(gui_mode: bool, local_addr: SocketAddr) {
+    tracing::debug!("listening on {}", local_addr);
+    if gui_mode {
+        tracing::info!("Server running at http://{}/", local_addr);
+    } else {
+        println!("Server running at http://{}/", local_addr);
+    }
+}
+
+/// Binds `ip:port`, trying up to `max_retries` successive higher ports while
+/// the address is in use (a warning on stderr for each). Returns the listener
+/// and the port it is bound to.
+pub(crate) async fn bind_with_retry(
+    ip: [u8; 4],
+    mut port: u16,
+    max_retries: u16,
+) -> Result<(tokio::net::TcpListener, u16), ServerError> {
+    let mut attempts = 0;
+    loop {
+        let addr = SocketAddr::from((ip, port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((listener, port)),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
+                let old_port = port;
+                // Fail fast if we've hit the maximum port number
+                if port == 65535 {
+                    return Err(ServerError::BindFailed {
+                        addr: "port range exhausted (reached port 65535)".into(),
+                        source: e,
+                    });
+                }
+                port += 1;
+                attempts += 1;
+                eprintln!("Warning: Port {old_port} already in use, trying port {port}");
+                tracing::warn!("Port {old_port} already in use, trying port {port}");
+            }
+            Err(e) => {
+                return Err(ServerError::BindFailed {
+                    addr: addr.to_string(),
+                    source: e,
+                });
+            }
+        }
+    }
+}
+
+/// Serves `router` on `listener` until the server stops, with each
+/// connection's peer address available to handlers (`ConnectInfo`).
+pub(crate) async fn serve(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), ServerError> {
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(ServerError::StartFailed)
+}
+
 impl Server {
     /// Initialize a new server instance with the given configuration.
     pub fn init(config: ServerConfig) -> Result<Self, ServerError> {
+        Self::init_with(config, None)
+    }
+
+    /// A server for `config` that takes over from `previous` — a
+    /// configuration reload ([`crate::live::LiveServer`]). It reads its
+    /// templates afresh and builds new router state, and reuses what the
+    /// configuration change leaves valid:
+    ///
+    /// - the change channel, always: open live-reload sockets and the
+    ///   server's own write announcements carry on;
+    /// - the repository, with its scan, tag, wikilink and relationship
+    ///   indexes, when its inputs ([`repo_inputs`]) are unchanged — no
+    ///   rescan; otherwise a new one scans in the background, as at startup;
+    /// - the backlink index, with the repository, when link tracking stays on;
+    /// - the file watcher, when its inputs are unchanged; otherwise a new one
+    ///   starts on the same channel;
+    /// - the oembed cache, when its size is unchanged.
+    ///
+    /// Call [`Server::retire`] on `previous` once this one is serving.
+    pub(crate) fn reinit(config: ServerConfig, previous: &Server) -> Result<Self, ServerError> {
+        Self::init_with(config, Some(previous))
+    }
+
+    fn init_with(config: ServerConfig, previous: Option<&Server>) -> Result<Self, ServerError> {
+        let repo_inputs = repo_inputs(&config);
+        #[cfg(feature = "watcher")]
+        let watcher_inputs = watcher_inputs(&config);
         let ServerConfig {
             ip,
             port,
@@ -2514,7 +2688,12 @@ impl Server {
             config_problem,
         } = config;
 
-        let oembed_cache = Arc::new(OembedCache::new(oembed_cache_size));
+        let oembed_cache = match previous {
+            Some(previous) if previous.oembed_cache_size == oembed_cache_size => {
+                Arc::clone(&previous.oembed_cache)
+            }
+            _ => Arc::new(OembedCache::new(oembed_cache_size)),
+        };
 
         // Media metadata (cover JPEGs, chapters, captions) gets its own budget:
         // it used to borrow the oembed *text* cache size, so a couple of dozen
@@ -2563,8 +2742,14 @@ impl Server {
             .map_err(ServerError::TemplateInit)?;
 
         let is_embedded = embedded.is_some();
-        let (repo, snapshot) = match embedded {
-            None => (
+        // A reload that leaves the scan inputs alone keeps the repository:
+        // its scan, if still running, finishes into the same maps.
+        let kept_repo = previous
+            .filter(|previous| repo_inputs.is_some() && previous.repo_inputs == repo_inputs)
+            .map(|previous| Arc::clone(&previous.repo));
+        let (repo, snapshot) = match (&kept_repo, embedded) {
+            (Some(repo), _) => (Arc::clone(repo), None),
+            (None, None) => (
                 Repo::init(
                     &base_dir,
                     &static_folder,
@@ -2577,10 +2762,11 @@ impl Server {
                 )
                 .with_explicit_hidden_dirs(&explicit_hidden_dirs)
                 .with_symlink_mounts(symlink_mounts)
-                .with_calendar(&calendar),
+                .with_calendar(&calendar)
+                .into(),
                 None,
             ),
-            Some(EmbeddedStorage { vault, snapshot }) => (
+            (None, Some(EmbeddedStorage { vault, snapshot })) => (
                 Repo::init_with_vault(
                     vault,
                     static_folder.as_str(),
@@ -2593,11 +2779,11 @@ impl Server {
                 )
                 .with_explicit_hidden_dirs(&explicit_hidden_dirs)
                 .with_calendar(&calendar)
-                .with_change_tracking(),
+                .with_change_tracking()
+                .into(),
                 snapshot,
             ),
         };
-        let repo = Arc::new(repo);
         // Synchronous: restoring is in-memory work (no storage reads), and
         // doing it before the first request is what makes the snapshot's
         // navigation available the moment `init` returns.
@@ -2617,12 +2803,31 @@ impl Server {
         // Created before the scan so the scan can hand the watcher the symlink
         // mounts it discovers; the watcher itself starts further down.
         #[cfg(feature = "watcher")]
-        let watcher_handle: WatcherHandle = Arc::new(std::sync::Mutex::new(None));
+        let kept_watcher = previous
+            .filter(|previous| previous.watcher_inputs == watcher_inputs)
+            .map(|previous| Arc::clone(&previous._watcher_handle));
+        #[cfg(feature = "watcher")]
+        let watcher_handle: WatcherHandle = kept_watcher
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(None)));
         #[cfg(feature = "watcher")]
         let watcher_handle_for_scan = Arc::clone(&watcher_handle);
         let repo_for_scan = Arc::clone(&repo);
         let restored = restored_files.is_some();
-        tokio::task::spawn_blocking(move || {
+        // A kept repository was scanned (or is being scanned) already.
+        let scan = kept_repo.is_none();
+        // A kept repository with a new watcher: hand it the mounts the scan
+        // finds, as the scan below would.
+        #[cfg(feature = "watcher")]
+        if !scan && kept_watcher.is_none() {
+            let repo = Arc::clone(&repo);
+            let watcher_handle = Arc::clone(&watcher_handle);
+            tokio::spawn(async move {
+                repo.wait_for_media().await;
+                sync_watched_mounts(&watcher_handle, &repo);
+            });
+        }
+        let scan_task = move || {
             // A restored index already holds every file; what changed since
             // it was saved is the embedding app's `Server::refresh`.
             if !restored && let Err(e) = repo_for_scan.scan_all() {
@@ -2652,18 +2857,31 @@ impl Server {
 
             // Phase 4: extract text from PDFs/text files for search
             repo_for_scan.ensure_text_extracted();
-        });
+        };
+        if scan {
+            tokio::task::spawn_blocking(scan_task);
+        }
 
-        // Create a broadcast channel for file changes - watcher will be initialized in background
-        let (file_change_tx, _rx) = tokio::sync::broadcast::channel::<
-            mbr_core::change_event::FileChangeEvent,
-        >(mbr_core::change_event::BROADCAST_CAPACITY);
+        // The broadcast channel for file changes (the watcher starts in the
+        // background). A reload keeps the previous server's, so every socket
+        // subscribed to it carries on.
+        let file_change_tx = previous.map_or_else(
+            || {
+                tokio::sync::broadcast::channel::<mbr_core::change_event::FileChangeEvent>(
+                    mbr_core::change_event::BROADCAST_CAPACITY,
+                )
+                .0
+            },
+            |previous| previous.file_change_tx.clone(),
+        );
+        // Stops this server's subscribed tasks once a reload replaces it.
+        let (retired, _) = tokio::sync::watch::channel(false);
 
         // Embedded storage has no watcher: its vault need not be a directory
         // at all, and the platform that embeds it (iOS) has no change events
         // worth the descriptors. `Server::refresh` replaces it.
         #[cfg(feature = "watcher")]
-        let watcher_handle = if is_embedded {
+        let watcher_handle = if is_embedded || kept_watcher.is_some() {
             watcher_handle
         } else {
             spawn_file_watcher(
@@ -2694,13 +2912,18 @@ impl Server {
             .clone()
             .map(|tf| tf.canonicalize().unwrap_or(tf));
         let mut template_change_rx = file_change_tx.subscribe();
+        let mut template_retired = retired.subscribe();
         tokio::spawn(async move {
             loop {
+                let received = tokio::select! {
+                    () = until_retired(&mut template_retired) => break,
+                    received = template_change_rx.recv() => received,
+                };
                 // `while let Ok(..)` here treated a `Lagged` error as the end of
                 // the stream, so one burst of file changes silently disabled
                 // template hot reload for the life of the process — the same
                 // defect as the live-reload WebSocket loop.
-                let event = match live_reload_action(template_change_rx.recv().await) {
+                let event = match live_reload_action(received) {
                     LiveReloadAction::Forward(event) => event,
                     LiveReloadAction::Skip => continue,
                     LiveReloadAction::Close => break,
@@ -2735,18 +2958,39 @@ impl Server {
         // the initial scan (which is what makes the wikilink index — and so
         // link resolution — trustworthy). Until it is ready, links.json falls
         // back to the per-page grep, so startup is not blocked on it.
-        let inbound_index = Arc::new(InboundIndex::new());
+        //
+        // A reload that keeps the repository and link tracking keeps the
+        // index too (and the lock that guards it): rebuilding it reads every
+        // note.
+        let kept_links = previous
+            .filter(|previous| kept_repo.is_some() && previous.link_tracking && link_tracking);
+        let inbound_index = kept_links.map_or_else(
+            || Arc::new(InboundIndex::new()),
+            |previous| Arc::clone(&previous.changes.inbound_index),
+        );
         // Serializes the initial full build against the watcher's incremental
         // updates. Both mutate the same index, and an update that interleaves
         // with the build can be silently undone by it.
-        let index_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let index_lock = kept_links.map_or_else(
+            || Arc::new(tokio::sync::Mutex::new(())),
+            |previous| Arc::clone(&previous.changes.index_lock),
+        );
         let link_index_config = LinkIndexConfig {
             base_dir: base_dir.clone(),
             index_file: index_file.clone(),
             markdown_extensions: markdown_extensions.clone(),
             valid_tag_sources: mbr_core::config::tag_sources_to_set(&tag_sources),
+            directory_url_probe: mbr_core::link_transform::filesystem_directory_url_probe(
+                mbr_core::path_resolver::OwnedPathResolverConfig::for_repo(
+                    &repo,
+                    &static_folder,
+                    &markdown_extensions,
+                    &index_file,
+                    mbr_core::config::tag_sources_to_url_sources(&tag_sources),
+                ),
+            ),
         };
-        if link_tracking {
+        if link_tracking && kept_links.is_none() {
             let repo_for_index = Arc::clone(&repo);
             let index_for_build = Arc::clone(&inbound_index);
             let cfg_for_build = link_index_config.clone();
@@ -2775,8 +3019,9 @@ impl Server {
         // listed here would be a result that cannot be opened. An empty marker
         // list is the constructor's off switch.
         //
-        // Read once, at startup, exactly like `tasks_ignore_globs` — flipping
-        // `mark_incomplete` takes a restart.
+        // Read once per server, exactly like `tasks_ignore_globs`: flipping
+        // `mark_incomplete` takes a configuration reload, which builds a new
+        // (empty, lazy) index (`Server::reinit`).
         let task_index = Arc::new(mbr_core::task_index::TaskIndex::with_markers(
             &tasks_ignore_globs,
             if mark_incomplete {
@@ -2812,10 +3057,18 @@ impl Server {
         // For large batches: full clear + rescan.
         let applier_for_task = change_applier.clone();
         let mut repo_change_rx = file_change_tx.subscribe();
+        let mut change_retired = retired.subscribe();
         tokio::spawn(async move {
             loop {
-                // Wait for the first event
-                let first_event = match repo_change_rx.recv().await {
+                // Wait for the first event. A retired server stops here, never
+                // inside a batch: one it has started is applied in full (the
+                // server replacing it applies the same events too, which is
+                // idempotent).
+                let received = tokio::select! {
+                    () = until_retired(&mut change_retired) => break,
+                    received = repo_change_rx.recv() => received,
+                };
+                let first_event = match received {
                     Ok(e) => e,
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2880,12 +3133,12 @@ impl Server {
             templates,
             repo,
             oembed_timeout_ms,
-            file_change_tx: Some(file_change_tx),
+            file_change_tx: Some(file_change_tx.clone()),
             template_folder,
             sort,
             gui_mode,
             theme,
-            oembed_cache,
+            oembed_cache: Arc::clone(&oembed_cache),
             #[cfg(feature = "media-metadata")]
             video_metadata_cache,
             #[cfg(feature = "media-metadata")]
@@ -2998,7 +3251,35 @@ impl Server {
             changes: change_applier,
             restored_files,
             templates: templates_for_server,
+            file_change_tx,
+            retired,
+            repo_inputs,
+            #[cfg(feature = "watcher")]
+            watcher_inputs,
+            oembed_cache,
+            oembed_cache_size,
+            link_tracking,
         })
+    }
+
+    /// Stops this server's background tasks — template hot reload and the
+    /// debounced index updates — at their next idle point, once a reload has
+    /// put a [`Server::reinit`] successor in its place. Requests already
+    /// running on its router finish normally.
+    pub(crate) fn retire(&self) {
+        self.retired.send_replace(true);
+    }
+
+    /// Whether [`Server::retire`] was called.
+    #[cfg(test)]
+    pub(crate) fn is_retired(&self) -> bool {
+        *self.retired.borrow()
+    }
+
+    /// The change channel: what the watcher and the server's own writes
+    /// broadcast and live-reload sockets forward.
+    pub fn file_changes(&self) -> &broadcast::Sender<mbr_core::change_event::FileChangeEvent> {
+        &self.file_change_tx
     }
 
     /// Re-reads the templates from `.mbr/` (or the template folder), as the
@@ -3046,27 +3327,9 @@ impl Server {
         diff
     }
 
-    /// Announces the bound address once the listener is up.
-    ///
-    /// In server mode (`-s`) the URL is the whole point of the command and the
-    /// user is watching that terminal, so it goes to stdout unchanged. In GUI
-    /// mode the window is the affordance and the banner is noise: on Windows a
-    /// console-subsystem binary launched from Explorer gets a console window,
-    /// and the line lands there, behind the webview the user is actually
-    /// looking at. It becomes a `tracing::info!` instead, so `-v` still
-    /// surfaces it while the default `warn` level keeps it hidden.
-    ///
-    /// The decision reads `self.gui_mode` rather than relying on which start
-    /// method was called. `start_with_port_retry` happens to be GUI-only today,
-    /// but that is incidental and would rot silently the first time a
-    /// non-GUI caller wanted port retry.
+    /// Announces the bound address; see [`announce_listening`].
     fn announce_listening(&self, local_addr: SocketAddr) {
-        tracing::debug!("listening on {}", local_addr);
-        if self.gui_mode {
-            tracing::info!("Server running at http://{}/", local_addr);
-        } else {
-            println!("Server running at http://{}/", local_addr);
-        }
+        announce_listening(self.gui_mode, local_addr);
     }
 
     pub async fn start(&self) -> Result<(), ServerError> {
@@ -3079,14 +3342,7 @@ impl Server {
         &self,
         ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<(), ServerError> {
-        let addr = SocketAddr::from((self.ip, self.port));
-        let listener =
-            tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| ServerError::BindFailed {
-                    addr: addr.to_string(),
-                    source: e,
-                })?;
+        let (listener, _) = bind_with_retry(self.ip, self.port, 0).await?;
         let local_addr = listener
             .local_addr()
             .map_err(ServerError::LocalAddrFailed)?;
@@ -3099,15 +3355,7 @@ impl Server {
             tracing::debug!("Ready signal receiver dropped (shutdown in progress)");
         }
 
-        axum::serve(
-            listener,
-            self.router
-                .clone()
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .map_err(ServerError::StartFailed)?;
-        Ok(())
+        serve(listener, self.router.clone()).await
     }
 
     /// Starts the server with automatic port retry on address-in-use errors.
@@ -3123,63 +3371,21 @@ impl Server {
         ready_tx: Option<tokio::sync::oneshot::Sender<u16>>,
         max_retries: u16,
     ) -> Result<(), ServerError> {
-        let mut attempts = 0;
+        let (listener, port) = bind_with_retry(self.ip, self.port, max_retries).await?;
+        self.port = port;
+        let local_addr = listener
+            .local_addr()
+            .map_err(ServerError::LocalAddrFailed)?;
+        self.announce_listening(local_addr);
 
-        loop {
-            let addr = SocketAddr::from((self.ip, self.port));
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    let local_addr = listener
-                        .local_addr()
-                        .map_err(ServerError::LocalAddrFailed)?;
-                    self.announce_listening(local_addr);
-
-                    // Signal that server is ready with the actual port
-                    if let Some(tx) = ready_tx
-                        && tx.send(self.port).is_err()
-                    {
-                        tracing::debug!("Port signal receiver dropped (shutdown in progress)");
-                    }
-
-                    axum::serve(
-                        listener,
-                        self.router
-                            .clone()
-                            .into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .await
-                    .map_err(ServerError::StartFailed)?;
-                    return Ok(());
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < max_retries => {
-                    let old_port = self.port;
-                    // Fail fast if we've hit the maximum port number
-                    if self.port == 65535 {
-                        return Err(ServerError::BindFailed {
-                            addr: "port range exhausted (reached port 65535)".into(),
-                            source: e,
-                        });
-                    }
-                    self.port += 1;
-                    attempts += 1;
-                    eprintln!(
-                        "Warning: Port {} already in use, trying port {}",
-                        old_port, self.port
-                    );
-                    tracing::warn!(
-                        "Port {} already in use, trying port {}",
-                        old_port,
-                        self.port
-                    );
-                }
-                Err(e) => {
-                    return Err(ServerError::BindFailed {
-                        addr: addr.to_string(),
-                        source: e,
-                    });
-                }
-            }
+        // Signal that server is ready with the actual port
+        if let Some(tx) = ready_tx
+            && tx.send(port).is_err()
+        {
+            tracing::debug!("Port signal receiver dropped (shutdown in progress)");
         }
+
+        serve(listener, self.router.clone()).await
     }
 
     /// WebSocket handler for live reload file change notifications.
@@ -6222,7 +6428,13 @@ impl Server {
                         is_index_file,
                         url_depth: None,
                         current_page_url: page_url_path.clone(),
-                        markdown_page_probe: None,
+                        // The page render's probe: links.json must list the
+                        // hrefs the page shows, canonical slash included.
+                        directory_url_probe: Some(
+                            mbr_core::link_transform::filesystem_directory_url_probe(
+                                owned_resolver_config(config),
+                            ),
+                        ),
                     };
 
                     // Kept for resolving the collected links against this
@@ -6514,8 +6726,8 @@ impl Server {
                     // so a checker rendering without the probe would report
                     // every extension-less markdown link as non-canonical while
                     // the page a reader sees is perfectly fine.
-                    markdown_page_probe: Some(
-                        mbr_core::link_transform::filesystem_markdown_page_probe(
+                    directory_url_probe: Some(
+                        mbr_core::link_transform::filesystem_directory_url_probe(
                             owned_resolver_config(config),
                         ),
                     ),
@@ -7571,7 +7783,7 @@ impl Server {
             // markdown targets must come out with the trailing slash their
             // canonical URL has, or every relative link on the page they lead
             // to resolves one directory too high.
-            markdown_page_probe: Some(mbr_core::link_transform::filesystem_markdown_page_probe(
+            directory_url_probe: Some(mbr_core::link_transform::filesystem_directory_url_probe(
                 owned_resolver_config(config),
             )),
         };
@@ -9231,6 +9443,66 @@ mod tests {
         )
     }
 
+    /// The [`LinkIndexConfig`] `Server::init` builds for `fixture_repo`.
+    fn test_link_index_config(repo: &Repo, root: &Path) -> LinkIndexConfig {
+        LinkIndexConfig {
+            base_dir: root.to_path_buf(),
+            index_file: "index.md".to_string(),
+            markdown_extensions: vec!["md".to_string()],
+            valid_tag_sources: HashSet::new(),
+            directory_url_probe: mbr_core::link_transform::filesystem_directory_url_probe(
+                mbr_core::path_resolver::OwnedPathResolverConfig::for_repo(
+                    repo,
+                    "static",
+                    &["md".to_string()],
+                    "index.md",
+                    Vec::new(),
+                ),
+            ),
+        }
+    }
+
+    /// Regression: a note linked only by extension-less spellings — relative
+    /// (`[x](../target)`), root-relative (`[x](/target)`) and a folder with an
+    /// index (`[x](/folder)`) — must still show those backlinks. The index
+    /// canonicalizes links with the page render's own probe.
+    #[test]
+    fn test_inbound_index_counts_extensionless_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        std::fs::write(root.join("target.md"), "# Target\n").unwrap();
+        std::fs::write(root.join("folder/index.md"), "# Folder\n").unwrap();
+        std::fs::write(
+            root.join("rooted.md"),
+            "# Rooted\n\nSee [t](/target) and [f](/folder).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/relative.md"),
+            "# Relative\n\nSee [t](../target) and [f](../folder).\n",
+        )
+        .unwrap();
+
+        let repo = Arc::new(fixture_repo(&root));
+        repo.scan_all().unwrap();
+        repo.build_wikilink_index();
+
+        let index = InboundIndex::new();
+        populate_inbound_index(&repo, &index, &test_link_index_config(&repo, &root));
+
+        for page in ["/target/", "/folder/"] {
+            let mut sources: Vec<String> = index.get(page).into_iter().map(|l| l.from).collect();
+            sources.sort();
+            assert_eq!(
+                sources,
+                ["/docs/relative/", "/rooted/"],
+                "backlinks of {page}"
+            );
+        }
+    }
+
     /// The backlink index must report exactly what the full-repository grep it
     /// replaces reported.
     ///
@@ -9272,12 +9544,7 @@ mod tests {
         repo.scan_all().unwrap();
         repo.build_wikilink_index();
 
-        let cfg = LinkIndexConfig {
-            base_dir: root.clone(),
-            index_file: "index.md".to_string(),
-            markdown_extensions: vec!["md".to_string()],
-            valid_tag_sources: HashSet::new(),
-        };
+        let cfg = test_link_index_config(&repo, &root);
         let index = InboundIndex::new();
         populate_inbound_index(&repo, &index, &cfg);
         assert!(index.is_ready());

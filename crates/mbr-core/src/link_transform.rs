@@ -20,33 +20,55 @@
 
 use std::sync::Arc;
 
-/// Answers "does this absolute, percent-decoded site URL address a markdown
-/// page?" for an authored link target that carries no markdown extension.
+/// Answers "is this absolute site URL served at a directory-style URL?" for an
+/// authored link target that carries no markdown extension.
 ///
-/// See [`LinkTransformConfig::markdown_page_probe`] for why this is a
+/// Yes means the canonical spelling of the target ends in `/`: a markdown page
+/// (`docs/guide.md` → `/docs/guide/`, or a folder with an index file), a folder
+/// listing, a tag page or a tag source index. No means a static file (or
+/// nothing at all), whose URL must be left exactly as authored.
+///
+/// See [`LinkTransformConfig::directory_url_probe`] for why this is a
 /// caller-supplied predicate rather than a guess.
-pub type MarkdownPageProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+pub type DirectoryUrlProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Whether a resolved request is served at a directory-style URL — the one
+/// statement of "this link target wants a trailing slash".
+///
+/// Everything mbr renders as a page qualifies; a static file, a redirect (the
+/// browser is sent to the canonical URL anyway) and a miss do not. Kept apart
+/// from the probe so the set is visible and testable without a filesystem.
+pub fn is_served_at_directory_url(resolved: &crate::path_resolver::ResolvedPath) -> bool {
+    use crate::path_resolver::ResolvedPath;
+    match resolved {
+        ResolvedPath::MarkdownFile(_)
+        | ResolvedPath::DirectoryListing(_)
+        | ResolvedPath::TagPage { .. }
+        | ResolvedPath::TagSourceIndex { .. } => true,
+        ResolvedPath::StaticFile(_) | ResolvedPath::Redirect(_) | ResolvedPath::NotFound => false,
+    }
+}
 
 /// Builds the probe used in server and build mode: ask the *path resolver* —
-/// the very code a live HTTP request goes through — whether the URL resolves to
-/// a markdown file.
+/// the very code a live HTTP request goes through — what the URL resolves to,
+/// and judge it with [`is_served_at_directory_url`].
 ///
 /// Reusing the resolver rather than re-deriving candidate filenames is the
 /// point: this cannot disagree with what the server actually serves, which is
 /// the class of bug that produced the trailing-slash defect in the first place.
 ///
-/// The cost is paid only for *extension-less relative* link targets — `.md`
-/// links, root-relative URLs, anchors and external URLs never reach it — and is
-/// a handful of `stat` calls.
-pub fn filesystem_markdown_page_probe(
+/// The cost is paid only for *extension-less* internal link targets that do
+/// not already end in `/` — `.md` links, anchors and external URLs never reach
+/// it — and is a handful of `stat` calls.
+pub fn filesystem_directory_url_probe(
     resolver: crate::path_resolver::OwnedPathResolverConfig,
-) -> MarkdownPageProbe {
+) -> DirectoryUrlProbe {
     Arc::new(move |absolute_url: &str| {
         let request_path = crate::path_resolver::normalize_link_target(absolute_url);
-        matches!(
-            crate::path_resolver::resolve_request_path(&resolver.as_config(), &request_path),
-            crate::path_resolver::ResolvedPath::MarkdownFile(_)
-        )
+        is_served_at_directory_url(&crate::path_resolver::resolve_request_path(
+            &resolver.as_config(),
+            &request_path,
+        ))
     })
 }
 
@@ -69,24 +91,27 @@ pub struct LinkTransformConfig {
     /// current page context (e.g. CLI/QuickLook paths, which never resolve
     /// wikilinks globally).
     pub current_page_url: String,
-    /// Decides whether an **extension-less** relative target names a markdown
-    /// page (`[x](../folder/file)`) or a genuinely extension-less static file
+    /// Decides whether an **extension-less** target — relative
+    /// (`[x](../folder/file)`) or root-relative (`[x](/folder/file)`) — names
+    /// something served at a directory-style URL (a markdown page, a folder
+    /// listing, a tag page) or a genuinely extension-less static file
     /// (`[license](../LICENSE)`).
     ///
-    /// Markdown pages are served at directory-style URLs, so a link to one must
-    /// end in `/`; a static file must not. Nothing in the href distinguishes
-    /// the two and guessing either way corrupts the other, so the repository
-    /// has to answer. `None` means "no repository context" — CLI/QuickLook
-    /// rendering, link-grep and unit tests — and preserves the historical
-    /// behaviour of treating an extension-less target as a static file.
+    /// Pages and listings are served at directory-style URLs, so a link to one
+    /// should end in `/`; a static file must not. Nothing in the href
+    /// distinguishes the two and guessing either way corrupts the other, so the
+    /// repository has to answer. `None` means "no repository context" —
+    /// CLI/QuickLook rendering, link-grep and unit tests — and preserves the
+    /// historical behaviour of treating an extension-less target as a static
+    /// file.
     ///
-    /// Called with the target's **absolute** site URL, already resolved against
-    /// [`Self::current_page_url`], so a probe never reimplements relative-path
-    /// arithmetic.
-    pub markdown_page_probe: Option<MarkdownPageProbe>,
+    /// Called with the target's **absolute** site URL — a relative target is
+    /// first resolved against [`Self::current_page_url`] — so a probe never
+    /// reimplements relative-path arithmetic.
+    pub directory_url_probe: Option<DirectoryUrlProbe>,
 }
 
-/// Hand-written because [`MarkdownPageProbe`] is a closure and cannot derive
+/// Hand-written because [`DirectoryUrlProbe`] is a closure and cannot derive
 /// `Debug`; only its presence is worth printing.
 impl std::fmt::Debug for LinkTransformConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,7 +121,7 @@ impl std::fmt::Debug for LinkTransformConfig {
             .field("is_index_file", &self.is_index_file)
             .field("url_depth", &self.url_depth)
             .field("current_page_url", &self.current_page_url)
-            .field("markdown_page_probe", &self.markdown_page_probe.is_some())
+            .field("directory_url_probe", &self.directory_url_probe.is_some())
             .finish()
     }
 }
@@ -109,12 +134,12 @@ impl Default for LinkTransformConfig {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         }
     }
 }
 
-/// Transform a relative link URL for the trailing-slash URL convention.
+/// Transform a link URL for the trailing-slash URL convention.
 ///
 /// # Rules
 ///
@@ -122,11 +147,16 @@ impl Default for LinkTransformConfig {
 /// 2. External URLs — anything with a scheme (`https:`, `mailto:`, `magnet:`,
 ///    `blob:`, …) or protocol-relative (`//host`) → unchanged, as decided by
 ///    [`crate::url_path::is_external_url`]
-/// 3. Root-relative URLs (starts with `/`) → unchanged
+/// 3. Root-relative URLs (starts with `/`) → markdown extension replaced with
+///    `/` (index files collapse to their folder), an extension-less target
+///    gains `/` when [`LinkTransformConfig::directory_url_probe`] says it is
+///    served at a directory-style URL, `/.mbr/…` untouched; then, in build
+///    mode ([`LinkTransformConfig::url_depth`]), made relative to the page
 /// 4. Relative markdown links → prepend `../` (if not index file), replace extension with `/`
 /// 5. Relative **extension-less** targets → prepend `../` (if not index file),
-///    and append `/` when [`LinkTransformConfig::markdown_page_probe`] says the
-///    target is a markdown page
+///    and append `/` when [`LinkTransformConfig::directory_url_probe`] says the
+///    target is served at a directory-style URL (a markdown page, a folder
+///    listing, a tag page)
 /// 6. Relative static files → prepend `../` (if not index file)
 ///
 /// # Examples
@@ -140,7 +170,7 @@ impl Default for LinkTransformConfig {
 ///     is_index_file: false,
 ///     url_depth: None,
 ///     current_page_url: String::new(),
-///     markdown_page_probe: None,
+///     directory_url_probe: None,
 /// };
 ///
 /// // Regular markdown file: add ../ and trailing slash
@@ -174,11 +204,14 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
         return url.to_string();
     }
 
-    // Root-relative URLs — convert to relative in build mode
+    // Root-relative URLs: canonicalize against the site root (no `../`
+    // compensation — they do not depend on the page's location), then
+    // relativize by page depth in build mode.
     if url.starts_with('/') {
+        let canonical = canonicalize_root_relative(url, config);
         return match config.url_depth {
-            Some(depth) => make_relative_url(url, depth),
-            None => url.to_string(),
+            Some(depth) => make_relative_url(&canonical, depth),
+            None => canonical,
         };
     }
 
@@ -196,55 +229,23 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
     // Count and strip existing "../" prefixes
     let (parent_count, remaining_path) = count_parent_traversals(path);
 
+    // A non-index page is served one directory deeper than its source file
+    // (`docs/guide.md` → `/docs/guide/`), so every relative href needs one more
+    // `../` than the author wrote. This is correct and must not be "fixed".
+    let prefix = if config.is_index_file {
+        "../".repeat(parent_count)
+    } else {
+        "../".repeat(parent_count + 1)
+    };
+
     // If nothing remains after stripping ../, just return with adjusted parents
     if remaining_path.is_empty() {
-        let prefix = if config.is_index_file {
-            "../".repeat(parent_count)
-        } else {
-            "../".repeat(parent_count + 1)
-        };
         return format!("{}{}", prefix, suffix);
     }
 
     // Check if it's a markdown file
     if let Some(base_path) = strip_markdown_extension(remaining_path, &config.markdown_extensions) {
-        // Check if it ends with index file (without extension)
-        let index_stem = config
-            .index_file
-            .strip_suffix(".md")
-            .or_else(|| config.index_file.strip_suffix(".markdown"))
-            .unwrap_or(&config.index_file);
-
-        // The link targets an index file only when the *final path segment* is
-        // exactly the index stem — mirroring `repo::build_markdown_url_path`.
-        // A plain `ends_with` also matched "site-index", "myindex" and
-        // "subindex", rewriting them to "../site-/", "../my/" and "../sub/":
-        // dead links, or worse, a live link to a different page.
-        let is_index_target =
-            base_path == index_stem || base_path.ends_with(&format!("/{}", index_stem));
-
-        let final_path = if is_index_target {
-            // Collapse index file to directory
-            let stripped = base_path
-                .strip_suffix(index_stem)
-                .unwrap_or(base_path)
-                .trim_end_matches('/');
-            if stripped.is_empty() {
-                // Just "index.md" -> "./" for index files, "../" for regular
-                "".to_string()
-            } else {
-                format!("{}/", stripped)
-            }
-        } else {
-            format!("{}/", base_path)
-        };
-
-        // Build prefix based on parent count and whether current file is index
-        let prefix = if config.is_index_file {
-            "../".repeat(parent_count)
-        } else {
-            "../".repeat(parent_count + 1)
-        };
+        let final_path = markdown_page_path(base_path, config);
 
         // Handle edge case: if final_path is empty and we have no prefix, use "./"
         if final_path.is_empty() && prefix.is_empty() {
@@ -257,36 +258,123 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
     // Extension-less target, or a static file. `strip_markdown_extension` is
     // the *only* markdown detector above, so an extension-less link to a
     // markdown page (`[x](../folder/file)` — how Obsidian and zk write links)
-    // lands here and used to be emitted verbatim, without the trailing slash
-    // the URL convention requires. The page still resolved, but at a
-    // non-canonical URL, and every relative href on *that* page then resolved
-    // one directory too high. Ask the repository which kind of target this is;
-    // when nobody can answer, keep the historical static-file behaviour.
-    let prefix = if config.is_index_file {
-        "../".repeat(parent_count)
-    } else {
-        "../".repeat(parent_count + 1)
-    };
-
-    if !remaining_path.ends_with('/') && resolves_to_markdown_page(path, config) {
+    // or to a folder lands here and used to be emitted verbatim, without the
+    // trailing slash the URL convention requires. The page still resolved, but
+    // at a non-canonical URL, and every relative href on *that* page then
+    // resolved one directory too high. Ask the repository which kind of target
+    // this is; when nobody can answer, keep the historical static-file
+    // behaviour.
+    if !remaining_path.ends_with('/') && relative_target_wants_slash(path, config) {
         return format!("{}{}/{}", prefix, remaining_path, suffix);
     }
 
     format!("{}{}{}", prefix, remaining_path, suffix)
 }
 
-/// Asks [`LinkTransformConfig::markdown_page_probe`] whether `authored_path`
-/// (relative, `./` already stripped, no anchor/query) names a markdown page.
+/// The site path a markdown file's extension-stripped path is served at:
+/// `guide` → `guide/`, `docs/index` → `docs/`, `index` → `""` (the folder the
+/// path is relative to).
+///
+/// Shared by the relative and root-relative branches of [`transform_link`], so
+/// the index-file collapse is stated once.
+fn markdown_page_path(base_path: &str, config: &LinkTransformConfig) -> String {
+    let index_stem = config
+        .index_file
+        .strip_suffix(".md")
+        .or_else(|| config.index_file.strip_suffix(".markdown"))
+        .unwrap_or(&config.index_file);
+
+    // The link targets an index file only when the *final path segment* is
+    // exactly the index stem — mirroring `repo::build_markdown_url_path`. A
+    // plain `ends_with` also matched "site-index", "myindex" and "subindex",
+    // rewriting them to "../site-/", "../my/" and "../sub/": dead links, or
+    // worse, a live link to a different page.
+    let is_index_target =
+        base_path == index_stem || base_path.ends_with(&format!("/{}", index_stem));
+
+    if !is_index_target {
+        return format!("{}/", base_path);
+    }
+
+    // Collapse the index file to its directory.
+    let stripped = base_path
+        .strip_suffix(index_stem)
+        .unwrap_or(base_path)
+        .trim_end_matches('/');
+    if stripped.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", stripped)
+    }
+}
+
+/// Canonicalizes a root-relative URL (`/…`) for the trailing-slash convention,
+/// before any build-mode relativization:
+///
+/// - `/docs/guide.md` → `/docs/guide/`, `/docs/index.md` → `/docs/`,
+///   `/index.md` → `/` (always, as for a relative `.md` link);
+/// - an extension-less `/docs/guide` gains its `/` when
+///   [`LinkTransformConfig::directory_url_probe`] says it is served at a
+///   directory-style URL;
+/// - anything else — a static file, a miss, a URL already ending in `/`, and
+///   mbr's own `/.mbr/…` routes — is returned unchanged.
+///
+/// Any `#fragment` / `?query` is kept after the inserted slash. Public for
+/// `link_index::resolve_outbound_links`, which must record the same target the
+/// page links to but never relativizes it.
+pub fn canonicalize_root_relative(url: &str, config: &LinkTransformConfig) -> String {
+    // `/.mbr/` is routes and compiled-in assets, not repository files: never
+    // rewritten (a `/.mbr/raw/notes/a.md` must keep its extension).
+    if is_mbr_namespace(url) {
+        return url.to_string();
+    }
+
+    let (path, suffix) = split_url_parts(url);
+
+    if let Some(base_path) = strip_markdown_extension(&path, &config.markdown_extensions) {
+        let site_relative = base_path.trim_start_matches('/');
+        // `/.md` has no page name; `/` + `/` would be a protocol-relative URL.
+        if site_relative.is_empty() {
+            return url.to_string();
+        }
+        return format!("/{}{}", markdown_page_path(site_relative, config), suffix);
+    }
+
+    if !path.ends_with('/') && probe_wants_slash(&path, config) {
+        return format!("{}/{}", path, suffix);
+    }
+
+    url.to_string()
+}
+
+/// Whether `url` is in mbr's own `/.mbr/` namespace (the bare `/.mbr` too).
+fn is_mbr_namespace(url: &str) -> bool {
+    url.strip_prefix("/.mbr")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+}
+
+/// Asks [`LinkTransformConfig::directory_url_probe`] about an absolute site
+/// URL. `false` without a probe: no repository context, no guessing.
+fn probe_wants_slash(absolute_url: &str, config: &LinkTransformConfig) -> bool {
+    config
+        .directory_url_probe
+        .as_ref()
+        .is_some_and(|probe| probe(absolute_url))
+}
+
+/// Asks [`LinkTransformConfig::directory_url_probe`] whether `authored_path`
+/// (relative, `./` already stripped, no anchor/query) is served at a
+/// directory-style URL.
 ///
 /// The authored path is resolved against the page URL with *markdown*
 /// semantics — `is_index_file` decides whether the page URL's last segment is a
 /// file stem or a real directory — because that is what the author wrote it
 /// relative to. The transform's own `../` compensation happens afterwards and
 /// must not be applied twice.
-fn resolves_to_markdown_page(authored_path: &str, config: &LinkTransformConfig) -> bool {
-    let Some(probe) = &config.markdown_page_probe else {
+fn relative_target_wants_slash(authored_path: &str, config: &LinkTransformConfig) -> bool {
+    if config.directory_url_probe.is_none() {
         return false;
-    };
+    }
     // Without a page URL there is nothing to resolve against, and guessing
     // would append slashes to root-level static files.
     if config.current_page_url.is_empty() {
@@ -297,10 +385,10 @@ fn resolves_to_markdown_page(authored_path: &str, config: &LinkTransformConfig) 
         authored_path,
         config.is_index_file,
     ) {
-        // A target outside the repository is nobody's markdown page; leaving it
+        // A target outside the repository is nobody's page; leaving it
         // untouched keeps the defect visible to the link validators.
         None => false,
-        Some(absolute) => probe(&absolute),
+        Some(absolute) => probe_wants_slash(&absolute, config),
     }
 }
 
@@ -384,7 +472,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         }
     }
 
@@ -824,6 +912,136 @@ mod tests {
         );
     }
 
+    /// Root-relative markdown links lose their extension like relative ones
+    /// do — with or without a probe, since the extension alone decides it.
+    #[test]
+    fn test_root_relative_md_becomes_canonical() {
+        let server = regular_config();
+        assert_eq!(transform_link("/docs/guide.md", &server), "/docs/guide/");
+        assert_eq!(
+            transform_link("/docs/guide.md#h", &server),
+            "/docs/guide/#h"
+        );
+        assert_eq!(
+            transform_link("/docs/guide.md?q=1", &server),
+            "/docs/guide/?q=1"
+        );
+        assert_eq!(transform_link("/docs/index.md", &server), "/docs/");
+        assert_eq!(transform_link("/index.md", &server), "/");
+        assert_eq!(transform_link("/index.md#top", &server), "/#top");
+        // Index-lookalike stems keep their own URL, as in the relative branch.
+        assert_eq!(transform_link("/site-index.md", &server), "/site-index/");
+        // The same from an index page: root-relative ignores page location.
+        assert_eq!(
+            transform_link("/docs/guide.md", &index_config()),
+            "/docs/guide/"
+        );
+        // Build mode canonicalizes first, then relativizes.
+        assert_eq!(
+            transform_link("/docs/guide.md", &build_config(2)),
+            "../../docs/guide/"
+        );
+        assert_eq!(transform_link("/index.md", &build_config(1)), "../");
+    }
+
+    /// Without a probe nothing can say an extension-less root-relative target
+    /// is a page, so it keeps the historical as-authored behaviour.
+    #[test]
+    fn test_root_relative_extensionless_unchanged_without_probe() {
+        assert_eq!(
+            transform_link("/docs/guide", &regular_config()),
+            "/docs/guide"
+        );
+        assert_eq!(transform_link("/LICENSE", &regular_config()), "/LICENSE");
+        assert_eq!(
+            transform_link("/docs/guide", &build_config(2)),
+            "../../docs/guide"
+        );
+    }
+
+    /// `/.mbr/` is routes and compiled-in assets: never rewritten, even when a
+    /// path in it ends in `.md` (`/.mbr/raw/…`) or a probe would answer yes.
+    #[test]
+    fn test_mbr_namespace_is_never_rewritten() {
+        let always_yes = LinkTransformConfig {
+            directory_url_probe: Some(Arc::new(|_: &str| true)),
+            ..regular_config()
+        };
+        for url in [
+            "/.mbr/raw/docs/guide.md",
+            "/.mbr/site.json",
+            "/.mbr/videos/?path=%2Fv.mp4",
+            "/.mbr",
+            "/.mbr/tasks",
+        ] {
+            assert_eq!(transform_link(url, &always_yes), url);
+        }
+        // A lookalike outside the namespace is an ordinary path.
+        assert_eq!(transform_link("/.mbrx/page", &always_yes), "/.mbrx/page/");
+    }
+
+    /// `/.md` names no page; turning it into `//` would make a
+    /// protocol-relative (off-site) URL.
+    #[test]
+    fn test_root_relative_bare_extension_is_not_turned_into_protocol_relative() {
+        assert_eq!(transform_link("/.md", &regular_config()), "/.md");
+    }
+
+    /// The probe is asked with the absolute URL, minus fragment and query, and
+    /// only for extension-less targets not already ending in `/`.
+    #[test]
+    fn test_root_relative_probe_inputs() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = Arc::clone(&asked);
+        let config = LinkTransformConfig {
+            directory_url_probe: Some(Arc::new(move |url: &str| {
+                recorder.lock().unwrap().push(url.to_string());
+                url == "/docs/guide"
+            })),
+            ..regular_config()
+        };
+        assert_eq!(transform_link("/docs/guide#h", &config), "/docs/guide/#h");
+        assert_eq!(
+            transform_link("/docs/guide?q=1#h", &config),
+            "/docs/guide/?q=1#h"
+        );
+        assert_eq!(transform_link("/docs/other", &config), "/docs/other");
+        // Never asked: canonical, `.md`, anchor, external.
+        for url in ["/docs/guide/", "/docs/guide.md", "#h", "https://x.test/a"] {
+            transform_link(url, &config);
+        }
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["/docs/guide", "/docs/guide", "/docs/other"]
+        );
+    }
+
+    #[test]
+    fn test_served_at_directory_url_variants() {
+        use crate::path_resolver::ResolvedPath;
+        use std::path::PathBuf;
+        assert!(is_served_at_directory_url(&ResolvedPath::MarkdownFile(
+            PathBuf::from("a.md")
+        )));
+        assert!(is_served_at_directory_url(&ResolvedPath::DirectoryListing(
+            PathBuf::from("a")
+        )));
+        assert!(is_served_at_directory_url(&ResolvedPath::TagPage {
+            source: "tags".to_string(),
+            value: "rust".to_string(),
+        }));
+        assert!(is_served_at_directory_url(&ResolvedPath::TagSourceIndex {
+            source: "tags".to_string(),
+        }));
+        assert!(!is_served_at_directory_url(&ResolvedPath::StaticFile(
+            PathBuf::from("a.png")
+        )));
+        assert!(!is_served_at_directory_url(&ResolvedPath::Redirect(
+            "/a/".to_string()
+        )));
+        assert!(!is_served_at_directory_url(&ResolvedPath::NotFound));
+    }
+
     // =========================================================================
     // make_relative_url
     // =========================================================================
@@ -858,7 +1076,7 @@ mod proptests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         }
     }
 
@@ -903,11 +1121,33 @@ mod proptests {
             prop_assert_eq!(transform_link(&url, &config), url);
         }
 
-        /// Root-relative URLs are unchanged when url_depth is None (server mode)
+        /// Root-relative URLs without a markdown extension are unchanged when
+        /// url_depth is None (server mode) and there is no probe.
         #[test]
         fn prop_root_relative_unchanged(path in "/[a-zA-Z0-9./_-]*") {
+            prop_assume!(!path.ends_with(".md"));
             let config = regular_config();
             prop_assert_eq!(transform_link(&path, &config), path);
+        }
+
+        /// A canonical page URL (`/x/`) is a fixed point whatever the probe
+        /// says, and transforming a server-mode root-relative URL twice changes
+        /// nothing the first pass did not.
+        #[test]
+        fn prop_root_relative_canonical_is_idempotent(
+            path in "[a-zA-Z][a-zA-Z0-9_-]{0,12}(/[a-zA-Z][a-zA-Z0-9_-]{0,12}){0,3}",
+            ext in prop_oneof![Just(""), Just(".md"), Just("/")],
+            probe_says in proptest::bool::ANY,
+        ) {
+            let config = LinkTransformConfig {
+                directory_url_probe: Some(Arc::new(move |_: &str| probe_says)),
+                ..regular_config()
+            };
+            let canonical = format!("/{path}/");
+            prop_assert_eq!(transform_link(&canonical, &config), canonical.clone());
+
+            let once = transform_link(&format!("/{path}{ext}"), &config);
+            prop_assert_eq!(transform_link(&once, &config), once.clone());
         }
 
         /// Root-relative URLs are relativized when url_depth is Some (build mode)
@@ -1132,6 +1372,14 @@ mod browser_resolution_tests {
     }
 
     fn transform_config(root: &Path, source_rel: &str) -> LinkTransformConfig {
+        transform_config_with_tags(root, source_rel, Vec::new())
+    }
+
+    fn transform_config_with_tags(
+        root: &Path,
+        source_rel: &str,
+        tag_sources: Vec<String>,
+    ) -> LinkTransformConfig {
         let source = root.join(source_rel);
         let is_index_file = source
             .file_name()
@@ -1143,13 +1391,13 @@ mod browser_resolution_tests {
             is_index_file,
             url_depth: None,
             current_page_url: crate::repo::build_markdown_url_path(&source, root, "index.md"),
-            markdown_page_probe: Some(filesystem_markdown_page_probe(OwnedPathResolverConfig {
+            directory_url_probe: Some(filesystem_directory_url_probe(OwnedPathResolverConfig {
                 vault: std::sync::Arc::new(crate::vault::LocalVault::new(root)),
                 static_vault: None,
                 static_folder: "static".to_string(),
                 markdown_extensions: vec!["md".to_string()],
                 index_file: "index.md".to_string(),
-                tag_sources: Vec::new(),
+                tag_sources,
                 exempt_hidden_dirs: Vec::new(),
             })),
         }
@@ -1356,7 +1604,7 @@ mod browser_resolution_tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: "/docs/guide/".to_string(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         assert_eq!(
             transform_link("../folder/file", &config),
@@ -1432,5 +1680,120 @@ mod browser_resolution_tests {
                 );
             }
         }
+    }
+
+    /// The URL depth of the page `source_rel` is served at.
+    fn depth_of(root: &Path, source_rel: &str) -> usize {
+        page_url(root, source_rel)
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count()
+    }
+
+    /// The user-visible defect: a link that names a page (or folder) without
+    /// its trailing slash, in every spelling an author uses — relative or
+    /// root-relative, with or without `.md`, to a page, an index folder or a
+    /// folder listing — lands on the canonical URL, in server mode *and* in a
+    /// static build, from index and non-index pages alike.
+    #[test]
+    fn every_spelling_of_a_page_or_folder_link_lands_canonically() {
+        let dir = fixture();
+        let root = dir.path();
+
+        // (source file, authored href, final absolute URL)
+        let cases: &[(&str, &str, &str)] = &[
+            // Relative, the reported shape: `[](../abc)` for `../abc.md`.
+            ("docs/guide.md", "../root", "/root/"),
+            ("docs/guide.md", "../root/", "/root/"),
+            ("docs/guide.md", "../root.md", "/root/"),
+            ("docs/index.md", "../root", "/root/"),
+            ("docs/index.md", "../root/", "/root/"),
+            ("docs/index.md", "../root.md", "/root/"),
+            ("docs/guide.md", "./other", "/docs/other/"),
+            ("docs/index.md", "./guide", "/docs/guide/"),
+            ("root.md", "a/b/c", "/a/b/c/"),
+            ("index.md", "a/b/c", "/a/b/c/"),
+            ("a/b/c.md", "../../root#h", "/root/#h"),
+            ("a/b/c.md", "../../root?q=1", "/root/?q=1"),
+            // Relative folders: with an index file (a markdown page) and
+            // without one (a listing).
+            ("docs/guide.md", "../docs", "/docs/"),
+            ("root.md", "docs", "/docs/"),
+            ("docs/guide.md", "../folder", "/folder/"),
+            ("docs/index.md", "../folder", "/folder/"),
+            ("root.md", "folder", "/folder/"),
+            ("index.md", "folder", "/folder/"),
+            ("a/b/c.md", "../../a", "/a/"),
+            ("docs/guide.md", "../a/b", "/a/b/"),
+            // Root-relative.
+            ("docs/guide.md", "/root", "/root/"),
+            ("docs/guide.md", "/root/", "/root/"),
+            ("docs/guide.md", "/root.md", "/root/"),
+            ("docs/guide.md", "/root#h", "/root/#h"),
+            ("docs/guide.md", "/root?q=1#h", "/root/?q=1#h"),
+            ("docs/index.md", "/folder/file", "/folder/file/"),
+            ("a/b/c.md", "/folder/file", "/folder/file/"),
+            ("index.md", "/folder/file", "/folder/file/"),
+            ("docs/guide.md", "/docs", "/docs/"),
+            ("docs/guide.md", "/docs/index.md", "/docs/"),
+            ("docs/guide.md", "/index.md", "/"),
+            ("docs/guide.md", "/folder", "/folder/"),
+            ("a/b/c.md", "/a/b", "/a/b/"),
+            // Static files and misses keep their spelling, both kinds.
+            ("docs/guide.md", "/LICENSE", "/LICENSE"),
+            ("docs/guide.md", "/docs/Makefile", "/docs/Makefile"),
+            ("docs/guide.md", "/docs/photo.png", "/docs/photo.png"),
+            ("docs/guide.md", "/missing/page", "/missing/page"),
+            ("docs/guide.md", "../missing", "/missing"),
+        ];
+
+        for (source, href, expected) in cases {
+            // Server mode.
+            assert_lands(root, source, href, expected);
+
+            // Build mode: root-relative output is made relative by depth; it
+            // must still land on the same URL.
+            let base = page_url(root, source);
+            let mut config = transform_config(root, source);
+            config.url_depth = Some(depth_of(root, source));
+            let emitted = transform_link(href, &config);
+            assert_eq!(
+                resolve_in_browser(&base, &emitted),
+                *expected,
+                "[{source}] build-mode `{href}` emitted `{emitted}`"
+            );
+            assert!(
+                !emitted.starts_with('/'),
+                "build output must be relative: {emitted}"
+            );
+        }
+    }
+
+    /// Root-relative static files and misses are emitted exactly as authored
+    /// in server mode — the probe never invents a slash for them.
+    #[test]
+    fn root_relative_non_pages_are_untouched() {
+        let dir = fixture();
+        let root = dir.path();
+        let config = transform_config(root, "docs/guide.md");
+        for href in [
+            "/LICENSE",
+            "/docs/photo.png",
+            "/missing/page",
+            "/folder/Dockerfile",
+        ] {
+            assert_eq!(transform_link(href, &config), href);
+        }
+    }
+
+    /// Tag pages and tag source indexes are served at directory-style URLs too.
+    #[test]
+    fn tag_urls_gain_their_trailing_slash() {
+        let dir = fixture();
+        let root = dir.path();
+        let config = transform_config_with_tags(root, "docs/guide.md", vec!["tags".to_string()]);
+        assert_eq!(transform_link("/tags/rust", &config), "/tags/rust/");
+        assert_eq!(transform_link("/tags", &config), "/tags/");
+        assert_eq!(transform_link("../tags/rust", &config), "../../tags/rust/");
     }
 }

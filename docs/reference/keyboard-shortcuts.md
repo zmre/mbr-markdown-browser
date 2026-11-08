@@ -234,7 +234,7 @@ In GUI mode (`mbr -g`), standard macOS shortcuts are available:
 | Key | Action |
 |-----|--------|
 | `Cmd+O` | Open folder or file |
-| `Cmd+R` | Reload page |
+| `Cmd+R` | Reload settings (`.mbr/config.toml`, templates) and the page |
 | `Cmd+[` | History back |
 | `Cmd+]` | History forward |
 | `Cmd+F` | Find in page |
@@ -260,7 +260,7 @@ key never fires twice.
 |-----|--------|
 | `F10` | Show / hide the menu bar |
 | `Ctrl+O` | Open folder or file |
-| `Ctrl+R` | Reload page |
+| `Ctrl+R` | Reload settings (`.mbr/config.toml`, templates) and the page |
 | `Ctrl+Shift+P` | Print |
 | `Ctrl+F` | Find in page |
 | `F3` / `Shift+F3` | Find next / previous |

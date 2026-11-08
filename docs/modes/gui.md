@@ -57,7 +57,7 @@ include it, so your browser's native find is left untouched.
 | Action | macOS | Windows/Linux |
 |--------|-------|---------------|
 | Open folder or file | Cmd+O | Ctrl+O |
-| Reload Page | Cmd+R | Ctrl+R |
+| Reload settings and page | Cmd+R | Ctrl+R |
 | Go Back | Cmd+[ | Alt+Left |
 | Go Forward | Cmd+] | Alt+Right |
 | Close Window | Cmd+W | Ctrl+W |
@@ -83,6 +83,11 @@ When files change on disk, the GUI automatically reloads the current page. This 
 1. Open your notes in mbr GUI
 2. Edit files in your preferred editor
 3. See changes instantly in mbr
+
+Saving `.mbr/config.toml` applies the new settings too, without restarting
+mbr. **Cmd+R** (Ctrl+R on Windows and Linux) reloads the configuration and
+templates, then the page you are on. See
+[Reloading Configuration](../reference/configuration.md#reloading-configuration).
 
 ### In-Browser Editing
 

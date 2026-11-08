@@ -1767,6 +1767,8 @@ impl Repo {
         }
 
         match event {
+            // A configuration reload, not a file change: nothing to index.
+            crate::change_event::ChangeEventType::Reloaded => {}
             crate::change_event::ChangeEventType::Deleted => {
                 if is_markdown {
                     self.markdown_files.pin().remove(abs_path);

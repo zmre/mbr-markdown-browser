@@ -5,8 +5,8 @@ use clap::Parser;
 #[cfg(feature = "gui")]
 use mbr::browser::{self, BrowserContext};
 use mbr::{
-    Config, ConfigError, MbrError, build::Builder, cli, link_transform::LinkTransformConfig,
-    markdown, server, templates,
+    ConfigError, MbrError, build::Builder, cli, link_transform::LinkTransformConfig, markdown,
+    templates,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -176,7 +176,7 @@ async fn run() -> Result<(), MbrError> {
     // the picker dialog shown right here.
     #[cfg(all(feature = "gui", not(target_os = "macos")))]
     let input_path = if needs_picker {
-        let default_markdown_extensions = Config::default().markdown_extensions;
+        let default_markdown_extensions = mbr::Config::default().markdown_extensions;
         match mbr::open_picker::pick_file_or_folder(
             "Select a Markdown Folder or File",
             &default_markdown_extensions,
@@ -212,14 +212,10 @@ async fn run() -> Result<(), MbrError> {
     // The GUI starts from its own defaults (editing on); every other mode from
     // the compiled-in ones. `browser.rs` reads later folders the GUI way too.
     #[cfg(feature = "gui")]
-    let loaded = if is_gui_mode {
-        Config::read_for_gui(&absolute_path)?
-    } else {
-        Config::read(&absolute_path)?
-    };
+    let gui_defaults = is_gui_mode;
     #[cfg(not(feature = "gui"))]
-    let loaded = Config::read(&absolute_path)?;
-    let mut config = cli::apply_overrides(loaded, &args)?;
+    let gui_defaults = false;
+    let mut config = cli::read_config(&absolute_path, gui_defaults, &args)?;
 
     let path_relative_to_root =
         pathdiff::diff_paths(&absolute_path, &config.root_dir).ok_or_else(|| {
@@ -410,7 +406,7 @@ async fn run() -> Result<(), MbrError> {
             // CLI stdout mode renders a single file with no repo index, so
             // body wikilinks never resolve globally; the page URL is unused.
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only).
@@ -504,8 +500,10 @@ async fn run() -> Result<(), MbrError> {
         println!("{}", html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI
-        let server_config = server::ServerConfig::from(&config).with_gui_mode(false);
-        let server = server::Server::init(server_config)?;
+        // Behind a `LiveServer`, so a changed `.mbr/config.toml` is applied
+        // without a restart, read again exactly as above.
+        let reader = cli::config_reader(absolute_path.clone(), false, args.clone());
+        let server = mbr::live::LiveServer::init(config.clone(), false, reader)?;
 
         let url_path = mbr::launch_url::build_url_path(
             &path_relative_to_root,
@@ -526,25 +524,24 @@ async fn run() -> Result<(), MbrError> {
         #[cfg(feature = "gui")]
         {
             warn_if_non_loopback_bind(&config.host);
-            let config_copy = config.clone();
+            // Behind a `LiveServer` so Cmd/Ctrl+R (and a changed
+            // `.mbr/config.toml`) reloads the configuration on the same port.
+            let reader = cli::config_reader(absolute_path.clone(), true, args.clone());
+            let live = match mbr::live::LiveServer::init(config.clone(), true, reader) {
+                Ok(live) => live,
+                Err(e) => {
+                    tracing::error!(
+                        "Couldn't initialize the server: {e}. Try with -s for more info"
+                    );
+                    return Ok(());
+                }
+            };
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
+            let serving = std::sync::Arc::clone(&live);
             let handle = tokio::spawn(async move {
-                let server_config = server::ServerConfig::from(&config_copy).with_gui_mode(true);
-                let server = server::Server::init(server_config);
-                match server {
-                    Ok(mut s) => {
-                        // Try up to 10 port increments if address is in use
-                        if let Err(e) = s.start_with_port_retry(Some(ready_tx), 10).await {
-                            tracing::error!("Server error: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Couldn't initialize the server: {e}. Try with -s for more info"
-                        );
-                        // Drop the sender to signal failure
-                        drop(ready_tx);
-                    }
+                // Try up to 10 port increments if address is in use
+                if let Err(e) = serving.start_with_port_retry(Some(ready_tx), 10).await {
+                    tracing::error!("Server error: {e}");
                 }
             });
 
@@ -573,6 +570,7 @@ async fn run() -> Result<(), MbrError> {
             let ctx = BrowserContext {
                 url: url.to_string(),
                 server_handle: handle,
+                server: live,
                 config,
                 tokio_runtime: tokio::runtime::Handle::current(),
             };

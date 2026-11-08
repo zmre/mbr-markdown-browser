@@ -131,7 +131,7 @@ async function mount(): Promise<MbrLiveReloadElement> {
 /** Deliver a file-change frame exactly as watcher.rs broadcasts it. */
 async function fileChanged(
   relativePath: string,
-  kind: 'modified' | 'created' | 'deleted' = 'modified',
+  kind: 'modified' | 'created' | 'deleted' | 'reloaded' = 'modified',
 ): Promise<void> {
   latestSocket().emitMessage({
     path: `/Users/someone/notes/${relativePath}`,
@@ -417,6 +417,27 @@ describe('MbrLiveReloadElement message handling', () => {
       expectReload()
     })
   }
+
+  // A save of `.mbr/config.toml` arrives twice: the watcher's raw event, then
+  // the server's `reloaded` once the new configuration is being served. Only
+  // the second reloads, so a page never reloads early or twice.
+  it('ignores the raw config.toml event', async () => {
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('.mbr/config.toml')
+
+    expectNoReload()
+  })
+
+  it('reloads when the server reloaded its configuration', async () => {
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('.mbr/config.toml', 'reloaded')
+
+    expectReload()
+  })
 
   it('ignores a markdown file this page does not render', async () => {
     await mount()
