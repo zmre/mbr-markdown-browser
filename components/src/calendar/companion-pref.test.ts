@@ -20,9 +20,19 @@ afterEach(() => {
 
 /** The `_head.html` pre-paint script, as shipped. */
 function prePaintScript(): string {
-  const script = /<script>[^<]*mbr_calendar_companion_hidden[^<]*<\/script>/.exec(__MBR_HEAD_TEMPLATE__)?.[0]
-  expect(script).toBeDefined()
-  return script!.replace(/^<script>|<\/script>$/g, '')
+  // Sliced by position rather than matched with a regex: this reads one
+  // known template, it is not HTML filtering.
+  const html = __MBR_HEAD_TEMPLATE__
+  const at = html.indexOf('mbr_calendar_companion_hidden')
+  expect(at).toBeGreaterThan(-1)
+  const open = '<script>'
+  const start = html.lastIndexOf(open, at)
+  const end = html.indexOf('</script>', at)
+  expect(start).toBeGreaterThan(-1)
+  expect(end).toBeGreaterThan(at)
+  const body = html.slice(start + open.length, end)
+  expect(body).not.toContain('<')
+  return body
 }
 
 /** Runs the pre-paint script on a fresh page served for `repoId`. */
