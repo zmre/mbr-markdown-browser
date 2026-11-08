@@ -234,9 +234,11 @@ main > section[data-theme="dark"] {
   padding: var(--pico-block-spacing-vertical) 0;
 }
 
-.subtitle main h1 + h2 {
-  margin-top: -0.8em;
+.subtitle main > section > h1:first-of-type + h2,
+.subtitle main > h1:first-of-type + h2 {
+  margin-top: -0.6em;
   padding-top: 0;
+  color: var(--pico-muted-color);
 }
 
 body > header {
@@ -875,7 +877,10 @@ li > p:first-child > .mbr-task-check:first-child {
 /* A kanban card is a box with no gutter: a task as a card's title keeps its
  * checkbox inside the card (the page board and the slides' board alike). Card
  * contents have their own gutter rule below. */
-:is(.kanban, .mbr-kanban-column) > :is(ul, ol) > li > .mbr-task-check:first-child,
+:is(.kanban, .mbr-kanban-column)
+  > :is(ul, ol)
+  > li
+  > .mbr-task-check:first-child,
 :is(.kanban, .mbr-kanban-column)
   > :is(ul, ol)
   > li
