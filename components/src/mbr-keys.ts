@@ -3,6 +3,7 @@ import { customElement, state } from 'lit/decorators.js'
 import { findOverlay, isAnyOverlayOpen } from './overlay.js'
 import { isGuiMode } from './shared.js'
 import { KBD_CSS } from './controls.js'
+import { calendarKeysEnabled, followPeriodicLink, openTodayDailyNote } from './calendar/periodic-nav.js'
 import type { NavTab } from './mbr-fuzzy-nav.js'
 
 /**
@@ -210,6 +211,8 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'g g', description: 'Go to top' },
       { keys: 'G', description: 'Go to bottom' },
       { keys: 'H / L', description: 'Previous / next sibling' },
+      { keys: 'd', description: "Today's daily note (else the latest)" },
+      { keys: '[ / ]', description: 'Previous / next periodic note (day, week, month…)' },
       { keys: 'Ctrl+o / Ctrl+i', description: 'History back / forward' },
     ],
   },
@@ -225,6 +228,8 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'r', description: 'Add a review note (anchored to the selection)' },
       { keys: 'R', description: 'Open review notes (server/GUI only)' },
       { keys: 'p', description: 'Play slides / flashcards' },
+      { keys: 'c', description: 'Open the calendar (month / week / list of notes)' },
+      { keys: 'C', description: 'Toggle the calendar companion (mini month, day agenda)' },
       { keys: 'Esc', description: 'Close panel' },
     ],
   },
@@ -332,6 +337,7 @@ const SHORTCUTS: ShortcutCategory[] = [
  * - `Ctrl+f/b` for full-page scrolling
  * - `H/L` for prev/next page navigation (when mbr-nav is present)
  * - `g g` for scroll to top, `G` for scroll to bottom
+ * - `d` for today's daily note, `[` / `]` for the previous / next periodic note
  * - `?` for help overlay
  */
 @customElement('mbr-keys')
@@ -580,6 +586,22 @@ export class MbrKeysElement extends LitElement {
         if (e.shiftKey && !isModalOpen()) {
           e.preventDefault();
           openFuzzyNav('links-in');
+        }
+        break;
+
+      case 'd': // Today's daily note (else the most recent one)
+        if (!e.altKey && !isModalOpen() && calendarKeysEnabled()) {
+          e.preventDefault();
+          void openTodayDailyNote();
+        }
+        break;
+
+      case '[': // Previous periodic note (follows the bar's rel=prev link)
+      case ']': // Next periodic note (rel=next)
+        if (!e.altKey && !isModalOpen() && calendarKeysEnabled()) {
+          if (followPeriodicLink(e.key === '[' ? 'prev' : 'next')) {
+            e.preventDefault();
+          }
         }
         break;
 

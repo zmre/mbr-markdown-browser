@@ -178,6 +178,17 @@ The `build/` folder contains plain HTML/CSS/JS that works anywhere:
 
 Pagefind search is automatically configured and works out of the box.
 
+[Date facets](server/#search-by-date) (`when:-7d`, `date:2026-10`) work here
+too. Pagefind has no facets, so the search dialog takes them out of the query
+and filters by date itself, against the site's `site.json`: a query of only
+date facets lists matching notes newest first without Pagefind, and words plus
+a date facet keep Pagefind's ranking and drop the notes outside the dates
+(looking through its first 200 hits). Dates are in the reader's time zone.
+The **When** menu is server and GUI only; type the facet instead.
+**Show in calendar** works here too, and so does the
+[calendar](../markdown/calendar/#the-calendar-overlay) itself (`c`): it reads
+only `site.json`.
+
 ![Full-text search results with highlighted matches on a statically built site](../images/screens/static-site-search.png)
 
 *Search in a static build, powered by the Pagefind index generated at build time.*

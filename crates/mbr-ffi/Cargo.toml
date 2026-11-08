@@ -47,9 +47,12 @@ mobile = [
 [dependencies]
 mbr-core.workspace = true
 
+# The QuickLook day calendar's date: `Local` for a note dated by birthtime.
+chrono.workspace = true
 html-escape.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tera.workspace = true
 thiserror.workspace = true
@@ -71,5 +74,4 @@ tracing = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
-chrono.workspace = true
 tempfile.workspace = true

@@ -1,6 +1,10 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
+import { subscribeSiteNav, resolveUrl, getTagSources, getCanonicalPath, getCalendarConfig, isNewTabModifier, openInNewTab, type TagSourceConfig } from './shared.js'
+import { CALENDAR_SECTION_CSS, calendarSectionModel, renderCalendarSection } from './calendar/browse-section.js'
+import { calendarOverlayAvailable, openCalendarOverlay } from './calendar/open-overlay.js'
+import { todayKey } from './calendar/note-date.js'
+import { periodicIndexOf } from './calendar/periodic.js'
 import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { ICON_BUTTON_CSS } from './controls.ts'
@@ -729,12 +733,34 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
       <nav class="sidebar-nav" aria-label="Site navigation">
         ${this._isLoading ? this._renderLoading() :
           this._loadError ? this._renderError() : html`
+            ${this._renderCalendarSection()}
             ${this._renderHomeLink()}
             ${this._renderFolderTree()}
             ${this._renderRootFiles()}
             ${this._renderTagGroups()}
           `}
       </nav>
+    `;
+  }
+
+  /** The "Calendar" section (design/calendar.md §5.6), shared with `<mbr-browse>`. */
+  private _renderCalendarSection(): TemplateResult | typeof nothing {
+    if (!getCalendarConfig().enabled) return nothing;
+    const model = calendarSectionModel(periodicIndexOf(this._allFiles), todayKey(), navigator.language || 'en-US');
+    if (!model) return nothing;
+    return html`
+      <div class="nav-section calendar-section">
+        <h3 class="section-header">Calendar</h3>
+        ${renderCalendarSection(model, {
+          resolveUrl,
+          onOpenCalendar: calendarOverlayAvailable()
+            ? () => {
+                if (this._isOverlayMode) this.close();
+                openCalendarOverlay({ label: 'All notes' });
+              }
+            : undefined,
+        })}
+      </div>
     `;
   }
 
@@ -930,7 +956,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = [ICON_BUTTON_CSS, css`
+  static override styles = [ICON_BUTTON_CSS, CALENDAR_SECTION_CSS, css`
     :host {
       display: block;
     }

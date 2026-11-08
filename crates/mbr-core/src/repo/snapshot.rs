@@ -42,7 +42,7 @@ use crate::vault::{Availability, Entry, Vault, VaultPath};
 
 /// The on-disk shape of a [`RepoSnapshot`]. Bump on any change to the
 /// serialized types; a snapshot of another format is ignored, never migrated.
-pub const SNAPSHOT_FORMAT: u32 = 1;
+pub const SNAPSHOT_FORMAT: u32 = 2;
 
 /// What a listing says about a file, compared across scans to decide whether
 /// it changed. Nanosecond modification times, so two edits within one second
@@ -147,6 +147,10 @@ struct SnapshotNote {
     created: u64,
     modified: u64,
     frontmatter: Option<SimpleMetadata>,
+    /// Resolved with the scan's [`crate::calendar::CalendarRules`], which
+    /// are in the fingerprint, so a restore never needs to recompute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calendar: Option<crate::calendar::NoteCalendar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     relationships: Vec<RawRelationship>,
 }
@@ -238,6 +242,7 @@ impl Repo {
             "ignore_globs": self.ignore_globs,
             "index_file": self.index_file,
             "static_folder": self.static_folder,
+            "calendar": self.calendar_rules(),
             "exempt_hidden_dirs": self
                 .exempt_hidden_vault_paths
                 .iter()
@@ -271,6 +276,7 @@ impl Repo {
                     created: info.created,
                     modified: info.modified,
                     frontmatter: info.frontmatter.clone(),
+                    calendar: info.calendar,
                     relationships: info.relationships.clone(),
                 })
             })
@@ -333,6 +339,7 @@ impl Repo {
                 created: note.created,
                 modified: note.modified,
                 frontmatter: note.frontmatter,
+                calendar: note.calendar,
                 relationships: note.relationships,
             };
             if let Some(stamps) = &stamps {
@@ -786,7 +793,7 @@ mod tests {
             Err(SnapshotError::WrongFormat { found: 999 })
         ));
         assert!(matches!(
-            RepoSnapshot::from_bytes(br#"{"format":1,"markdown":7}"#),
+            RepoSnapshot::from_bytes(br#"{"format":2,"markdown":7}"#),
             Err(SnapshotError::Corrupt(_))
         ));
         // A different scan configuration.
@@ -807,6 +814,56 @@ mod tests {
         snapshot.fingerprint = "tampered".into();
         assert_eq!(
             repo(vault).restore_snapshot(snapshot),
+            Err(SnapshotError::WrongFingerprint)
+        );
+    }
+
+    /// Calendar data is part of the snapshot (so a restore needs no
+    /// recomputation) and the calendar rules part of its fingerprint.
+    #[test]
+    fn restore_keeps_calendar_data_and_refuses_other_calendar_rules() {
+        let vault = Arc::new(
+            MemVault::new()
+                .with_file("daily/2026-10-31.md", "# Saturday\n")
+                .with_file("weekly/2026-W44.md", "# Week\n")
+                .with_file("meetings/2026-10-30 Sync.md", "# Sync\n")
+                .with_file(
+                    "posts/hello.md",
+                    "---\ndate: 2026-09-01T23:30:00-07:00\n---\n",
+                )
+                .with_file("undated.md", "# Nothing\n"),
+        );
+        let original = scanned(Arc::clone(&vault));
+        let site = original.to_json().unwrap();
+        assert!(
+            site.contains(
+                r#""calendar":{"date":"2026-10-31","source":"filename","period":"2026-10-31"}"#
+            ),
+            "{site}"
+        );
+        assert!(
+            site.contains(r#""calendar":{"date":"2026-09-01","source":"frontmatter"}"#),
+            "{site}"
+        );
+        assert_eq!(
+            site.matches(r#""calendar""#).count(),
+            4,
+            "the undated note has none"
+        );
+
+        let snapshot = original.snapshot();
+        let restored = repo(Arc::clone(&vault));
+        restored
+            .restore_snapshot(RepoSnapshot::from_bytes(&snapshot.to_bytes()).unwrap())
+            .unwrap();
+        assert_eq!(restored.to_json().unwrap(), site);
+
+        let other_rules = repo(vault).with_calendar(&crate::calendar::CalendarConfig {
+            periodic_folders: vec!["daily".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            other_rules.restore_snapshot(snapshot),
             Err(SnapshotError::WrongFingerprint)
         );
     }

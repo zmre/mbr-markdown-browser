@@ -1,5 +1,5 @@
 /**
- * Redrawing a task's `@done(...)` chip in the rendered document.
+ * Redrawing a task's done chip in the rendered document.
  *
  * A task write used to be followed by a live reload, and that reload was the
  * only thing that could draw a freshly stamped `@done(...)`. Writes now
@@ -8,8 +8,9 @@
  * writer has to render that one chip itself.
  *
  * It really is only that one chip. `tasks::set_status` changes exactly two
- * things about a line: the status marker, and the `@done(...)` stamp it adds or
- * removes. Priority, tags, `@due(...)` and the trailing move marker are
+ * things about a line: the status marker, and the done stamp it adds or
+ * removes — `@done(...)`, or `✅ YYYY-MM-DD` / `[completion:: YYYY-MM-DD]` on a
+ * line written in the Obsidian Tasks or Dataview notation. Priority, tags, `@due(...)` and the trailing move marker are
  * untouched, and the display text is unaffected because the stamp is stripped
  * out of it either way. So the whole difference between "patched in place" and
  * "re-rendered by the server" is this file plus `applyCheckboxStatus`.
@@ -20,8 +21,8 @@
  * (`server.rs::TaskToggleResponse::text`), not the naive datetimes
  * `POST /.mbr/tasks` sends, so `tasks/task-format.ts` — which parses the wire
  * form for the panel — cannot read it. The grammar mirrored below is
- * `tasks.rs`'s `DATE_ANNOTATION` + `DATETIME`, and the output mirrors
- * `html.rs::push_task_time`.
+ * `tasks.rs`'s `INLINE_DATE` + `recognise` + `DATETIME`, and the output
+ * mirrors `html.rs::push_task_time`.
  *
  * The label is deliberately built from a hard-coded English month table rather
  * than `toLocaleDateString`, which is the opposite of the choice
@@ -32,8 +33,24 @@
  * narrow no-break space before AM/PM, which `%-I:%M %p` does not emit.
  */
 
-/** `@done(...)` payloads, mirroring the `done` half of `tasks::DATE_ANNOTATION`. */
-const DONE_ANNOTATION = /@done\(([^)]*)\)/g
+/**
+ * `tasks::INLINE_DATE`, alternative for alternative. The whole alternation is
+ * mirrored, not just its done-date spellings, because the Rust side scans it
+ * leftmost-first: an `@due(...)` swallowing a `(completion:: …)` inside its
+ * payload hides it there, and must hide it here too.
+ *
+ * Groups: 1 `@` kind, 2 its payload; 3 emoji, 4 its date; 5/6 `[key:: value]`;
+ * 7/8 `(key:: value)`.
+ */
+const INLINE_DATE = new RegExp(
+  [
+    String.raw`@(due|done)\(([^)]*)\)`,
+    String.raw`(📅|📆|🗓|⏳|⌛|✅|❌|🛫|➕)\u{FE0F}?[ \t]*([0-9]{4}-[0-9]{2}-[0-9]{2})`,
+    String.raw`\[(due|scheduled|completion|cancelled|created|start)::([^\]]*)\]`,
+    String.raw`\((due|scheduled|completion|cancelled|created|start)::([^)]*)\)`,
+  ].join('|'),
+  'gu',
+)
 
 /** `tasks::DATETIME`: `YYYY-MM-DD`, optionally ` HH:MM`, optionally ` AM/PM`. */
 const SOURCE_DATETIME =
@@ -50,7 +67,7 @@ export interface TaskChip {
   label: string
 }
 
-/** A parsed `@done(...)` payload, in the fields `html.rs` formats from. */
+/** A parsed done-date payload, in the fields `html.rs` formats from. */
 interface Stamp {
   year: number
   month: number
@@ -67,7 +84,7 @@ function isRealDate(year: number, month: number, day: number): boolean {
 }
 
 /**
- * Parse one `@done(...)` payload, mirroring `tasks::parse_datetime`.
+ * Parse one done-date payload, mirroring `tasks::parse_datetime`.
  *
  * Returns `null` for anything that is not a datetime — which is not merely a
  * formatting question: an unparseable payload is not an annotation at all on
@@ -123,25 +140,46 @@ function chipFor(stamp: Stamp): TaskChip {
 }
 
 /**
+ * A Dataview value, mirroring `tasks::parse_dataview_datetime`: the
+ * `parse_datetime` grammar plus ISO's `YYYY-MM-DDTHH:MM`.
+ */
+function parseDataviewStamp(value: string): Stamp | null {
+  const trimmed = value.trim()
+  return parseStamp(trimmed[10] === 'T' ? `${trimmed.slice(0, 10)} ${trimmed.slice(11)}` : trimmed)
+}
+
+/** The done date one {@link INLINE_DATE} match carries, mirroring `tasks::recognise`. */
+function doneStampOf(match: RegExpExecArray): Stamp | null {
+  if (match[1] === 'done') return parseStamp(match[2] ?? '')
+  if (match[3] === '✅') return parseStamp(match[4] ?? '')
+  if (match[5] === 'completion') return parseDataviewStamp(match[6] ?? '')
+  if (match[7] === 'completion') return parseDataviewStamp(match[8] ?? '')
+  return null
+}
+
+/**
  * The completion chip a task's **source line** should carry, or `null` when it
  * carries none.
  *
- * The first parseable `@done(...)` wins, matching `tasks::strip_annotations`.
+ * The first parseable done date in the line wins, whatever its notation
+ * (`@done(...)`, `✅ …`, `[completion:: …]`), matching
+ * `tasks::strip_annotations`.
  */
 export function doneChipFor(sourceLine: string): TaskChip | null {
-  DONE_ANNOTATION.lastIndex = 0
-  for (
-    let match = DONE_ANNOTATION.exec(sourceLine);
-    match !== null;
-    match = DONE_ANNOTATION.exec(sourceLine)
-  ) {
-    const stamp = parseStamp(match[1] ?? '')
-    if (stamp) {
-      DONE_ANNOTATION.lastIndex = 0
-      return chipFor(stamp)
+  INLINE_DATE.lastIndex = 0
+  try {
+    for (
+      let match = INLINE_DATE.exec(sourceLine);
+      match !== null;
+      match = INLINE_DATE.exec(sourceLine)
+    ) {
+      const stamp = doneStampOf(match)
+      if (stamp) return chipFor(stamp)
     }
+    return null
+  } finally {
+    INLINE_DATE.lastIndex = 0
   }
-  return null
 }
 
 /** Chip classes in the order `html.rs::task_annotations_html` emits them. */
@@ -149,7 +187,9 @@ const CHIP_CLASSES = [
   'mbr-task-pri',
   'mbr-task-tag',
   'mbr-task-due',
+  'mbr-task-scheduled',
   'mbr-task-completed',
+  'mbr-task-canceled-on',
   'mbr-task-moved',
 ] as const
 

@@ -10,6 +10,7 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 
+use crate::calendar::CalendarConfig;
 use crate::errors::ConfigError;
 use crate::slides::SlideSettings;
 use crate::task_query::IncludeFilter;
@@ -783,6 +784,18 @@ pub struct Config {
     /// root (see `page_context::insert_slide_settings`).
     #[serde(default)]
     pub slides: SlideSettings,
+    /// Calendar-aware browsing: the `[calendar]` table (`enabled`, `periods`,
+    /// `periodic_folders`, `date_fields`, `week_start`, `week_numbers`,
+    /// `companion`, `agenda_chips`). Decides which notes are periodic notes
+    /// (`2026-10-31.md`, `2026-W44.md`, …) and which frontmatter fields date a
+    /// note, and is published to the browser as `__MBR_CONFIG__.calendar`.
+    /// Typed with `deny_unknown_fields`, so a typo fails at startup.
+    ///
+    /// Environment: `MBR_CALENDAR__ENABLED=false`,
+    /// `MBR_CALENDAR__PERIODS='["day","week"]'` (figment splits on `__`).
+    /// See `docs/reference/configuration.md` and [`crate::calendar`].
+    #[serde(default)]
+    pub calendar: CalendarConfig,
     /// Glob patterns whose matching files are left out of the **task index**.
     ///
     /// Each pattern is matched against a markdown file's repository-relative
@@ -931,6 +944,7 @@ impl Default for Config {
             tasks_stamp_done: true, // Stamp @done(...) when a task is completed
             tasks_default_include: default_tasks_default_include(),
             slides: SlideSettings::default(),
+            calendar: CalendarConfig::default(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
@@ -3587,6 +3601,53 @@ mod tests {
         let repo = repo_with_mbr_dir(None);
         let _env = EnvVars::set(&[("MBR_SLIDES__TRANSITION", "spin")]);
         assert!(Config::read(repo.path()).is_err());
+    }
+
+    /// `periods = []` is "no note is periodic", not "use the default": an
+    /// empty list in config.toml must survive the merge over the defaults.
+    #[test]
+    fn test_config_read_calendar_empty_periods_turns_periodic_detection_off() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[calendar]\nperiods = []\n"));
+        let config = Config::read(repo.path()).expect("an empty periods list must load");
+        assert!(config.calendar.periods.is_empty());
+        assert!(config.calendar.enabled, "the calendar itself stays on");
+    }
+
+    #[test]
+    fn test_config_read_calendar_table() {
+        use crate::calendar::{CompanionMode, PeriodKind, WeekStart};
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "[calendar]\nperiods = [\"day\", \"week\"]\nperiodic_folders = [\"daily\"]\n\
+             week_start = \"monday\"\ncompanion = \"off\"\n",
+        ));
+        let config = Config::read(repo.path()).expect("a [calendar] table must load");
+        assert_eq!(config.calendar.periods, [PeriodKind::Day, PeriodKind::Week]);
+        assert_eq!(config.calendar.periodic_folders, ["daily"]);
+        assert_eq!(config.calendar.week_start, WeekStart::Monday);
+        assert_eq!(config.calendar.companion, CompanionMode::Off);
+        assert!(config.calendar.enabled);
+        assert_eq!(config.calendar.date_fields, ["date", "created"]);
+    }
+
+    #[test]
+    fn test_config_read_rejects_an_unknown_calendar_key() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[calendar]\nperiod = [\"day\"]\n"));
+        assert!(Config::read(repo.path()).is_err());
+        let repo = repo_with_mbr_dir(Some("[calendar]\nperiods = [\"fortnight\"]\n"));
+        assert!(Config::read(repo.path()).is_err());
+    }
+
+    #[test]
+    fn test_config_read_calendar_env_overrides_one_key() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[calendar]\nagenda_chips = false\n"));
+        let _env = EnvVars::set(&[("MBR_CALENDAR__ENABLED", "false")]);
+        let config = Config::read(repo.path()).expect("env must load");
+        assert!(!config.calendar.enabled);
+        assert!(!config.calendar.agenda_chips, "the file's other keys stay");
     }
 
     /// A `.mbr/config.toml` written before this option existed must still load.

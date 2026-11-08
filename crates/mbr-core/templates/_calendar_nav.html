@@ -1,0 +1,24 @@
+{#- Periodic-note navigation: the slim prev / up / next bar at the top of
+    <main> on a daily, weekly, monthly, quarterly or yearly note. Rendered only
+    when `calendar_nav` is set (see `calendar::PeriodicIndex::nav`); `[` and `]`
+    follow its rel="prev" / rel="next" links, so key and bar cannot disagree.
+    A custom `.mbr/index.html` must include this partial to get the bar. -#}
+{%- if calendar_nav -%}
+<nav class="mbr-calendar-nav" aria-label="Periodic notes" data-mbr-period="{{ calendar_nav.period }}" data-mbr-period-kind="{{ calendar_nav.kind }}" data-pagefind-ignore>
+  {%- if calendar_nav.prev %}
+  <a class="mbr-calendar-nav-prev" rel="prev" href="{{ calendar_nav.prev.url }}" title="{{ calendar_nav.prev.title }}">{{ icon(name="chevron-left", size=16) | safe }}<span>{% if calendar_nav.prev.datetime %}<time datetime="{{ calendar_nav.prev.datetime }}">{{ calendar_nav.prev.label }}</time>{% else %}{{ calendar_nav.prev.label }}{% endif %}</span></a>
+  {%- else %}
+  <span class="mbr-calendar-nav-prev mbr-calendar-nav-none" aria-hidden="true"></span>
+  {%- endif %}
+  <span class="mbr-calendar-nav-current">{{ icon(name="calendar-days", size=16) | safe }}<strong>{% if calendar_nav.datetime %}<time datetime="{{ calendar_nav.datetime }}">{{ calendar_nav.label }}</time>{% else %}{{ calendar_nav.label }}{% endif %}</strong>
+    {%- for up in calendar_nav.up %}
+    <a class="mbr-calendar-nav-up" data-mbr-period-kind="{{ up.kind }}" href="{{ up.url }}" title="{{ up.title }}">{% if up.datetime %}<time datetime="{{ up.datetime }}">{{ up.label }}</time>{% else %}{{ up.label }}{% endif %}</a>
+    {%- endfor %}
+  </span>
+  {%- if calendar_nav.next %}
+  <a class="mbr-calendar-nav-next" rel="next" href="{{ calendar_nav.next.url }}" title="{{ calendar_nav.next.title }}"><span>{% if calendar_nav.next.datetime %}<time datetime="{{ calendar_nav.next.datetime }}">{{ calendar_nav.next.label }}</time>{% else %}{{ calendar_nav.next.label }}{% endif %}</span>{{ icon(name="chevron-right", size=16) | safe }}</a>
+  {%- else %}
+  <span class="mbr-calendar-nav-next mbr-calendar-nav-none" aria-hidden="true"></span>
+  {%- endif %}
+</nav>
+{%- endif -%}

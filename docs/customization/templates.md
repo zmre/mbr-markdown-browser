@@ -31,6 +31,7 @@ Partials are prefixed with underscore and included by other templates:
 | `_scripts.html` | Base JavaScript includes |
 | `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person and organization pages) |
 | `_contact_card.html` | Contact card at the top of `type: person` / `type: organization` pages, from the `contact` variable — see [Contacts](../markdown/contacts/#customizing) |
+| `_calendar_nav.html` | Periodic-note navigation: the prev / up / next bar at the top of `<main>` on a daily, weekly, monthly, quarterly or yearly note, from the `calendar_nav` variable — see [Calendar](../markdown/calendar/#navigating-periodic-notes). The `[` / `]` keys follow its `rel="prev"` / `rel="next"` links |
 | `_person_infobox.html` | Compatibility shim: renders the contact card without its headline, for custom `index.html` files written before the card existed |
 
 ## Template Variables
@@ -68,6 +69,8 @@ These variables are available in all templates:
 | `current_dir_name` | string | Current directory name |
 | `current_path` | string | Current URL path |
 | `frontmatter_json` | string | All frontmatter as JSON |
+| `calendar_enabled` | bool | `[calendar] enabled`; gates `<mbr-calendar>` in `_footer.html` and the pre-paint script in `_head.html` |
+| `calendar_nav` | object | Only on a [periodic note](../markdown/calendar/#periodic-notes): `period` (canonical key, e.g. `2026-10-31`, `2026-W44`), `kind` (`day`/`week`/`month`/`quarter`/`year`), `label` (English, e.g. `Saturday, October 31, 2026`), `datetime` (for `<time datetime>`; absent for a quarter), `prev` / `next` (the nearest notes of the same kind, or absent) and `up` (the containing week / month / quarter / year notes that exist). Each link has `kind`, `period`, `url` (page-relative in static builds), `label`, `title` and `datetime`. Drawn by `_calendar_nav.html` |
 
 ### Directory Pages (`section.html`, `home.html`)
 
@@ -202,7 +205,11 @@ window.__MBR_CONFIG__ = {
   serverMode: true,     // false for static builds
   guiMode: true,        // true only in native window (-g)
   searchEndpoint: "/.mbr/search",
-  basePath: ""          // relative path prefix for static builds
+  basePath: "",         // relative path prefix for static builds
+  calendar: {           // the browser's half of the [calendar] table (snake_case), on every page
+    enabled: true, date_fields: ["date", "created"],
+    week_start: "locale", companion: "auto", agenda_chips: true
+  }
 };
 ```
 
@@ -237,6 +244,7 @@ Create `.mbr/index.html`:
   {% include "_breadcrumbs.html" %}
 
   <main class="container">
+    {% include "_calendar_nav.html" %}
     <article>
       {% if title %}
         <h1>{{ title }}</h1>
@@ -253,6 +261,24 @@ Create `.mbr/index.html`:
 </body>
 </html>
 ```
+
+**Periodic-note navigation in a custom `index.html`.** The bar on daily,
+weekly and other periodic notes is the `_calendar_nav.html` partial, which the
+built-in `index.html` includes at the top of `<main>`. A custom `.mbr/index.html`
+written before it existed does not include it, so add
+`{% include "_calendar_nav.html" %}` inside your `<main>` (as above) to get the
+bar and the `[` / `]` keys. Keep it inside `<main>` rather than the header: the
+iOS app hides the header.
+
+**The daily-note companion in a custom template.** On a day note (with
+`[calendar] companion = "auto"`) mbr appends `mbr-has-companion` to the `style`
+variable, so a template that renders `<body class="{{ style }}">` reserves the
+right-hand column with no change. The column itself is the `<mbr-calendar>`
+element `_footer.html` emits (when `calendar_enabled` is true); it must stay a
+direct child of `<body>`, which it is as long as your template includes
+`_footer.html` there. `_head.html` carries a one-line script that applies the
+reader's dismissal before the first paint; a custom head should include
+`_head.html` rather than copy it.
 
 ## Example: Add Analytics
 

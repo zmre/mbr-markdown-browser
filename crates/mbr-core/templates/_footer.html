@@ -9,3 +9,9 @@
        server_mode because notes anchor to `data-mbr-line`, which a static build
        does not emit. #}
     {% if server_mode and review_enabled %}<mbr-review></mbr-review>{% endif %}
+    {# Calendar (C, the daily-note companion; later c, the calendar overlay).
+       A body child on purpose: on a day note under `companion = "auto"` this
+       element *is* the docked right column (theme.css, "Daily-note
+       Companion"), reserved by the `mbr-has-companion` body class before any
+       script runs. Elsewhere it is a drawer and a floating button. #}
+    {% if calendar_enabled %}<mbr-calendar></mbr-calendar>{% endif %}

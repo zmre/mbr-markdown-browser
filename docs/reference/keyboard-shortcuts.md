@@ -22,6 +22,8 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 | `g g` | Go to top of page |
 | `G` | Go to bottom of page |
 | `H` / `L` | Previous / next sibling page |
+| `d` | Go to today's [daily note](../markdown/calendar/#periodic-notes) (your local date); else the most recent one before today. A short message says so when the repository has none |
+| `[` / `]` | Previous / next [periodic note](../markdown/calendar/#navigating-periodic-notes) of the same kind (day, week, month, quarter, year), skipping gaps. Only on a periodic note; a no-op elsewhere |
 | `Ctrl+o` / `Ctrl+i` | History back / forward |
 
 **Note on `Ctrl+f`:** full-page-down is bound on macOS only, where `Cmd+F` is the find
@@ -42,6 +44,8 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `r` | Add a [review note](../modes/review/), anchored to the selection (server and GUI modes only) |
 | `R` | Open the review panel (server and GUI modes only) |
 | `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../markdown/flashcards/) (on a `type: flashcard` page) |
+| `c` | The [calendar overlay](../markdown/calendar/#the-calendar-overlay): your notes by month, week or list. Inside it, `?` lists its own keys |
+| `C` (Shift+c) | The [daily-note companion](../markdown/calendar/#the-daily-note-companion): docked, move into it, or dismiss it when already there; elsewhere, open or close it as a drawer |
 | `Esc` | Close current panel |
 
 While a slide deck plays, the keyboard belongs to the slides: `?` shows the
@@ -103,6 +107,21 @@ server and GUI modes only — a static build has no files to re-read. Disable it
 The filter field keeps focus the whole time, so `Space`, `x`, `←` and `→` reach it
 until you move onto a task with the arrow keys — and typing in the field hands them
 back. Filtering for "buy milk" therefore works as you would expect.
+
+In **By Due**'s **Week** and **Month** views:
+
+| Key | Action |
+|-----|--------|
+| `↓` / `Enter` (in the filter field) | Move into the grid |
+| Arrows / `h` `j` `k` `l` | Move between days |
+| `[` / `]`, PageUp / PageDown | Previous / next week or month |
+| `t` | Today |
+| `m` / `w` / `a` | Month / Week / List view |
+| `/` | Back to the filter field |
+| `Enter` | List the focused day's tasks |
+| `Space` / `x` | Complete / cancel a day's only task, else list the day (editing) |
+| `↑` / `↓`, `Enter`, `Space`, `x` | In a day's list: move, open, complete, cancel |
+| `Esc` | Close the day's list, then the panel |
 
 ## Review Notes (when open)
 

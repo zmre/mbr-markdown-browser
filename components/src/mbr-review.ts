@@ -838,7 +838,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
      */
     .review-fab {
       position: fixed;
-      right: calc(1rem + env(safe-area-inset-right, 0px));
+      right: calc(1rem + var(--mbr-inset-right, 0px) + env(safe-area-inset-right, 0px));
       bottom: calc(1rem + env(safe-area-inset-bottom, 0px) + var(--mbr-fab-stack-offset, 0px));
       z-index: 800;
       width: 56px;
@@ -897,7 +897,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
 
     /* No selection to point at: park it clear of the floating action button. */
     .form-anchor.form-corner {
-      right: calc(1rem + env(safe-area-inset-right, 0px));
+      right: calc(1rem + var(--mbr-inset-right, 0px) + env(safe-area-inset-right, 0px));
       bottom: calc(5rem + env(safe-area-inset-bottom, 0px) + var(--mbr-fab-stack-offset, 0px));
     }
 

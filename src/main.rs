@@ -464,6 +464,8 @@ async fn run() -> Result<(), MbrError> {
                 current_url: "",
                 siblings: &[],
                 slides: render_result.slides.as_ref().map(|s| &s.settings),
+                // A single file rendered to stdout has no repository index.
+                calendar_nav: None,
             },
             &mbr::page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -481,6 +483,7 @@ async fn run() -> Result<(), MbrError> {
                 title_suffix: &config.title_suffix,
                 root_dir: None,
                 slides: &config.slides,
+                calendar: &mbr::page_context::CalendarChrome::new(&config.calendar),
             },
             &mbr::page_context::UrlMode::Absolute,
         );

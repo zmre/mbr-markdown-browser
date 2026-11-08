@@ -94,7 +94,9 @@ const MASKS: Record<string, string> = {
   warning: 'triangle-alert',
   caution: 'octagon-alert',
   calendar: 'calendar',
+  'calendar-clock': 'calendar-clock',
   check: 'check',
+  x: 'x',
   'arrow-right': 'arrow-right',
   'chevron-right': 'chevron-right',
 }

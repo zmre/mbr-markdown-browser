@@ -66,6 +66,58 @@ pub fn path_to_url(relative: &Path) -> String {
     url
 }
 
+/// A repository folder in the one form folder scopes are compared in:
+/// `/`-separated (a `\` is a separator too), without surrounding
+/// whitespace, leading `./` or leading and trailing slashes. `""` is the
+/// repository root.
+///
+/// Shared by the two folder scopes users type — `[calendar]
+/// periodic_folders` and the task panel's folder filter — so `./journal/`,
+/// `journal`, `/journal` and `journal\` all mean the same folder in both.
+///
+/// # Examples
+///
+/// ```
+/// use mbr_core::url_path::normalize_folder;
+///
+/// assert_eq!(normalize_folder("./journal/"), "journal");
+/// assert_eq!(normalize_folder(" /work\\weekly/ "), "work/weekly");
+/// assert_eq!(normalize_folder("/"), "");
+/// ```
+pub fn normalize_folder(folder: &str) -> String {
+    let folder = folder.replace('\\', "/");
+    let mut trimmed = folder.trim();
+    while let Some(rest) = trimmed.strip_prefix("./") {
+        trimmed = rest;
+    }
+    trimmed.trim_matches('/').to_string()
+}
+
+/// Whether `folder` is `scope` or below it. Both are repository folders;
+/// leading and trailing slashes on either are ignored, so a
+/// [`normalize_folder`] scope can be tested against a `/docs/notes/`-style
+/// folder as is. An empty scope (the root) contains everything, and a scope
+/// never half-matches a sibling: `doc` does not contain `docs`.
+///
+/// # Examples
+///
+/// ```
+/// use mbr_core::url_path::folder_contains;
+///
+/// assert!(folder_contains("docs", "/docs/notes/"));
+/// assert!(folder_contains("docs", "docs"));
+/// assert!(!folder_contains("doc", "/docs/"));
+/// assert!(folder_contains("", "anything"));
+/// ```
+pub fn folder_contains(scope: &str, folder: &str) -> bool {
+    let scope = scope.trim_matches('/');
+    scope.is_empty()
+        || folder
+            .trim_matches('/')
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 /// Returns `true` when `url` addresses something outside this site.
 ///
 /// This is the one place that answers the question. Link transformation
@@ -318,6 +370,40 @@ mod tests {
     /// tests exercise `\` on Windows and `/` on Unix from identical source.
     fn native(parts: &[&str]) -> PathBuf {
         parts.iter().collect()
+    }
+
+    #[test]
+    fn test_normalize_folder_accepts_every_spelling() {
+        for input in [
+            "journal",
+            "/journal",
+            "journal/",
+            "/journal/",
+            "./journal/",
+            "././journal",
+            "  /journal/  ",
+            "journal\\",
+        ] {
+            assert_eq!(normalize_folder(input), "journal", "for {input:?}");
+        }
+        assert_eq!(normalize_folder("work\\weekly"), "work/weekly");
+        for root in ["", "/", "   ", "//", "./"] {
+            assert_eq!(normalize_folder(root), "", "for {root:?}");
+        }
+    }
+
+    #[test]
+    fn test_folder_contains_is_segment_wise() {
+        assert!(folder_contains("journal", "journal"));
+        assert!(folder_contains("journal", "journal/2026"));
+        assert!(folder_contains("journal", "/journal/2026/"));
+        assert!(folder_contains("/journal/", "journal/2026"));
+        assert!(!folder_contains("journal", "journals"));
+        assert!(!folder_contains("journal", "/journals/"));
+        assert!(!folder_contains("journal/2026", "journal"));
+        assert!(!folder_contains("journal", ""));
+        assert!(folder_contains("", ""));
+        assert!(folder_contains("", "/a/b/"));
     }
 
     #[test]

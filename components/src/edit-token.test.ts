@@ -391,6 +391,9 @@ describe('durable web storage across the whole frontend', () => {
   it('is used only by the features that were reviewed and found to hold nothing secret', () => {
     // Each of these stores something the reader could get off the page anyway,
     // and none of them stores a credential:
+    //   calendar/companion-pref.ts — one UI preference flag: the reader
+    //     dismissed the docked daily-note companion. Nothing from the page,
+    //     nothing secret, scoped by repo id; `_head.html` reads it before paint.
     //   mbr-browse.ts        — recently viewed pages and pinned shortcuts (URLs)
     //   mbr-video-extras.ts  — playback position per video, in seconds
     //   genealogy/selector.ts — which genealogy chart the reader last picked
@@ -408,6 +411,7 @@ describe('durable web storage across the whole frontend', () => {
     // is why `review-store.ts` calls `localStorage` itself and is the only part
     // of the review feature that does.
     expect(modulesUsing('localStorage')).toEqual([
+      'calendar/companion-pref.ts',
       'genealogy/selector.ts',
       'mbr-browse.ts',
       'mbr-video-extras.ts',

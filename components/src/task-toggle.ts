@@ -430,6 +430,21 @@ function describeReadFailure(status: number): ToggleFailure {
 }
 
 /**
+ * Dispatched on `document`, with `{ path }` (repository-relative), whenever a
+ * repository file is known to have changed: by `<mbr-live-reload>` for every
+ * change event the server sends (before it decides whether to reload), and
+ * by {@link toggleTask} after each successful write (the in-app page has no
+ * socket). For state derived from the files that nothing re-renders: the
+ * calendar companion's task markers drop their cache on it.
+ */
+export const FILE_CHANGED_EVENT = 'mbr-file-changed'
+
+/** Announces {@link FILE_CHANGED_EVENT} for `path`. */
+export function announceFileChanged(path: string): void {
+  document.dispatchEvent(new CustomEvent(FILE_CHANGED_EVENT, { detail: { path } }))
+}
+
+/**
  * Set one task's status.
  *
  * Resolves rather than rejects on failure: every caller has a revert to run and
@@ -504,6 +519,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     if (typeof body.text !== 'string') throw new Error('no text in the response')
     read.lines[target.line - 1] = body.text
     noteSourceHash(path, typeof body.hash === 'string' ? body.hash : null)
+    announceFileChanged(path)
     return { ok: true, text: body.text }
   } catch {
     // A response we cannot parse says nothing about the write, which the
@@ -511,6 +527,7 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
     // stop checking the page's version, which moved to one we never learned.
     lineCache.delete(path)
     noteSourceHash(path, null)
+    announceFileChanged(path)
     return { ok: true }
   }
 }

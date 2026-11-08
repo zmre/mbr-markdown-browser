@@ -29,6 +29,7 @@ description: The fast, complete markdown browser and static site generator
 | [Markdown Extensions](markdown/) | Extended syntax reference |
 | [Page Styles and Types](markdown/styles/) | Restyle a whole page from frontmatter |
 | [Task Browser](markdown/tasks/) | Find, filter and complete tasks (server/GUI) |
+| [Calendar and Periodic Notes](markdown/calendar/) | Daily, weekly and monthly notes, note dates, and the `d` / `[` / `]` keys |
 | [Flashcards](markdown/flashcards/) | Review a note's definition lists as flashcards, with spaced repetition |
 | [Relationships & Genealogy](markdown/relationships/) | Typed relationships between notes |
 | [Contacts](markdown/contacts/) | People and organizations: contact card, labeled fields, org relationships |

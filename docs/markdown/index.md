@@ -187,6 +187,10 @@ displayed text and rendered as their own elements, so the line stays readable.
 | `!!` | High priority | An orange dot |
 | `!!!` | Urgent | A red dot; wins over `!!` |
 
+Obsidian Tasks emoji (`📅 2026-08-05`), Dataview fields (`[due:: 2026-08-05]`)
+and org / Logseq `SCHEDULED:` / `DEADLINE:` lines are read too; see [Dates from
+other tools](tasks/#dates-from-other-tools).
+
 ```markdown
 - [ ] Write the report !! #work @due(2026-08-05)
 - [x] File the receipts #admin @done(2026-08-04 12:11 PM)

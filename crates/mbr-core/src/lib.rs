@@ -37,15 +37,18 @@ pub fn http_client(timeout: std::time::Duration) -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+pub mod agenda;
 pub mod assets;
 pub mod attrs;
 pub mod audio;
 pub mod cache;
+pub mod calendar;
 pub mod change_event;
 pub mod chat;
 pub mod config;
 pub mod constants;
 pub mod contact;
+pub mod date_expr;
 pub mod edit_auth;
 #[cfg(test)]
 mod editor_math_parity;
@@ -114,8 +117,9 @@ pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, Search
 pub use sorting::sort_files;
 pub use task_index::{FileTasks, TaskIndex};
 pub use task_query::{
-    DueBucket, DueFilter, IncludeFilter, TaskGroup, TaskMode, TaskQuery, TaskQueryResponse,
-    due_bucket, parse_task_query, run_query,
+    DueBucket, DueFilter, GridDay, GridTaskHit, IncludeFilter, Placement, TaskGridResponse,
+    TaskGroup, TaskMode, TaskQuery, TaskQueryResponse, due_bucket, grid_range, parse_task_query,
+    run_grid_query, run_query,
 };
 pub use tasks::{
     Annotations, MarkerRule, Task, TaskKind, TaskPriority, TaskStatus, parse_marker_line,

@@ -5,6 +5,8 @@
  * sort configuration from site.json.
  */
 
+import type { NoteCalendar } from './calendar/note-date.js';
+
 /**
  * Sort field configuration from site.json.
  */
@@ -23,6 +25,12 @@ export interface MarkdownFile {
   created: number;
   modified: number;
   frontmatter: Record<string, any> | null;
+  /**
+   * The note's calendar date and, for a periodic note, its period. Omitted
+   * by the server for an undated note. Read it through
+   * `calendar/note-date.ts`'s `noteDate`, which owns the birthtime fallback.
+   */
+  calendar?: NoteCalendar;
 }
 
 /**

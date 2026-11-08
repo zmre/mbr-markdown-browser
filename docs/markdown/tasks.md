@@ -15,7 +15,9 @@ however you need to look at them today.
 *The task browser (`t`), grouped by note. The overdue date is shown in red.*
 
 The syntax it reads is documented in [Markdown Extensions](./#tasks): the four
-markers, `@due(...)`, `@done(...)`, `#tag` and the `!!` / `!!!` priorities.
+markers, `@due(...)`, `@done(...)`, `#tag` and the `!!` / `!!!` priorities. It
+also reads the dates and priorities written by Obsidian Tasks, Dataview, org
+mode and Logseq: see [Dates from other tools](#dates-from-other-tools).
 Nothing here requires any change to your notes — if you already write
 `- [ ] something`, you already have a task list.
 
@@ -104,6 +106,43 @@ Canceled tasks are ignored entirely in calendar mode — they do not appear, do
 not count, and cannot create a bucket. A canceled task has no meaningful
 deadline.
 
+#### Week and month grids
+
+**By Due** has a view switch: **List** (the buckets above), **Week** and
+**Month**. The grids put each task on a day:
+
+| The task has | It goes on |
+|--------------|------------|
+| A done date and a ticked box | Its done date, drawn done |
+| Otherwise a due date (any [notation](#dates-from-other-tools)) | Its due date |
+| Otherwise only a scheduled date | Its scheduled date |
+| No date at all | Nowhere — see below |
+
+A done task with no done date but a due date sits on its due date, drawn done.
+Canceled tasks and [incomplete markers](#incomplete-markers) never appear. A
+day lists its open tasks first, then timed ones by time (a time on the date, or
+a time the text starts with, like `09:30 call`), then by priority.
+
+Days in the past that still have an open task placed by its **due** date have
+their date in red. A scheduled date is when you plan to start, not a deadline,
+so a past day holding only scheduled (or done) tasks stays plain. When tasks
+were due before the range on screen, an **Overdue (12)** chip in the header
+switches to the List view filtered to overdue tasks. ‹ › page by a week or a
+month and **Today** comes back; the filter text, folder, status and priority
+filters apply to the grids as they do to the list.
+
+Click a day (or press `Enter` on it) to list its tasks as the usual cards, with
+their checkboxes: completing or cancelling works there exactly as in the list.
+A task line in the grid is a link to the task in its note.
+
+An undated task in a [day note](calendar/#periodic-notes) is not drawn on the
+grid: it has no date of its own. It does count toward that day's mark in the
+[calendar companion](calendar/#task-markers).
+
+The Week and Month views need the calendar (`[calendar] enabled`, the
+default). On a screen narrower than 600px Month shows as Week. The choice of
+view lasts as long as the panel is open.
+
 ## Filtering
 
 Type in the filter field to narrow by text. Bare words match the task's text
@@ -165,6 +204,22 @@ so it should feel familiar.
 | `Ctrl+f` / `Ctrl+b` | Scroll the active pane a full page |
 | `Esc` | Close the filter options, then the panel |
 
+In the **Week** and **Month** views the arrows move between days instead, as in
+the [calendar overlay](calendar/#the-calendar-overlay):
+
+| Key | Action |
+|-----|--------|
+| `↓` or `Enter` in the filter field | Move into the grid |
+| Arrows, or `h` `j` `k` `l` in the grid | Move between days |
+| `[` / `]`, PageUp / PageDown | Previous / next week or month |
+| `t` | Today |
+| `m` / `w` / `a` | Month / Week / List |
+| `/` | Back to the filter field |
+| `Enter` | List the focused day's tasks |
+| `Space` / `x` | On a day with one task, complete / cancel it; otherwise list the day *(editing only)* |
+| `↑` / `↓` (or `k` / `j`), `Enter`, `Space`, `x` | In a day's list: move, open, complete, cancel |
+| `Esc` | Close the day's list, then the panel |
+
 Typing goes to the filter field, which keeps focus the whole time. `Space`,
 `x`, `←` and `→` only take over once you have moved onto a task with the arrow
 keys — and any keystroke in the filter field hands them back — so filtering for
@@ -200,13 +255,26 @@ version, and the panel refreshes its list so you can try again. On a vault the
 server has to fetch from the cloud first (the iOS app over iCloud), a note that
 is still downloading says so; try again in a moment.
 
-The page does **not** reload for your own toggle. A `@done(...)` chip appears
+The page does **not** reload for your own toggle. A done chip appears
 (or disappears) in place, your scroll position and the panel's filters survive,
 and on a server that requires an [edit
 token](../modes/editing/#entering-the-token) the token — which is kept in memory
 only — is still there for the next click.
 
-Only the marker byte and the `@done(...)` stamp are rewritten. Indentation,
+Only the marker byte and the done stamp are rewritten. The stamp is written in
+the notation the line already uses, so mbr never adds a foreign notation to a
+vault a plugin manages:
+
+| The line has… | Completing it appends |
+|---------------|-----------------------|
+| Any Obsidian Tasks emoji (`📅`, `⏳`, `⏫`, `🔁`, …) | ` ✅ 2026-11-06` |
+| Any Dataview inline field (`[due:: …]`, `(priority:: high)`, …) | ` [completion:: 2026-11-06]` |
+| Neither | ` @done(2026-11-06 14:32)` |
+
+A line that already carries a done date in any of these notations is not
+stamped twice, and reopening or cancelling a task removes whichever one it has.
+
+Indentation,
 bullet style, spacing, your other annotations, the line's ending (a CRLF file
 stays CRLF) and the presence or absence of a trailing newline are all preserved.
 See [`tasks_stamp_done`](../reference/configuration/#task-settings) to turn the
@@ -215,6 +283,81 @@ endpoint behind it.
 
 Without editing enabled, the checkboxes stay inert and `Space` / `x` stay
 unbound — no control appears that cannot do anything.
+
+## Dates from other tools
+
+Vaults kept with other tools write task dates their own way. mbr reads these
+too, strips them from the task's text, and shows them as the same chips as
+`@due(...)`. It never rewrites them; the only thing it writes is the done stamp
+described in [Toggling a task](#toggling-a-task).
+
+**Obsidian Tasks emoji**
+
+```markdown
+- [ ] File the report ⏫ 📅 2026-10-31
+- [ ] Plan the trip ⏳ 2026-10-30 🛫 2026-10-01 ➕ 2026-09-15
+- [x] Pay the invoice 📅 2026-10-20 ✅ 2026-10-19
+- [-] Old idea ❌ 2026-10-18
+```
+
+| Emoji | Read as |
+|-------|---------|
+| `📅` (also `📆`, `🗓️`) | Due date |
+| `⏳` (also `⌛`) | Scheduled date |
+| `✅` | Done date |
+| `❌` | Cancelled date (a chip only; the checkbox still decides the status) |
+| `🛫` start, `➕` created | Hidden from the text, not used |
+| `🔺` | Urgent, like `!!!` |
+| `⏫`, `🔼` | High, like `!!` |
+| `🔽`, `⏬` | No priority (mbr has no level below normal); hidden from the text |
+
+Tasks has five priority levels and mbr has three, so medium (`🔼`) counts as
+high: it ranks above an unmarked task. A priority emoji counts only on its own,
+separated by spaces, as `!!` does. Recurrence (`🔁 every week`) stays in the
+text.
+
+**Dataview inline fields**
+
+```markdown
+- [ ] Call the bank [due:: 2026-10-31]
+- [ ] Draft the talk (scheduled:: 2026-10-30T09:30)
+- [x] Renew the passport [completion:: 2026-10-12]
+```
+
+`[due:: …]`, `[scheduled:: …]`, `[completion:: …]` and `[cancelled:: …]` are
+read; `[created:: …]` and `[start:: …]` are hidden but not used. Square brackets
+or parentheses both work. Keys must be lowercase. A value takes the same date
+forms as `@due(...)`, plus Dataview's `2026-10-30T09:30`. Other fields, such as
+`[priority:: high]`, stay in the text.
+
+**Org mode and Logseq planning lines**
+
+```markdown
+- [ ] Ship the release
+  SCHEDULED: <2026-10-31 Sat>
+- [ ] Submit the grant
+  SCHEDULED: <2026-10-28 Wed 09:00 +1w> DEADLINE: <2026-11-02 Mon>
+```
+
+`DEADLINE:` is the due date and `SCHEDULED:` the scheduled date. A planning
+line counts only on the lines directly after a checkbox task, before any other
+text in the item; elsewhere it is ordinary text. Repeaters and warning periods
+(`+1w`, `.+1d`, `-2d`) are ignored. Org's `CLOSED: […]` is recognised and
+hidden, but its date is not used. Logseq's `TODO` / `DONE` keyword items are
+not checkbox tasks: a `TODO` is an [incomplete marker](#incomplete-markers), and
+markers do not take planning dates.
+
+**When a line has several.** The first due date in the line wins, whatever its
+notation: in `- [ ] a 📅 2026-10-31 @due(2026-11-30)` the task is due on
+October 31. A planning line comes after the task line, so a due date on the
+task line wins over `DEADLINE:`.
+
+**Scheduled dates** show as their own chip, in the document and in the panel.
+They do not change which task is overdue or which [By Due](#by-due) bucket it
+falls in; only the due date does.
+
+NotePlan's trailing `> 2026-11-03` is still read as "moved to that day", as
+before, not as a due date.
 
 ## Incomplete markers
 
@@ -294,7 +437,7 @@ Highlighting](../reference/configuration/#incomplete-marker-highlighting).
 | Option | Default | Effect |
 |--------|---------|--------|
 | `tasks_enabled` | `true` | Turn the panel and its endpoint off (`--no-tasks`) |
-| `tasks_stamp_done` | `true` | Maintain `@done(...)` when a task is completed |
+| `tasks_stamp_done` | `true` | Maintain a done stamp (`@done(...)`, or the line's own `✅` / `[completion::]` notation) when a task is completed |
 | `tasks_default_include` | `"tasks"` | Where the **Show** filter starts: `"tasks"`, `"markers"` or `"all"` (config/env only) |
 | `tasks_ignore_globs` | `[]` | Folders whose tasks the panel ignores (config/env only) |
 | `mark_incomplete` | server/GUI on | Also gates [incomplete markers](#incomplete-markers) in the panel (`--no-mark-incomplete`) |

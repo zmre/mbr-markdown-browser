@@ -43,7 +43,7 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// at *any* `---` line. Parse through [`crate::frontmatter::parse`] /
 /// [`crate::frontmatter::parse_with_offsets`], which recognise frontmatter only
 /// at the start of the document.
-pub(crate) fn markdown_options() -> Options {
+pub fn markdown_options() -> Options {
     Options::all()
 }
 
@@ -1260,6 +1260,7 @@ fn collect_events_and_headings<'a>(
 
                 let mut task = PendingTask {
                     text_at: Vec::new(),
+                    breaks_at: Vec::new(),
                 };
                 // `[-]` / `[>]` are not parser-recognised markers: the checkbox
                 // and the first run of display text arrive as one text event, so
@@ -1291,8 +1292,10 @@ fn collect_events_and_headings<'a>(
                     // the heading arms need an open heading and the hint arm a
                     // `Start(Paragraph)` immediately behind, which the span-open
                     // event displaces.
-                    if matches!(event, Event::Text(_)) {
-                        task.text_at.push(events.len());
+                    match event {
+                        Event::Text(_) => task.text_at.push(events.len()),
+                        Event::SoftBreak | Event::HardBreak => task.breaks_at.push(events.len()),
+                        _ => {}
                     }
                     push_event(&mut events, text_lines, block_lines, event, source_line);
                     continue;
@@ -1732,6 +1735,10 @@ struct PendingTask {
     /// has end-anchored rules (the trailing `> YYYY-MM-DD`, the whitespace
     /// collapse), so no run can be rewritten until the last one has been seen.
     text_at: Vec<usize>,
+    /// Positions in the output of the line breaks inside the task's paragraph,
+    /// in order. They split the task line from its continuation lines, which
+    /// is where an org / Logseq planning line (`SCHEDULED: <…>`) sits.
+    breaks_at: Vec<usize>,
 }
 
 /// Closes an open task: strips the annotations out of its text runs, rewrites
@@ -1745,10 +1752,12 @@ struct PendingTask {
 /// through [`push_event`] instead, or the `data-mbr-line` table will address the
 /// wrong slots from that point on.
 fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
-    let (stripped, annotations) = {
+    let planning = take_planning_lines(output, &task);
+    let (stripped, mut annotations) = {
         let runs: Vec<&str> = task
             .text_at
             .iter()
+            .filter(|index| !planning.consumed.contains(index))
             .map(|&index| match &output[index] {
                 Event::Text(text) => text.as_ref(),
                 // Only text events are recorded, so this is unreachable.
@@ -1757,8 +1766,15 @@ fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
             .collect();
         tasks::strip_annotations_across_runs(&runs)
     };
+    for found in &planning.lines {
+        annotations.absorb_planning(found);
+    }
 
-    for (&index, text) in task.text_at.iter().zip(stripped) {
+    let kept = task
+        .text_at
+        .iter()
+        .filter(|index| !planning.consumed.contains(index));
+    for (&index, text) in kept.zip(stripped) {
         output[index] = Event::Text(CowStr::from(text));
     }
 
@@ -1767,6 +1783,49 @@ fn close_task(output: &mut Vec<Event<'_>>, task: PendingTask) {
     if !chips.is_empty() {
         output.push(Event::Html(CowStr::from(chips)));
     }
+}
+
+/// The org / Logseq planning lines [`take_planning_lines`] lifted out of a task.
+struct TakenPlanning {
+    /// Their dates, in source order.
+    lines: Vec<tasks::Planning>,
+    /// Output positions of the text runs they occupied, now emptied.
+    consumed: Vec<usize>,
+}
+
+/// Lifts the planning lines (`SCHEDULED: <…>`, `DEADLINE: <…>`) out of a
+/// task's continuation lines, blanking each line's text run and the line break
+/// in front of it so neither reaches the page.
+///
+/// The rule is the scanner's (`tasks::scan_source_tasks_with_markers`): only
+/// the lines directly after the task line count, and the first line that is
+/// not a planning line ends the search. A planning line is a whole source line
+/// holding nothing but entries, so here it is a line of exactly **one** text
+/// run — a line with inline markup in it is not one.
+///
+/// Blanking replaces rather than removes, so every recorded output position
+/// (the `TextLines` and `BlockLines` tables index by it) stays valid. The break
+/// becomes an empty `Event::Html`, which owes neither table a record, for the
+/// reason given on [`close_task`].
+fn take_planning_lines(output: &mut [Event<'_>], task: &PendingTask) -> TakenPlanning {
+    let mut taken = TakenPlanning {
+        lines: Vec::new(),
+        consumed: Vec::new(),
+    };
+    for (n, &line_break) in task.breaks_at.iter().enumerate() {
+        let line_end = task.breaks_at.get(n + 1).copied().unwrap_or(output.len());
+        let run = line_break + 1;
+        let planning = match output.get(run..line_end) {
+            Some([Event::Text(text)]) => tasks::parse_planning_line(text),
+            _ => None,
+        };
+        let Some(planning) = planning else { break };
+        taken.lines.push(planning);
+        taken.consumed.push(run);
+        output[run] = Event::Text(CowStr::Borrowed(""));
+        output[line_break] = Event::Html(CowStr::Borrowed(""));
+    }
+    taken
 }
 
 /// Everything a full render needs besides the markdown text itself.
@@ -4567,6 +4626,65 @@ mod tests {
                 r#" <time class="mbr-task-completed" datetime="2026-08-04T12:11">Aug 4, 12:11 PM</time>"#
             )
         );
+    }
+
+    #[tokio::test]
+    async fn obsidian_tasks_emoji_and_dataview_fields_render_as_chips() {
+        let html = render_markdown(
+            "- [x] ship it 🔺 📅 2026-10-31 ⏳ 2026-10-30 🛫 2026-10-01 ✅ 2026-11-01 [created:: 2026-09-01] ❌ 2026-11-02",
+        )
+        .await;
+        assert_eq!(
+            task_body(&html),
+            concat!(
+                r#"<input type="checkbox" class="mbr-task-check" id="mbr-task-1" "#,
+                r#"data-mbr-task-line="1" data-mbr-task-status="done" checked disabled>"#,
+                r#"<span class="mbr-task-text">ship it</span>"#,
+                r#" <span class="mbr-task-pri mbr-task-pri-urgent" role="img" "#,
+                r#"aria-label="Urgent priority" title="Urgent priority"></span>"#,
+                r#" <time class="mbr-task-due" datetime="2026-10-31">Oct 31</time>"#,
+                r#" <time class="mbr-task-scheduled" datetime="2026-10-30">Oct 30</time>"#,
+                r#" <time class="mbr-task-completed" datetime="2026-11-01">Nov 1</time>"#,
+                r#" <time class="mbr-task-canceled-on" datetime="2026-11-02">Nov 2</time>"#
+            )
+        );
+        let dataview = render_markdown("- [ ] a [due:: 2026-10-31] (scheduled:: 2026-10-30)").await;
+        assert!(
+            dataview.contains(r#"<span class="mbr-task-text">a</span> <time class="mbr-task-due""#),
+            "{dataview}"
+        );
+        assert!(dataview.contains("mbr-task-scheduled"), "{dataview}");
+    }
+
+    /// An org / Logseq planning line continues the task's paragraph; it
+    /// becomes chips, and its text and line break leave the page.
+    #[tokio::test]
+    async fn org_planning_lines_render_as_chips_on_the_task() {
+        let html = render_markdown(
+            "- [ ] ship it\n  SCHEDULED: <2026-10-31 Sat>\n  DEADLINE: <2026-11-02 Mon 09:00 +1w>\n- [ ] next\n",
+        )
+        .await;
+        assert!(!html.contains("SCHEDULED"), "{html}");
+        assert!(!html.contains("DEADLINE"), "{html}");
+        assert!(
+            html.contains(concat!(
+                r#"<span class="mbr-task-text">ship it</span>"#,
+                r#" <time class="mbr-task-due" datetime="2026-11-02T09:00">Nov 2, 9:00 AM</time>"#,
+                r#" <time class="mbr-task-scheduled" datetime="2026-10-31">Oct 31</time>"#
+            )),
+            "{html}"
+        );
+    }
+
+    /// The renderer applies the scanner's rule: a planning line counts only
+    /// directly after the task line, so the page and the task index agree.
+    #[tokio::test]
+    async fn a_planning_line_after_other_continuation_text_stays_prose() {
+        let source = "- [ ] ship it\n  more words\n  SCHEDULED: <2026-10-31 Sat>\n";
+        let html = render_markdown(source).await;
+        assert!(html.contains("SCHEDULED: &lt;2026-10-31 Sat&gt;"), "{html}");
+        assert!(!html.contains("mbr-task-scheduled"), "{html}");
+        assert_eq!(crate::tasks::scan_source_tasks(source)[0].scheduled, None);
     }
 
     #[tokio::test]

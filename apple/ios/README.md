@@ -144,10 +144,12 @@ navigation bar takes over:
   Grant Folder Access… gets a capsule of its own).
 - **⋯ menu:** the page's own actions, then the app's (Refresh, Home, Settings,
   Open Other Vault…). The page's actions are Browse, Search, Edit, Info,
-  Contents, Links Out, Links In, Tasks, Flashcards and Slides, each listed
-  only where it works: Edit with editing on, Contents on a page with
-  headings, Links Out/In on a note page, Tasks with the task browser enabled,
-  Flashcards and Slides only on a deck.
+  Contents, Links Out, Links In, Tasks, Today's Note, Calendar, Day Panel,
+  Flashcards and Slides, each listed only where it works: Edit with editing
+  on, Contents on a page with headings, Links Out/In on a note page, Tasks
+  with the task browser enabled, the three calendar actions with the calendar
+  on (Today's Note once the vault has a daily note, Day Panel unless the
+  companion is docked or off), Flashcards and Slides only on a deck.
 - **Search (⋯ → Search):** a native sheet, not the page's modal (see
   [Native search](#native-search)).
 - **While the editor is open** the bar is hidden and the edge swipes are
@@ -166,6 +168,9 @@ The page's actions:
 | `links-out` | `<mbr-fuzzy-nav>` `open('links-out')` | `hasPageLinks` (a note page; with link tracking off the tab is just empty) |
 | `links-in` | `<mbr-fuzzy-nav>` `open('links-in')` | `hasPageLinks` |
 | `tasks` | `<mbr-tasks>` `open()` | the task browser is enabled |
+| `today` | `openTodayDailyNote()` (the `d` key): today's daily note, else the most recent one before it | `<mbr-calendar>` is on the page and the site index has a daily note (known once `site.json` loads; the page re-posts its actions then) |
+| `calendar` | `<mbr-calendar>` `openOverlay()` over all notes (the `c` key) | `overlayAvailable` |
+| `companion` | `<mbr-calendar>` `toggleCompanion()`, the day panel drawer (the `C` key) | not `isDocked`, and `[calendar] companion` is not `off` |
 | `flashcards` | `<mbr-flashcards>` `open()` | a deck page |
 | `slides` | `<mbr-slides>` `open()` | a slide document |
 | `new` | `<mbr-editor>` `openNew()` | `canCreate` (editing on); the `+` button, not a ⋯ item |

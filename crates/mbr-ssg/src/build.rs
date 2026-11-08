@@ -412,6 +412,8 @@ pub struct Builder {
     /// non-canonical URL to the canonical one, so getting this right at render
     /// time is the only chance.
     markdown_page_probe: mbr_core::link_transform::MarkdownPageProbe,
+    /// `__MBR_CONFIG__.calendar`, serialized once for every page.
+    calendar_chrome: page_context::CalendarChrome,
 }
 
 impl Builder {
@@ -440,6 +442,7 @@ impl Builder {
             ),
         );
 
+        let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Ok(Builder {
             config,
             templates,
@@ -449,6 +452,7 @@ impl Builder {
             build_link_index,
             frontmatter_errors,
             markdown_page_probe,
+            calendar_chrome,
         })
     }
 
@@ -790,6 +794,19 @@ impl Builder {
             Arc::new(index)
         };
 
+        // Periodic-note navigation: built once for the whole build.
+        let periodic_index = self.config.calendar.enabled.then(|| {
+            let index = self.repo.periodic_index();
+            for (url_path, duplicate) in index.duplicates() {
+                tracing::warn!(
+                    "{url_path} names the period {} already claimed by {}; it is left out of periodic navigation",
+                    duplicate.period.key(),
+                    duplicate.kept
+                );
+            }
+            index
+        });
+
         // Progress counter for parallel rendering
         let completed = Arc::new(AtomicUsize::new(0));
         print_progress("Rendering markdown", 0, count);
@@ -818,7 +835,13 @@ impl Builder {
                 if error.is_set() {
                     return;
                 }
-                match self.render_single_markdown_sync(path, info, &sibling_index, &tera_snapshot) {
+                match self.render_single_markdown_sync(
+                    path,
+                    info,
+                    &sibling_index,
+                    periodic_index.as_ref(),
+                    &tera_snapshot,
+                ) {
                     Ok(()) => {
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         // Batch progress: only flush stdout every 100 files or at completion
@@ -1053,6 +1076,7 @@ impl Builder {
         path: &Path,
         info: &MarkdownInfo,
         sibling_index: &HashMap<PathBuf, Vec<serde_json::Value>>,
+        periodic_index: Option<&mbr_core::calendar::PeriodicIndex>,
         tera: &tera::Tera,
     ) -> Result<(), BuildError> {
         // Determine if this is an index file (which doesn't need ../ prefix for links)
@@ -1167,6 +1191,12 @@ impl Builder {
         let empty_siblings = Vec::new();
         let siblings = sibling_index.get(&parent_dir).unwrap_or(&empty_siblings);
 
+        // Periodic-note navigation, relativized by `markdown_extra_context`.
+        let calendar_nav = periodic_index.and_then(|index| {
+            let period = info.calendar.as_ref()?.period?;
+            Some(index.nav(&period))
+        });
+
         // Build the extra context (navigation, TOC, readability, chrome) via
         // the shared builder; static builds relativize URLs to the page depth.
         let mut extra_context = page_context::markdown_extra_context(
@@ -1181,6 +1211,7 @@ impl Builder {
                 current_url: &info.url_path,
                 siblings,
                 slides: slides.as_ref().map(|s| &s.settings),
+                calendar_nav: calendar_nav.as_ref(),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &self.config.tag_sources,
@@ -1204,6 +1235,7 @@ impl Builder {
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
                 slides: &self.config.slides,
+                calendar: &self.calendar_chrome,
             },
             &page_context::UrlMode::RelativeToDepth(depth),
         );
@@ -1494,6 +1526,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -1726,6 +1759,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -1803,6 +1837,7 @@ impl Builder {
                 title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -2288,6 +2323,7 @@ impl Builder {
                 title_affixes: None,
                 // No live repo to scope review storage against in a static build.
                 root_dir: None,
+                calendar: &self.calendar_chrome,
             },
         );
 
@@ -2379,6 +2415,7 @@ impl Builder {
                     title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
                     // No live repo to scope review storage against in a static build.
                     root_dir: None,
+                    calendar: &self.calendar_chrome,
                 },
             );
 
@@ -2822,6 +2859,7 @@ mod tests {
             frontmatter: None,
             created: 0,
             modified: 0,
+            calendar: None,
             relationships: Vec::new(),
         }
     }
@@ -3012,6 +3050,7 @@ mod tests {
             ),
         );
 
+        let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Builder {
             config,
             templates,
@@ -3021,6 +3060,7 @@ mod tests {
             build_link_index,
             frontmatter_errors,
             markdown_page_probe,
+            calendar_chrome,
         }
     }
 

@@ -161,6 +161,16 @@ export function revealTaskFromHash(hash: string): HTMLElement | null {
   return target
 }
 
+/**
+ * Scroll any element of the page clear of the sticky header and flash it — the
+ * same arrival treatment as a task. Injected into the calendar chunk (which
+ * may not import this module) for the agenda's "show me this entry".
+ */
+export function revealElement(element: HTMLElement): void {
+  scrollTaskIntoView(element, stickyHeaderHeight())
+  flashTask(element)
+}
+
 /** Make every rendered checkbox in `root` interactive. Idempotent. */
 export function enableTaskCheckboxes(root: ParentNode): void {
   root.querySelectorAll<HTMLInputElement>('input.mbr-task-check').forEach((input) => {

@@ -39,3 +39,5 @@ export * from './mbr-katex.ts';
 export * from './mbr-slides.ts';
 // Trigger + reading-view history summaries; the deck lives in mbr-flashcards.min.js.
 export * from './mbr-flashcards.ts';
+// Trigger, docked column and floating button; the companion lives in mbr-calendar.min.js.
+export * from './mbr-calendar.ts';

@@ -2244,6 +2244,7 @@ async fn test_build_writes_graph_chunks() {
         "mbr-genealogy.min.js",
         "mbr-flashcards.min.js",
         "mbr-flashcards-reading.min.js",
+        "mbr-calendar.min.js",
     ] {
         let path = output.join(".mbr").join("components").join(chunk);
         assert!(path.exists(), "Expected chunk at {}", path.display());
@@ -3652,4 +3653,97 @@ async fn test_build_with_symlink_mounts_switched_off_skips_the_link() {
     assert_no_broken_links(&stats);
     assert!(output_dir.join("videos").symlink_metadata().is_err());
     assert!(output_dir.join("images/logo.png").exists());
+}
+
+// ==================== Periodic notes (calendar) ====================
+
+#[tokio::test]
+async fn test_build_periodic_note_has_relative_calendar_nav() {
+    let repo = TestRepo::new();
+    repo.create_markdown("daily/2026-10-30.md", "# Friday\n");
+    repo.create_markdown("daily/2026-10-31.md", "# Saturday\n");
+    repo.create_markdown("daily/2026-11-02.md", "# Monday\n");
+    repo.create_markdown("weekly/2026-W44.md", "# Week 44\n");
+    repo.create_markdown("plain.md", "# Undated\n");
+
+    let output = build_site(&repo).await;
+
+    let html = fs::read_to_string(output.join("daily/2026-10-31/index.html"))
+        .unwrap()
+        .replace("&#x2F;", "/");
+    assert!(html.contains(r#"class="mbr-calendar-nav""#), "{html}");
+    assert!(
+        html.contains(r#"rel="prev" href="../../daily/2026-10-30/""#),
+        "prev must be page-relative: {html}"
+    );
+    assert!(
+        html.contains(r#"rel="next" href="../../daily/2026-11-02/""#),
+        "next skips the gap: {html}"
+    );
+    assert!(html.contains(r#"href="../../weekly/2026-W44/""#), "{html}");
+    assert!(html.contains(r#"calendar: {"enabled":true"#), "{html}");
+
+    // The day note reserves the companion column; the week note does not.
+    assert!(
+        html.contains(r#"<body class="mbr-has-companion">"#),
+        "{html}"
+    );
+    assert!(html.contains("<mbr-calendar></mbr-calendar>"), "{html}");
+    let week = fs::read_to_string(output.join("weekly/2026-W44/index.html")).unwrap();
+    assert!(!week.contains("mbr-has-companion"), "{week}");
+
+    let plain = fs::read_to_string(output.join("plain/index.html")).unwrap();
+    assert!(!plain.contains(r#"class="mbr-calendar-nav""#));
+    assert!(!plain.contains("mbr-has-companion"));
+
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr/site.json")).unwrap()).unwrap();
+    let entry = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/daily/2026-10-31/")
+        .unwrap();
+    assert_eq!(
+        entry["calendar"],
+        serde_json::json!({"date": "2026-10-31", "source": "filename", "period": "2026-10-31"})
+    );
+}
+
+#[tokio::test]
+async fn test_build_ships_the_calendar_overlay_on_every_page() {
+    // design/calendar.md §5.7: the overlay works in a static build from
+    // site.json alone. Its trigger (which owns `c`) is on every page, listings
+    // included, the chunk carries the overlay and its grids, and each note in
+    // site.json has the dates it plots by.
+    let repo = TestRepo::new();
+    repo.create_markdown("daily/2026-10-31.md", "# Saturday\n");
+    repo.create_markdown("notes/plain.md", "# Plain\n");
+
+    let output = build_site(&repo).await;
+
+    for page in ["index.html", "notes/index.html", "notes/plain/index.html"] {
+        let html = fs::read_to_string(output.join(page)).unwrap();
+        assert!(
+            html.contains("<mbr-calendar></mbr-calendar>"),
+            "{page}: {html}"
+        );
+    }
+    let chunk = fs::read_to_string(output.join(".mbr/components/mbr-calendar.min.js")).unwrap();
+    for element in [
+        "mbr-calendar-overlay",
+        "mbr-calendar-month-grid",
+        "mbr-calendar-week-grid",
+    ] {
+        assert!(chunk.contains(element), "chunk lacks {element}");
+    }
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr/site.json")).unwrap()).unwrap();
+    for entry in site["markdown_files"].as_array().unwrap() {
+        assert!(
+            entry["created"].is_u64() && entry["modified"].is_u64(),
+            "{entry}"
+        );
+        assert!(entry["raw_path"].is_string(), "{entry}");
+    }
 }

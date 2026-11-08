@@ -10,21 +10,18 @@
  * the rest. Exports a chunk does not import are tree-shaken out of it.
  */
 import { isHistoryLabel, parseHistory, summarizeHistory, type HistoryEntry } from './history.js'
+import { isTopLevel } from '../top-level.js'
 
-/**
- * A definition list inside any of these is not part of the deck.
- *
- * The writer (`src/flashcards.rs`) only edits *top-level* lists, because a
- * nested one would need every inserted line to repeat the container's `> ` or
- * indentation prefix. Collecting the same set here keeps "a card" meaning the
- * same thing on both sides, so a review can never be addressed to a term the
- * server will refuse. `<section>` is deliberately absent: it is the renderer's
- * own wrapper (`enable_sections`), not markdown nesting. `.mbr-chat` is
- * present although it is not markdown nesting either: a chat bubble's body is
- * rendered markdown (with real `data-mbr-line`s), but in the source it is the
- * text of a ```chat code fence, which the writer refuses.
+/*
+ * A definition list nested inside another markdown container is not part of
+ * the deck: the writer (`src/flashcards.rs`) only edits *top-level* lists,
+ * because a nested one would need every inserted line to repeat the
+ * container's `> ` or indentation prefix. Collecting the same set here keeps
+ * "a card" meaning the same thing on both sides, so a review can never be
+ * addressed to a term the server will refuse. The selector (and why
+ * `<section>` is absent and `.mbr-chat` present) lives in `../top-level.ts`,
+ * shared with the calendar agenda.
  */
-const NESTING_SELECTOR = 'li, blockquote, dd, td, th, .footnote-definition, .mbr-chat'
 
 /** Class a decorated history `<dd>` carries. */
 export const HISTORY_CLASS = 'mbr-fc-history'
@@ -39,9 +36,7 @@ export interface CardParts {
 
 /** The top-level definition lists under `root`, in document order. */
 export function deckLists(root: ParentNode): HTMLDListElement[] {
-  return Array.from(root.querySelectorAll('dl')).filter(
-    (dl) => dl.parentElement?.closest(NESTING_SELECTOR) == null
-  )
+  return Array.from(root.querySelectorAll('dl')).filter((dl) => isTopLevel(dl))
 }
 
 /** True when `root` holds at least one deck term. */

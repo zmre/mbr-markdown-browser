@@ -6,7 +6,7 @@
  * `src/task_query.rs`'s test module, so a wire-format change breaks these
  * fixtures rather than silently passing.
  */
-import type { TaskGroup, TaskHit, TaskQueryResponse } from './types.js'
+import type { GridTaskHit, TaskGridResponse, TaskGroup, TaskHit, TaskQueryResponse } from './types.js'
 
 export function makeHit(overrides: Partial<TaskHit> & { text: string }): TaskHit {
   return {
@@ -20,6 +20,8 @@ export function makeHit(overrides: Partial<TaskHit> & { text: string }): TaskHit
     marker_end: null,
     due: null,
     due_has_time: false,
+    scheduled: null,
+    scheduled_has_time: false,
     done: null,
     done_has_time: false,
     moved_to: null,
@@ -72,6 +74,8 @@ export function makeMarker(overrides: Partial<TaskHit> & { text: string }): Task
     ...markerSpan(overrides.text),
     due: null,
     due_has_time: false,
+    scheduled: null,
+    scheduled_has_time: false,
     done: null,
     done_has_time: false,
     moved_to: null,
@@ -238,3 +242,53 @@ export function calendarResponse(): TaskQueryResponse {
     total_matches: 6,
   })
 }
+
+/** A grid hit, shaped as `task_query::GridTaskHit` serializes it. */
+export function makeGridHit(
+  overrides: Partial<GridTaskHit> & { text: string }
+): GridTaskHit {
+  return { placed_by: 'due', note: 'Notes', ...makeHit(overrides), ...overrides } as GridTaskHit
+}
+
+/**
+ * A `mode: "grid"` answer for the week of 2026-08-03 (today is the 4th): an
+ * overdue day, a day with two tasks (one done, one a time-prefixed task) and a
+ * day with one.
+ */
+export function gridResponse(overrides: Partial<TaskGridResponse> = {}): TaskGridResponse {
+  return {
+    from: '2026-08-03',
+    to: '2026-08-09',
+    days: {
+      '2026-08-03': {
+        tasks: [makeGridHit({ text: 'late', line: 1, due: '2026-08-03T00:00:00' })],
+        open: 1,
+        done: 0,
+        overdue: true,
+      },
+      '2026-08-05': {
+        tasks: [
+          makeGridHit({ text: '09:00 standup', line: 2, due: '2026-08-05T00:00:00' }),
+          makeGridHit({ text: 'shipped', line: 3, status: 'done', placed_by: 'done', done: '2026-08-05T00:00:00' }),
+        ],
+        open: 1,
+        done: 1,
+        overdue: false,
+      },
+      '2026-08-07': {
+        tasks: [makeGridHit({ text: 'planned', line: 4, scheduled: '2026-08-07T00:00:00', placed_by: 'scheduled' })],
+        open: 1,
+        done: 0,
+        overdue: false,
+      },
+    },
+    undated_in_day_notes: {},
+    overdue_before_range: 3,
+    folders: [{ path: '/', count: 4 }],
+    total_matches: 4,
+    duration_ms: 1,
+    scan_in_progress: false,
+    ...overrides,
+  }
+}
+

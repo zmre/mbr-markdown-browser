@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LitElement } from 'lit'
-import { FAB_CSS, FAB_STACK_OFFSET, PLAY_FAB_QUERY, PlayFabController, isEmbeddedPage } from './fab.ts'
+import { FAB_CSS, FAB_STACK_OFFSET, PLAY_FAB_QUERY, PLAY_OFFSET_PROPERTY, PlayFabController, isEmbeddedPage } from './fab.ts'
 
 /** A `MediaQueryList` stand-in whose `change` the test fires by hand. */
 function stubMatchMedia(matches: boolean) {
@@ -27,6 +27,16 @@ class FabHost extends LitElement {
 }
 customElements.define('fab-test-host', FabHost)
 
+/** A calendar-layer host (`<mbr-calendar>`): shows regardless of width. */
+class CalendarFabHost extends LitElement {
+  shows = true
+  constructor() {
+    super()
+    new PlayFabController(this, () => this.shows, 'calendar')
+  }
+}
+customElements.define('fab-test-calendar-host', CalendarFabHost)
+
 async function mount(): Promise<FabHost> {
   const host = document.createElement('fab-test-host') as FabHost
   document.body.append(host)
@@ -40,7 +50,9 @@ afterEach(() => {
   document.body.innerHTML = ''
   document.documentElement.classList.remove('mbr-embedded')
   document.documentElement.style.removeProperty('--mbr-fab-stack-offset')
+  document.documentElement.style.removeProperty(PLAY_OFFSET_PROPERTY)
   delete document.documentElement.dataset.mbrFabStack
+  delete document.documentElement.dataset.mbrFabStackCalendar
   vi.restoreAllMocks()
 })
 
@@ -130,11 +142,53 @@ describe('PlayFabController', () => {
   })
 })
 
+describe('stacking the calendar button with slides / flashcards and review', () => {
+  const playOffset = () => document.documentElement.style.getPropertyValue(PLAY_OFFSET_PROPERTY)
+
+  async function mountCalendar(): Promise<CalendarFabHost> {
+    const host = document.createElement('fab-test-calendar-host') as CalendarFabHost
+    document.body.append(host)
+    await host.updateComplete
+    return host
+  }
+
+  it('alone, lifts the review button one slot and sits in the corner itself', async () => {
+    stubMatchMedia(false)
+    await mountCalendar()
+    expect(offset()).toBe(FAB_STACK_OFFSET)
+    expect(playOffset()).toBe('')
+  })
+
+  it('above a play button: review two slots up, calendar one', async () => {
+    stubMatchMedia(true)
+    await mount()
+    const calendar = await mountCalendar()
+    expect(offset()).toBe('8.5rem')
+    expect(playOffset()).toBe(FAB_STACK_OFFSET)
+
+    calendar.shows = false
+    calendar.requestUpdate()
+    await calendar.updateComplete
+    expect(offset()).toBe(FAB_STACK_OFFSET)
+    expect(playOffset()).toBe(FAB_STACK_OFFSET)
+  })
+
+  it('drops back to the corner when the play button goes', async () => {
+    stubMatchMedia(true)
+    const play = await mount()
+    await mountCalendar()
+    play.remove()
+    expect(offset()).toBe(FAB_STACK_OFFSET)
+    expect(playOffset()).toBe('')
+  })
+})
+
 describe('FAB_CSS', () => {
   const text = FAB_CSS.cssText
 
   it('clears the safe-area insets', () => {
-    expect(text).toContain('right: calc(1rem + env(safe-area-inset-right, 0px))')
+    // Clear of the docked calendar column too (theme.css's --mbr-inset-right).
+    expect(text).toContain('right: calc(1rem + var(--mbr-inset-right, 0px) + env(safe-area-inset-right, 0px))')
     expect(text).toContain('bottom: calc(1rem + env(safe-area-inset-bottom, 0px))')
   })
 

@@ -33,8 +33,15 @@ export type TaskKind = 'task' | 'marker'
  */
 export type IncludeFilter = 'all' | 'tasks' | 'markers'
 
-/** `task_query::TaskMode`. */
+/**
+ * The panel's grouping tabs, which are `task_query::TaskMode`'s list modes.
+ * The third server mode, `grid`, is not a tab: it backs "By Due"'s Week and
+ * Month views (see {@link TaskGridRequest}).
+ */
 export type TaskMode = 'category' | 'calendar'
+
+/** What "By Due" shows: the bucketed list, or a week / month grid. */
+export type DueView = 'list' | 'week' | 'month'
 
 /**
  * `task_query::TaskQuery`.
@@ -59,12 +66,18 @@ export interface TaskQueryRequest {
   mode: TaskMode
   /** Cap on returned tasks across all groups. Never affects a count. */
   limit: number
+  /**
+   * The reader's local date, `YYYY-MM-DD` (`todayKey()`): what overdue,
+   * today and tomorrow mean. Optional server-side (absent or malformed →
+   * the server's date); the panel always sends it.
+   */
+  today: string
 }
 
 /**
  * `task_query::TaskHit` — a `tasks::Task` flattened alongside its page URL.
  *
- * `due`/`done` are naive local datetimes (`2026-08-05T00:00:00`); `moved_to` is
+ * `due`/`scheduled`/`done` are naive local datetimes (`2026-08-05T00:00:00`); `moved_to` is
  * a naive date (`2026-08-10`). Neither carries a timezone, so both must be
  * parsed as local time — see `parseNaive` in `task-format.ts`.
  */
@@ -76,7 +89,7 @@ export interface TaskHit {
    * A `'marker'` is a read-only pointer at a line somebody left unfinished
    * (`TK`, `TODO`, …; see `tasks::MarkerRule`), and the server pins it flat:
    * `status` is always `'open'`, `priority` always `'normal'`, `tags` empty,
-   * and `due`/`done`/`moved_to` all `null`. Its `text` is the **whole source
+   * and `due`/`scheduled`/`done`/`moved_to` all `null`. Its `text` is the **whole source
    * line, verbatim** — the marker word included, and `#tag`/`!!`/`@due(...)`
    * neither parsed nor stripped, because a marker has no annotation grammar.
    * Its deep-link fragment is `#mbr-marker-<line>`, not `#mbr-task-<line>`:
@@ -111,8 +124,16 @@ export interface TaskHit {
   marker_end: number | null
   /** Tags without the leading `#`. */
   tags: string[]
+  /** From `@due(...)`, `📅`, `[due:: …]` or an org `DEADLINE:` line. */
   due: string | null
   due_has_time: boolean
+  /**
+   * From `⏳`, `[scheduled:: …]` or an org `SCHEDULED:` line. Display only: the
+   * `due` filter and the due buckets never look at it.
+   */
+  scheduled: string | null
+  scheduled_has_time: boolean
+  /** From `@done(...)`, `✅` or `[completion:: …]`. */
   done: string | null
   done_has_time: boolean
   moved_to: string | null
@@ -227,5 +248,62 @@ export interface TaskQueryResponse {
   total_matches: number
   duration_ms: number
   /** True while the repository scan is still running: results are partial. */
+  scan_in_progress: boolean
+}
+
+/**
+ * `task_query::TaskQuery` with `mode: "grid"` (design/calendar.md §8.1): the
+ * list request's filters plus an inclusive date range of at most 62 days.
+ * The server pins `include` to tasks and ignores `due`.
+ */
+export interface TaskGridRequest extends Omit<TaskQueryRequest, 'mode'> {
+  mode: 'grid'
+  /** First day, `YYYY-MM-DD`, inclusive. */
+  from: string
+  /** Last day, inclusive. */
+  to: string
+}
+
+/** `task_query::Placement`: which date put a task on its day. */
+export type Placement = 'done' | 'due' | 'scheduled'
+
+/** `task_query::GridTaskHit`: a {@link TaskHit} on a grid day. */
+export interface GridTaskHit extends TaskHit {
+  placed_by: Placement
+  /** `HH:MM` when the placing date had a time (never read from the text). */
+  time?: string
+  /** The note's display title. */
+  note: string
+}
+
+/** `task_query::GridDay`. */
+export interface GridDay {
+  /**
+   * Open before done, then by time, then by priority; at most this day's
+   * share of `limit` (the server spreads it across the days).
+   */
+  tasks: GridTaskHit[]
+  /** Open tasks placed that day (every filter except status). */
+  open: number
+  /** Done tasks placed that day (every filter except status). */
+  done: number
+  /** A past day that still has an open task placed by its due date (never by a scheduled one). */
+  overdue: boolean
+}
+
+/** `task_query::TaskGridResponse`. */
+export interface TaskGridResponse {
+  /** The range actually covered (clamped server-side). */
+  from: string
+  to: string
+  /** Days with a placed task, keyed `YYYY-MM-DD`. */
+  days: Record<string, GridDay>
+  /** Open undated tasks per day note in range: day markers only (D9). */
+  undated_in_day_notes: Record<string, number>
+  /** Open tasks due before the range and before today. */
+  overdue_before_range: number
+  folders: FolderFacet[]
+  total_matches: number
+  duration_ms: number
   scan_in_progress: boolean
 }

@@ -625,6 +625,26 @@ describe('MbrBrowseElement with site data', () => {
       expect(root(el).querySelector('.pane-count')?.textContent?.trim()).toBe('500')
     })
 
+    it('hands the calendar the full selection, not the page on screen', async () => {
+      const el = await mount(taggedFiles(500), '/')
+      await selectTag(el, 'note')
+      const openOverlay = vi.fn(() => true)
+      const calendar = document.createElement('mbr-calendar')
+      Object.defineProperty(calendar, 'overlayAvailable', { value: true })
+      Object.defineProperty(calendar, 'openOverlay', { value: openOverlay })
+      document.body.append(calendar)
+      el.requestUpdate()
+      await el.updateComplete
+      const button = root(el).querySelector<HTMLButtonElement>('.middle-pane [aria-label="Show in calendar"]')!
+      expect(button).not.toBeNull()
+      button.click()
+      calendar.remove()
+      expect(openOverlay).toHaveBeenCalledTimes(1)
+      const scope = (openOverlay.mock.calls[0] as unknown as [{ label: string; files: MarkdownFile[] }])[0]
+      expect(scope.label).toBe('Tag: note')
+      expect(scope.files).toHaveLength(500)
+    })
+
     it('does not page a result set that fits in one page', async () => {
       const el = await mount(taggedFiles(20), '/')
       await selectTag(el, 'note')
@@ -684,6 +704,20 @@ describe('MbrBrowseElement with site data', () => {
       row!.click()
       await el.updateComplete
     }
+
+    it('scopes the calendar to a folder with its subfolders', async () => {
+      const el = await mount(files(), '/')
+      await selectFolder(el, 'projects')
+      const scope = el.selectionCalendarScope()!
+      expect(scope.label).toBe('Folder: projects')
+      expect(scope.files!.map((f) => f.raw_path).sort()).toEqual([
+        'projects/alpha/deep/x.md',
+        'projects/alpha/index.md',
+        'projects/alpha/one.md',
+        'projects/alpha/two.md',
+        'projects/beta/b1.md',
+      ])
+    })
 
     it('lists the subfolders of a folder that holds only folders', async () => {
       const el = await mount(files(), '/')

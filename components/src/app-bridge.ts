@@ -21,7 +21,8 @@
  * - **App → page:** `window.mbrApp.open(name)` opens one of
  *   {@link APP_ACTIONS} through the same public method its own button and
  *   shortcut use (`open()`, `openNew()` for `new`, `<mbr-fuzzy-nav>`'s
- *   `open(tab)` for `toc`/`links-out`/`links-in`), so the app never
+ *   `open(tab)` for `toc`/`links-out`/`links-in`, `<mbr-calendar>`'s
+ *   `open(kind)` for `calendar`/`companion`/`today`), so the app never
  *   re-implements a feature.
  *
  * The app marks the page as embedded with a user script injected at document
@@ -34,10 +35,16 @@
  * Gating mirrors what the page itself offers: an action is listed only when
  * its element is on the page *and* usable (edit only with editing on and a
  * source file, new only with editing on, tasks only with the task browser enabled, flashcards and slides
- * only on a deck, contents only with headings, links only on a note page), so
- * the app's menu shows exactly what works.
+ * only on a deck, contents only with headings, links only on a note page;
+ * the calendar's `today` only once the site index shows a day note, `calendar`
+ * with the calendar on, `companion` unless it is docked or off — all three
+ * read from `<mbr-calendar>`'s own gates), so the app's menu shows exactly
+ * what works.
  */
-import { isTasksEnabled } from './shared.js';
+import { getCalendarConfig, isTasksEnabled } from './shared.js';
+// Main bundle, like this module; it memoizes the periodic index off siteNav.
+import { periodicIndex } from './calendar/periodic-nav.js';
+import type { MbrCalendarElement } from './mbr-calendar.js';
 import { isDeckPage } from './mbr-flashcards.js';
 // mbr-editor imports only shared/mbr-keys/edit-token (no cycle) and is in the
 // main bundle already; its heavy editor is a lazy chunk.
@@ -56,6 +63,9 @@ export const APP_ACTIONS = [
   'links-out',
   'links-in',
   'tasks',
+  'today',
+  'calendar',
+  'companion',
   'flashcards',
   'slides',
   'new',
@@ -136,6 +146,25 @@ interface ActionTarget {
   args?: readonly string[];
 }
 
+/** One of `<mbr-calendar>`'s gates (`overlayAvailable`, `companionAvailable`, `hasDayNotes`). */
+const calendarGate =
+  (gate: 'overlayAvailable' | 'companionAvailable' | 'hasDayNotes') =>
+  (el: HTMLElement): boolean =>
+    (el as Partial<MbrCalendarElement>)[gate] === true;
+
+/**
+ * Loads the periodic index `d` uses (memoized off `siteNav`, which every page
+ * fetches anyway) and calls `onKnown` once it is, so the page is re-posted
+ * with `today` once `<mbr-calendar>`'s `hasDayNotes` can answer. A failed
+ * load leaves `today` unlisted.
+ */
+export function watchDayNotes(onKnown: () => void = () => {}): Promise<void> {
+  return periodicIndex().then(
+    () => onKnown(),
+    () => {},
+  );
+}
+
 /** Whether `<mbr-fuzzy-nav>` reports `gate` (its `hasHeadings`/`hasPageLinks`). */
 const fuzzyNav =
   (gate: 'hasHeadings' | 'hasPageLinks') =>
@@ -159,6 +188,12 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
   'links-out': { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasPageLinks'), args: ['links-out'] },
   'links-in': { selector: 'mbr-fuzzy-nav', usable: fuzzyNav('hasPageLinks'), args: ['links-in'] },
   tasks: { selector: 'mbr-tasks', usable: () => isTasksEnabled() },
+  // `d`: today's day note, else the most recent one before it.
+  today: { selector: 'mbr-calendar', usable: calendarGate('hasDayNotes'), args: ['today'] },
+  // `c`: the overlay over all notes, with the page's "This folder" toggle.
+  calendar: { selector: 'mbr-calendar', usable: calendarGate('overlayAvailable'), args: ['overlay'] },
+  // `C`: the day panel as a drawer; not offered while it is the docked column.
+  companion: { selector: 'mbr-calendar', usable: calendarGate('companionAvailable'), args: ['companion'] },
   flashcards: { selector: 'mbr-flashcards', usable: () => isDeckPage() },
   slides: {
     selector: 'mbr-slides',
@@ -175,7 +210,8 @@ const ACTION_TARGETS: Record<AppAction, ActionTarget> = {
 function targetFor(action: AppAction, root: ParentNode): (() => void) | null {
   const { selector, usable, method = 'open', args = [] } = ACTION_TARGETS[action];
   const el = root.querySelector<HTMLElement>(selector) as Openable | null;
-  if (!el || typeof el[method] !== 'function' || !usable(el)) return null;
+  if (!el || !usable(el)) return null;
+  if (typeof el[method] !== 'function') return null;
   return () => el[method]?.(...args);
 }
 
@@ -305,6 +341,13 @@ export function installAppBridge(): void {
     post();
   }
   window.addEventListener('load', post, { once: true });
+  // `today` waits on the site index; post again once it is known, unless the
+  // DOM is still loading (the DOMContentLoaded post will carry it).
+  if (getCalendarConfig().enabled) {
+    void watchDayNotes(() => {
+      if (document.readyState !== 'loading') post();
+    });
+  }
   // Replacing, not stacking, if installed twice (tests do).
   document.removeEventListener(EDITOR_STATE_EVENT, onEditorState);
   document.addEventListener(EDITOR_STATE_EVENT, onEditorState);

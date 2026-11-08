@@ -323,6 +323,13 @@ entry); open in TODO.md.
       Flashcards on a `type: flashcard` note; Slides on a `style: slides` note.
       Each opens its panel: pass
 - [x] ⋯ → Refresh, Home, Settings and Open Other Vault… all work: pass
+- [ ] Calendar actions (design/calendar.md §9.1): with daily notes in the
+      vault, ⋯ lists Today's Note, Calendar and Day Panel after Tasks.
+      Today's Note opens today's daily note (or the most recent earlier one);
+      Calendar opens the overlay (List view on a phone) and ✕ closes it; Day
+      Panel opens the companion drawer on a day note. In a vault with no
+      daily notes Today's Note is absent. On an iPad in landscape wide enough
+      to dock the companion on a day note, Day Panel is absent there: not run
 - [x] Back goes back through the vault's pages; on the first page it returns
       to the vault list. A long press lists recent pages: pass
 - [x] Swipe from the left edge goes back a page: pass. (Since then a
