@@ -73,7 +73,7 @@ http-range-header = "0.4"
 # Image processing with minimal features (only needed formats)
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 itertools = "0.15.0"
-lopdf = { version = "0.46", default-features = false, features = ["rayon"] }
+lopdf = { version = "0.47", default-features = false, features = ["rayon"] }
 lru = "0.19"
 metadata = "0.1.13" # Requires ffmpeg for video/audio metadata extraction
 # Content types for files served through a vault, as ServeFile guesses them.
