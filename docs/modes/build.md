@@ -105,7 +105,7 @@ The three reasons are genuinely different problems:
 | Reason | What is wrong |
 |--------|---------------|
 | `no such page or file` | Nothing in the output answers this URL. |
-| `points at a page but has no trailing slash` | The page *is* there, so the link appears to work — but pages live at directory-style URLs, and without the slash the browser resolves that page's own relative links one directory too high. The damage lands on the **next** click. A static host has no redirect to repair it (server mode does — see [Server Mode](server/)). |
+| `points at a page but has no trailing slash` | The page *is* there, so the link appears to work — but pages live at directory-style URLs, and without the slash the browser resolves that page's own relative links one directory too high. The damage lands on the **next** click. A static host has no redirect to repair it (server mode does — see [Server Mode](server/)). Only links to markdown pages are judged this way; a slashless link to a folder listing works and is not reported. |
 | `escapes the site root` | A `../` chain climbed above the site root. Browsers silently discard the excess (RFC 3986 §5.2.4), so the reader lands on an unrelated page instead of seeing an error. |
 
 ### Frontmatter Parse Errors
@@ -244,9 +244,10 @@ If mbr reports broken links:
 1. Check that the target file exists
 2. Verify the link path is correct (case-sensitive on Linux)
 3. Ensure the file has a recognized markdown extension
-4. For "no trailing slash", write the link as `page.md`, `page/` or `[[Page]]`
-   rather than as a hand-written `<a href="/page">` — mbr's own transform always
-   emits the canonical form
+4. For "no trailing slash", look for an href mbr did not write: markdown links
+   (`page`, `page.md`, `page/`, `/page`, `[[Page]]`) and quoted raw-HTML
+   `href`s are all emitted in the canonical form, but an unquoted
+   `<a href=../page>` is published as written
 5. For "escapes the site root", count the `../` segments: a link authored in
    `docs/guide.md` resolves relative to `docs/`, so `../../x` already leaves the
    repository

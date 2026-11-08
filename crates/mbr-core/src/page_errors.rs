@@ -280,16 +280,17 @@ fn is_mbr_namespace_url(absolute_url: &str) -> bool {
 ///
 /// # The trailing-slash check must use the *renderer's* notion of "page"
 ///
-/// Only one thing puts a trailing slash on an emitted href:
-/// `link_transform::transform_link`, via
-/// [`crate::link_transform::LinkTransformConfig::markdown_page_probe`], which
-/// answers yes for [`ResolvedPath::MarkdownFile`] and nothing else. So
-/// [`LinkDefect::NonCanonical`] is checked for exactly that one variant. Asking
-/// for a slash on any other kind reports a defect the pipeline is structurally
-/// incapable of producing — the checker flagging its own renderer's output,
-/// which is the failure this module's header claims cannot happen.
+/// [`LinkDefect::NonCanonical`] is checked for [`ResolvedPath::MarkdownFile`]
+/// alone, because a markdown page is the only target where a missing slash
+/// does damage: its body carries links authored relative to its own location.
+/// `link_transform::transform_link` canonicalizes every page-like target it
+/// can (via [`crate::link_transform::LinkTransformConfig::directory_url_probe`],
+/// which answers yes for markdown pages, folder listings and tag pages), so in
+/// practice a body link reaches this check already slash-terminated; what is
+/// left is hrefs it could not judge (no probe) or did not write. Asking for a
+/// slash on a listing or tag URL would flag a link that works.
 ///
-/// It would also be wrong on the merits. `/tags/rust`, `/tags` and a directory
+/// Why it would be wrong: `/tags/rust`, `/tags` and a directory
 /// listing are all served **200 in place**, with no redirect
 /// (`path_resolver::canonical_page_redirect` fires only for markdown pages), and
 /// the templates behind them emit site-absolute links in server mode and
@@ -1199,12 +1200,12 @@ mod tests {
     /// Regression (false positive introduced with `validate_rendered_links`):
     /// a link to a *directory* without a trailing slash was reported broken.
     ///
-    /// Nothing in the pipeline can emit the "canonical" spelling —
-    /// `markdown_page_probe` answers yes only for a markdown file, so
-    /// `transform_link` leaves an extension-less directory target exactly as
-    /// authored — and the server answers `/folder` with 200 in place, no
-    /// redirect. The listing it renders links site-absolutely, so the
-    /// next-click damage `NonCanonical` exists to predict cannot occur.
+    /// The renderer now gives such a link its slash when it can ask the
+    /// repository (`directory_url_probe`), but an href it did not write, or
+    /// wrote without a probe, still arrives slashless — and the server answers
+    /// `/folder` with 200 in place, no redirect. The listing it renders links
+    /// site-absolutely, so the next-click damage `NonCanonical` exists to
+    /// predict cannot occur.
     #[test]
     fn directory_listing_link_without_trailing_slash_is_ignored() {
         let (_guard, base) = rendered_link_setup();
@@ -1331,8 +1332,8 @@ mod tests {
 
     /// The narrowing must not reach the defect the variant was added for: a
     /// *markdown* page link with no trailing slash is still reported. Paired
-    /// with the tests above, this pins `NonCanonical` to exactly the set
-    /// `markdown_page_probe` can canonicalize.
+    /// with the tests above, this pins `NonCanonical` to markdown pages, the
+    /// one kind of target whose own relative links a missing slash breaks.
     #[test]
     fn narrowing_keeps_reporting_markdown_page_links() {
         let dir = TempDir::new().unwrap();

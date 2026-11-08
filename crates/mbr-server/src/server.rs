@@ -278,6 +278,10 @@ struct LinkIndexConfig {
     index_file: String,
     markdown_extensions: Vec<String>,
     valid_tag_sources: HashSet<String>,
+    /// The page render's own probe (built from the same resolver
+    /// configuration, [`owned_resolver_config`]'s inputs), so an extension-less
+    /// or root-relative link is canonicalized here exactly as on the page.
+    directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
 }
 
 /// Parse one markdown file and record its contribution to the backlink index.
@@ -305,7 +309,7 @@ fn index_page_links(
         is_index_file,
         url_depth: None,
         current_page_url: url_path.to_string(),
-        markdown_page_probe: None,
+        directory_url_probe: Some(cfg.directory_url_probe.clone()),
     };
 
     match markdown::extract_outbound_links_from_vault(
@@ -2976,6 +2980,15 @@ impl Server {
             index_file: index_file.clone(),
             markdown_extensions: markdown_extensions.clone(),
             valid_tag_sources: mbr_core::config::tag_sources_to_set(&tag_sources),
+            directory_url_probe: mbr_core::link_transform::filesystem_directory_url_probe(
+                mbr_core::path_resolver::OwnedPathResolverConfig::for_repo(
+                    &repo,
+                    &static_folder,
+                    &markdown_extensions,
+                    &index_file,
+                    mbr_core::config::tag_sources_to_url_sources(&tag_sources),
+                ),
+            ),
         };
         if link_tracking && kept_links.is_none() {
             let repo_for_index = Arc::clone(&repo);
@@ -6415,7 +6428,13 @@ impl Server {
                         is_index_file,
                         url_depth: None,
                         current_page_url: page_url_path.clone(),
-                        markdown_page_probe: None,
+                        // The page render's probe: links.json must list the
+                        // hrefs the page shows, canonical slash included.
+                        directory_url_probe: Some(
+                            mbr_core::link_transform::filesystem_directory_url_probe(
+                                owned_resolver_config(config),
+                            ),
+                        ),
                     };
 
                     // Kept for resolving the collected links against this
@@ -6707,8 +6726,8 @@ impl Server {
                     // so a checker rendering without the probe would report
                     // every extension-less markdown link as non-canonical while
                     // the page a reader sees is perfectly fine.
-                    markdown_page_probe: Some(
-                        mbr_core::link_transform::filesystem_markdown_page_probe(
+                    directory_url_probe: Some(
+                        mbr_core::link_transform::filesystem_directory_url_probe(
                             owned_resolver_config(config),
                         ),
                     ),
@@ -7764,7 +7783,7 @@ impl Server {
             // markdown targets must come out with the trailing slash their
             // canonical URL has, or every relative link on the page they lead
             // to resolves one directory too high.
-            markdown_page_probe: Some(mbr_core::link_transform::filesystem_markdown_page_probe(
+            directory_url_probe: Some(mbr_core::link_transform::filesystem_directory_url_probe(
                 owned_resolver_config(config),
             )),
         };
@@ -9424,6 +9443,66 @@ mod tests {
         )
     }
 
+    /// The [`LinkIndexConfig`] `Server::init` builds for `fixture_repo`.
+    fn test_link_index_config(repo: &Repo, root: &Path) -> LinkIndexConfig {
+        LinkIndexConfig {
+            base_dir: root.to_path_buf(),
+            index_file: "index.md".to_string(),
+            markdown_extensions: vec!["md".to_string()],
+            valid_tag_sources: HashSet::new(),
+            directory_url_probe: mbr_core::link_transform::filesystem_directory_url_probe(
+                mbr_core::path_resolver::OwnedPathResolverConfig::for_repo(
+                    repo,
+                    "static",
+                    &["md".to_string()],
+                    "index.md",
+                    Vec::new(),
+                ),
+            ),
+        }
+    }
+
+    /// Regression: a note linked only by extension-less spellings — relative
+    /// (`[x](../target)`), root-relative (`[x](/target)`) and a folder with an
+    /// index (`[x](/folder)`) — must still show those backlinks. The index
+    /// canonicalizes links with the page render's own probe.
+    #[test]
+    fn test_inbound_index_counts_extensionless_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        std::fs::write(root.join("target.md"), "# Target\n").unwrap();
+        std::fs::write(root.join("folder/index.md"), "# Folder\n").unwrap();
+        std::fs::write(
+            root.join("rooted.md"),
+            "# Rooted\n\nSee [t](/target) and [f](/folder).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/relative.md"),
+            "# Relative\n\nSee [t](../target) and [f](../folder).\n",
+        )
+        .unwrap();
+
+        let repo = Arc::new(fixture_repo(&root));
+        repo.scan_all().unwrap();
+        repo.build_wikilink_index();
+
+        let index = InboundIndex::new();
+        populate_inbound_index(&repo, &index, &test_link_index_config(&repo, &root));
+
+        for page in ["/target/", "/folder/"] {
+            let mut sources: Vec<String> = index.get(page).into_iter().map(|l| l.from).collect();
+            sources.sort();
+            assert_eq!(
+                sources,
+                ["/docs/relative/", "/rooted/"],
+                "backlinks of {page}"
+            );
+        }
+    }
+
     /// The backlink index must report exactly what the full-repository grep it
     /// replaces reported.
     ///
@@ -9465,12 +9544,7 @@ mod tests {
         repo.scan_all().unwrap();
         repo.build_wikilink_index();
 
-        let cfg = LinkIndexConfig {
-            base_dir: root.clone(),
-            index_file: "index.md".to_string(),
-            markdown_extensions: vec!["md".to_string()],
-            valid_tag_sources: HashSet::new(),
-        };
+        let cfg = test_link_index_config(&repo, &root);
         let index = InboundIndex::new();
         populate_inbound_index(&repo, &index, &cfg);
         assert!(index.is_ready());

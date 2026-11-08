@@ -274,8 +274,12 @@ fn resolve_relative_url_parts(
 /// added the `../` that compensates for the trailing-slash URL convention;
 /// passing the page's own flag would strip its last segment a second time.
 /// Root-relative targets (including wikilinks the renderer resolved globally)
-/// are already site-absolute and are left as authored, so `page.url_depth`
-/// never applies.
+/// are already site-absolute: they only get the page render's canonical
+/// spelling ([`crate::link_transform::canonicalize_root_relative`]: `/x.md` and
+/// an extension-less `/x` naming a page become `/x/`), never the build's
+/// relativization, so `page.url_depth` never applies. Without that, a note
+/// linked as `[x](/note)` showed no backlink, because the index recorded
+/// `/note` and the note's page is `/note/`.
 ///
 /// Links with an empty target are dropped. The renderer splits `#anchor` off
 /// the destination before storing it, so an anchor-only link like
@@ -292,7 +296,12 @@ pub fn resolve_outbound_links(
         .into_iter()
         .filter(|link| !link.to.is_empty())
         .map(|mut link| {
-            if link.internal && !link.to.starts_with('/') && !link.to.starts_with('#') {
+            if !link.internal || link.to.starts_with('#') {
+                return link;
+            }
+            if link.to.starts_with('/') {
+                link.to = crate::link_transform::canonicalize_root_relative(&link.to, page);
+            } else {
                 let href = transform_link(&link.to, page);
                 link.to = resolve_relative_url(base_url, &href, true);
             }
@@ -1234,7 +1243,7 @@ mod tests {
             is_index_file,
             url_depth: None,
             current_page_url: url.to_string(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         }
     }
 
@@ -1310,6 +1319,43 @@ mod tests {
         let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));
         assert_eq!(resolved[0].to, "/people/alice/");
         assert_eq!(resolved[1].to, "https://example.com/a.md");
+    }
+
+    /// Root-relative targets get the page's canonical spelling — never the
+    /// build's relativization, even when the page config has a depth.
+    #[test]
+    fn test_resolve_outbound_links_canonicalizes_root_relative() {
+        let probe: crate::link_transform::DirectoryUrlProbe =
+            std::sync::Arc::new(|url: &str| url == "/notes/abc");
+        let page = LinkTransformConfig {
+            url_depth: Some(2),
+            directory_url_probe: Some(probe),
+            ..page_config("/docs/guide/", false)
+        };
+        let links = [
+            "/notes/abc",
+            "/notes/abc.md",
+            "/docs/index.md",
+            "/LICENSE",
+            "/notes/abc/",
+        ]
+        .iter()
+        .map(|to| internal(to))
+        .collect();
+        let targets: Vec<String> = resolve_outbound_links(links, &page)
+            .into_iter()
+            .map(|link| link.to)
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                "/notes/abc/",
+                "/notes/abc/",
+                "/docs/",
+                "/LICENSE",
+                "/notes/abc/"
+            ]
+        );
     }
 
     #[test]

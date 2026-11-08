@@ -1195,21 +1195,110 @@ async fn test_build_extensionless_link_targets_are_distinguished() {
     );
 }
 
+/// Every spelling of a page or folder link builds with zero broken links and
+/// slash-terminated hrefs. `[](/abc)` used to be relativized slashless
+/// (`../../abc`, indistinguishable from the authored `[](../abc)`) and reported
+/// "points at a page but has no trailing slash"; a folder without an index note
+/// was reported the same way, although the server's `errors.json` accepts it.
+#[tokio::test]
+async fn test_build_every_page_link_spelling_is_canonical_and_clean() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/page.md",
+        "# Page\n\n\
+         [a](../abc) [b](../abc/) [c](../abc.md) [d](/abc) [e](/abc/) [f](/abc.md)\n\n\
+         [g](../abc#part) [h](/abc?x=1#part)\n\n\
+         [i](../withindex) [j](/withindex) [k](../noindex) [l](/noindex)\n\n\
+         [m](../LICENSE) [n](/LICENSE)\n",
+    );
+    repo.create_markdown("abc.md", "# Abc\n\n## Part\n");
+    repo.create_markdown("withindex/index.md", "# With Index");
+    repo.create_markdown("noindex/one.md", "# One");
+    repo.create_static_file("LICENSE", b"MIT");
+    repo.create_markdown("rooted.md", "# Rooted\n\n[abc](/abc)\n");
+
+    let (output, stats) = build_site_with_stats(&repo).await;
+
+    let page = fs::read_to_string(output.join("notes/page/index.html")).unwrap();
+    for href in [
+        r#"href="../../abc/""#,
+        r#"href="../../abc/#part""#,
+        r#"href="../../abc/?x=1#part""#,
+        r#"href="../../withindex/""#,
+        r#"href="../../noindex/""#,
+        r#"href="../../LICENSE""#,
+    ] {
+        assert!(page.contains(href), "missing {href}:\n{page}");
+    }
+    for slashless in [
+        r#"href="../../abc""#,
+        r#"href="../../withindex""#,
+        r#"href="../../noindex""#,
+        r#"href="../../LICENSE/""#,
+    ] {
+        assert!(!page.contains(slashless), "found {slashless}:\n{page}");
+    }
+    let rooted = fs::read_to_string(output.join("rooted/index.html")).unwrap();
+    assert!(rooted.contains(r#"href="../abc/""#), "{rooted}");
+
+    assert_eq!(
+        stats.broken_links, 0,
+        "every spelling is a working link, got {}",
+        stats.broken_links
+    );
+
+    // The build's backlinks see the root-relative-only link too.
+    let links: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("abc/links.json")).unwrap()).unwrap();
+    let sources: Vec<&str> = links["inbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["from"].as_str())
+        .collect();
+    assert!(
+        sources.contains(&"/rooted/") && sources.contains(&"/notes/page/"),
+        "/abc/ backlinks: {sources:?}"
+    );
+}
+
+/// A slashless href to a section listing (a folder without an index note)
+/// that the transform did not write — an unquoted raw-HTML value — is not a
+/// broken link: the listing links root-anchored, so nothing breaks. The
+/// server's `errors.json` judges it the same way.
+#[tokio::test]
+async fn test_build_accepts_slashless_listing_link() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\n<a href=../../noindex>listing</a>\n",
+    );
+    repo.create_markdown("noindex/one.md", "# One");
+
+    let (_output, stats) = build_site_with_stats(&repo).await;
+
+    assert_eq!(stats.broken_links, 0, "got {}", stats.broken_links);
+}
+
 /// The build's own checker must see the defect too. `<dir>/index.html` exists,
 /// so an existence-only check waves a slashless page link through — and static
 /// hosting has no redirect to repair it.
 #[tokio::test]
 async fn test_build_detects_page_link_without_trailing_slash() {
     let repo = TestRepo::new();
-    // Raw HTML bypasses the link transform, which is how a hand-authored
-    // non-canonical URL reaches the output.
+    // An unquoted raw-HTML value bypasses the link transform, which is how a
+    // hand-authored non-canonical URL reaches the output. (A quoted one would
+    // be transformed — and, written page-relative like this, gain a third
+    // `../` and be reported as escaping the root instead.)
     repo.create_markdown(
         "docs/guide.md",
-        "# Guide\n\n<a href=\"../../folder/file\">no slash</a>\n",
+        "# Guide\n\n<a href=../../folder/file>no slash</a>\n",
     );
     repo.create_markdown("folder/file.md", "# File");
 
-    let (_output, stats) = build_site_with_stats(&repo).await;
+    let (output, stats) = build_site_with_stats(&repo).await;
+    let guide = fs::read_to_string(output.join("docs/guide/index.html")).unwrap();
+    assert!(guide.contains("href=../../folder/file>"), "{guide}");
 
     assert_eq!(
         stats.broken_links, 1,

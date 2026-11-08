@@ -635,7 +635,7 @@ impl QuickLookTarget {
             // QuickLook previews a single file with no repo index, so body
             // wikilinks never resolve globally; the page URL is unused.
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
 
         markdown::render_str(

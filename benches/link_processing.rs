@@ -96,7 +96,7 @@ fn bench_resolve_outbound_links(c: &mut Criterion) {
         is_index_file: false,
         url_depth: None,
         current_page_url: "/docs/current/".to_string(),
-        markdown_page_probe: None,
+        directory_url_probe: None,
     };
 
     group.bench_function("50_links", |b| {

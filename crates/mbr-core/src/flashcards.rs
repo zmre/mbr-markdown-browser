@@ -1568,7 +1568,7 @@ mod tests {
                 is_index_file: false,
                 url_depth: None,
                 current_page_url: String::new(),
-                markdown_page_probe: None,
+                directory_url_probe: None,
             },
             oembed_cache: None,
             server_mode: true,

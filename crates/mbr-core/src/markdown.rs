@@ -2009,10 +2009,11 @@ fn mentions_url_attr(html: &str) -> bool {
 /// README's `<img src="docs/images/x.png">` left verbatim resolves to
 /// `/README/docs/images/x.png`, while `![](docs/images/x.png)` beside it
 /// works. Values are HTML: entities are decoded before the transform and the
-/// result is re-escaped for its quote. External, root-relative (server mode)
-/// and anchor values are left alone by [`transform_link`], and a value it
-/// does not change keeps its authored bytes; with nothing changed the chunk
-/// is returned borrowed.
+/// result is re-escaped for its quote. External and anchor values are left
+/// alone by [`transform_link`], a root-relative one only gains its canonical
+/// spelling (`/x.md` or a page's `/x` → `/x/`; relativized in build mode), and
+/// a value it does not change keeps its authored bytes; with nothing changed
+/// the chunk is returned borrowed.
 ///
 /// Known limits, accepted: an attribute whose name and value sit on different
 /// lines is not matched (pulldown-cmark hands an HTML block over a line at a
@@ -3925,7 +3926,7 @@ mod tests {
                 is_index_file: false,
                 url_depth: None,
                 current_page_url: String::new(),
-                markdown_page_probe: None,
+                directory_url_probe: None,
             },
             oembed_cache: None,
             server_mode,
@@ -4042,7 +4043,7 @@ mod tests {
             is_index_file,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         // Tests run with server_mode=false, transcode_enabled=false, mark_incomplete=false
         let result = render(
@@ -4081,7 +4082,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
         render(
@@ -4112,7 +4113,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         render(
             path,
@@ -4149,7 +4150,7 @@ mod tests {
             is_index_file: false,
             url_depth,
             current_page_url: current_page_url.to_string(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         render(
             path,
@@ -4386,7 +4387,7 @@ mod tests {
                     is_index_file: false,
                     url_depth: None,
                     current_page_url: "/broken-note/".to_string(),
-                    markdown_page_probe: None,
+                    directory_url_probe: None,
                 },
                 true,
                 false,
@@ -4946,7 +4947,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -5018,7 +5019,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -5051,7 +5052,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -5085,7 +5086,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -5123,7 +5124,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -5161,7 +5162,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let result = render(
             path,
@@ -7217,7 +7218,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
 
@@ -7292,7 +7293,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let (processed, _state) = process_all_events(
             events,
@@ -7906,7 +7907,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
 
         let async_result = render_with_cache(
@@ -8156,7 +8157,7 @@ mod tests {
                 is_index_file: false,
                 url_depth: None,
                 current_page_url: String::new(),
-                markdown_page_probe: None,
+                directory_url_probe: None,
             },
             false,
             false,
@@ -8834,7 +8835,7 @@ mod tests {
                     is_index_file: false,
                     url_depth: None,
                     current_page_url: String::new(),
-                    markdown_page_probe: None,
+                    directory_url_probe: None,
                 },
                 false,
                 false,
@@ -8905,7 +8906,7 @@ mod tests {
             is_index_file: false,
             url_depth: None,
             current_page_url: String::new(),
-            markdown_page_probe: None,
+            directory_url_probe: None,
         };
         let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
 
@@ -9488,7 +9489,7 @@ mod proptests {
                         is_index_file: false,
                         url_depth: None,
                         current_page_url: String::new(),
-                        markdown_page_probe: None,
+                        directory_url_probe: None,
                     },
                     oembed_cache: None,
                     server_mode: true,
