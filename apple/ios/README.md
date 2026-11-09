@@ -12,6 +12,12 @@ at the repository root. The device checklist is in [TESTING.md](TESTING.md).
 
 ## Build
 
+A step-by-step guide for someone building the app for the first time (your
+own device, a fork's signing, screenshots, troubleshooting) is
+[`docs/reference/ios-development.md`](../../docs/reference/ios-development.md);
+user documentation is [`docs/modes/ios.md`](../../docs/modes/ios.md). This
+section is the short version.
+
 Requirements:
 
 - Xcode at `/Applications/Xcode.app` with an iOS simulator runtime
@@ -77,6 +83,7 @@ Build outputs (`MBRMobile.xcodeproj/`, `MbrFFI.xcframework/`, `build/`, and the
 | `MBRMobile/Web/AppBridge.swift` | The native half of the page ↔ app bridge: the document-start user script that marks pages embedded, the `mbrApp` script-message handler feeding `PageInfo` (title, breadcrumbs, actions), and `AppBridge.open` calling `window.mbrApp.open(name)` |
 | `MBRMobile/Views/VaultToolbar.swift` | The native bar: history Back (long press: recent pages, then Vaults), the ⋯ menu (the `+` beside it is in `VaultScreen.swift`) (the page's actions, then Refresh, Home, Settings, Open Other Vault…), and the breadcrumb title menu |
 | `MBRMobile/AppIcon.icon` | The app icon, an Icon Composer package: the navy fill plus the two SVG layers `scripts/gen-app-icons.sh` generates from `graphic-sources/mbr-logo-simple.svg` (Xcode derives every bitmap and the dark/clear/tinted variants; no appiconset) |
+| `scripts/screenshots.sh` | Saves a simulator screenshot at each `SCREEN`/`SHOT` marker into `docs/images/screens/ios/` |
 | `MBRMobileUITests/` | UI tests for what only a tap opens (the bar's menus, the home-screen icon); each state prints `SHOT <name>` and is kept as an attachment |
 | `MBRMobile/Support/FileCoordinatorBridge.swift` | mbr's `FileCoordinator`: `NSFileCoordinator` writes (`.forReplacing`, item-replacement directory plus `replaceItemAt`, with an in-place fallback), mkdir, move, remove, and download requests |
 | `MBRMobile/Support/NetworkStatus.swift` | `NWPathMonitor`: sets `html.mbr-offline` in every page (document-start script, replaced on change) so the Downloading page says "You're offline." instead of spinning; logs `network: offline\|online` |

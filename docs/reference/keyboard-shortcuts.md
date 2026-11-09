@@ -1,7 +1,7 @@
 ---
 title: Keyboard Shortcuts
 description: Quick reference for all keyboard shortcuts
-order: 4
+order: 3
 ---
 
 # Keyboard Shortcuts
@@ -22,8 +22,8 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 | `g g` | Go to top of page |
 | `G` | Go to bottom of page |
 | `H` / `L` | Previous / next sibling page |
-| `d` | Go to today's [daily note](../markdown/calendar/#periodic-notes) (your local date); else the most recent one before today. A short message says so when the repository has none |
-| `[` / `]` | Previous / next [periodic note](../markdown/calendar/#navigating-periodic-notes) of the same kind (day, week, month, quarter, year), skipping gaps. Only on a periodic note; a no-op elsewhere |
+| `d` | Go to today's [daily note](../features/calendar/#periodic-notes) (your local date); else the most recent one before today. A short message says so when the repository has none |
+| `[` / `]` | Previous / next [periodic note](../features/calendar/#navigating-periodic-notes) of the same kind (day, week, month, quarter, year), skipping gaps. Only on a periodic note; a no-op elsewhere |
 | `Ctrl+o` / `Ctrl+i` | History back / forward |
 
 **Note on `Ctrl+f`:** full-page-down is bound on macOS only, where `Cmd+F` is the find
@@ -40,18 +40,18 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
 | `t` | Open the task browser (server and GUI modes only) |
-| `e` | Open the editor for the current note (when [editing](../modes/editing/) is enabled; not on folder listings) |
-| `r` | Add a [review note](../modes/review/), anchored to the selection (server and GUI modes only) |
+| `e` | Open the editor for the current note (when [editing](../features/editing/) is enabled; not on folder listings) |
+| `r` | Add a [review note](../features/review/), anchored to the selection (server and GUI modes only) |
 | `R` | Open the review panel (server and GUI modes only) |
-| `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../markdown/flashcards/) (on a `type: flashcard` page) |
-| `c` | The [calendar overlay](../markdown/calendar/#the-calendar-overlay): your notes by month, week or list. Inside it, `?` lists its own keys |
-| `C` (Shift+c) | The [daily-note companion](../markdown/calendar/#the-daily-note-companion): docked, move into it, or dismiss it when already there; elsewhere, open or close it as a drawer |
+| `p` | Play the slides (on a `style: slides` page) or review the [flashcards](../features/flashcards/) (on a `type: flashcard` page) |
+| `c` | The [calendar overlay](../features/calendar/#the-calendar-overlay): your notes by month, week or list. Inside it, `?` lists its own keys |
+| `C` (Shift+c) | The [daily-note companion](../features/calendar/#the-daily-note-companion): docked, move into it, or dismiss it when already there; elsewhere, open or close it as a drawer |
 | `Esc` | Close current panel |
 
 While a slide deck plays, the keyboard belongs to the slides: `?` shows the
 slide shortcuts (including `q` to exit), and mbr's own page shortcuts are
-turned off until you leave. `r` still adds a [review note](../modes/review/) to
-the selected text. See [Presentation Slides](../markdown/slides/#keyboard-shortcuts).
+turned off until you leave. `r` still adds a [review note](../features/review/) to
+the selected text. See [Presentation Slides](../features/slides/#keyboard-shortcuts).
 
 ## Quick Navigation (Fuzzy Nav)
 
@@ -89,7 +89,7 @@ Without a keyboard, the iOS app's ⋯ menu offers the same three panels as Conte
 
 The task browser (`t`) is a live view of the tasks in your markdown, so it exists in
 server and GUI modes only — a static build has no files to re-read. Disable it with
-`--no-tasks`. See [Task Browser](../markdown/tasks/) for the full guide.
+`--no-tasks`. See [Task Browser](../features/tasks/) for the full guide.
 
 | Key | Action |
 |-----|--------|
@@ -97,7 +97,7 @@ server and GUI modes only — a static build has no files to re-read. Disable it
 | `↑` / `↓` | Navigate tasks and headings |
 | `←` / `→` | Collapse / expand the focused group |
 | `Enter` | Open the focused task in its file, or toggle the focused heading |
-| `Space` | Complete / reopen the focused task (when [editing](../modes/editing/) is enabled) |
+| `Space` | Complete / reopen the focused task (when [editing](../features/editing/) is enabled) |
 | `x` | Cancel / reopen the focused task (when editing is enabled) |
 | `Tab` | Switch between the folder pane and the results pane |
 | `Ctrl+d` / `Ctrl+u` | Scroll the active pane half a page |
@@ -128,7 +128,7 @@ In **By Due**'s **Week** and **Month** views:
 Review notes (`r` to add one, `R` for the list) anchor to the `data-mbr-line`
 source lines the renderer emits, which a static build never emits — so the feature
 exists in server and GUI modes only. Disable it with `--no-review`. See
-[Review Notes](../modes/review/) for the full guide.
+[Review Notes](../features/review/) for the full guide.
 
 | Key | Action |
 |-----|--------|
@@ -154,7 +154,7 @@ from a typo.
 ## Flashcards (when open)
 
 `p` on a `type: flashcard` page opens its deck. The navigation keys mirror the
-ones slides use. See [Flashcards](../markdown/flashcards/) for the full guide.
+ones slides use. See [Flashcards](../features/flashcards/) for the full guide.
 
 | Key | Action |
 |-----|--------|
@@ -170,7 +170,7 @@ rating does — so a stray key cannot skip a card you were meant to grade.
 
 ## Task Checkboxes (in a page)
 
-With [editing](../modes/editing/) enabled, the checkboxes in a rendered page are
+With [editing](../features/editing/) enabled, the checkboxes in a rendered page are
 clickable.
 
 | Action | Result |
@@ -180,7 +180,7 @@ clickable.
 
 ## Editor (when open)
 
-With [editing](../modes/editing/) enabled, `e` opens the editor for the current page.
+With [editing](../features/editing/) enabled, `e` opens the editor for the current page.
 
 | Key | Action |
 |-----|--------|
@@ -190,7 +190,7 @@ With [editing](../modes/editing/) enabled, `e` opens the editor for the current 
 | `Cmd+;` / `Ctrl+;` | Add a property (in the Properties form) |
 
 The Properties panel has more keys of its own; see
-[Editing Properties](../modes/editing-frontmatter/#keyboard-shortcuts).
+[Editing Properties](../features/editing-properties/#keyboard-shortcuts).
 
 ## Fuzzy Nav Modal (when open)
 

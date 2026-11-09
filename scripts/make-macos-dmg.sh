@@ -16,7 +16,7 @@
 # Signs, and notarizes, for real when IDENTITY and KEYCHAIN are both set in
 # the environment (a "Developer ID Application: ..." common name and the
 # keychain holding its private key — see .github/workflows/release.yml's
-# "Import the Developer ID certificate" step and docs/releasing.md). Both
+# "Import the Developer ID certificate" step and docs/reference/releasing.md). Both
 # empty is the default and reproduces the script's original ad-hoc-only
 # behavior: no secrets, no network calls, just a Gatekeeper-blocked-but-openable
 # DMG — which is what a dry run, or any local run without the signing secrets,

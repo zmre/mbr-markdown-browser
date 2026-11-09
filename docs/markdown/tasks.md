@@ -1,295 +1,129 @@
 ---
-title: Task Browser
-description: Find, filter and complete every task in your markdown repository
-order: 6
+title: Tasks
+description: Checkbox tasks, priorities, due dates, tags, move markers and TODO markers
+order: 4
 ---
 
-# Task Browser
+# Tasks
 
-Press `t` — or click the checklist icon in the header — to open the task
-browser: a two-pane view of every task in the repository, filtered and grouped
-however you need to look at them today.
+mbr extends GitHub's task lists with two extra markers and a small set of
+annotations, all of which render as chips, pills and dots rather than as raw
+text. The same syntax feeds the [task browser](../features/tasks/), which finds
+every task in the repository and lets you filter and group them.
 
-![The task browser with a folder tree on the left and open tasks grouped by note, with due dates, tags and priority dots](../images/screens/task-browser.png)
+## Markers
 
-*The task browser (`t`), grouped by note. The overdue date is shown in red.*
+| Marker | Status | Meaning |
+|--------|--------|---------|
+| `- [ ]` | Open | Not done yet |
+| `- [x]` | Done | Completed (`- [X]` works too) |
+| `- [-]` | Canceled | Abandoned — struck through, and never counted in a progress bar |
+| `- [>]` | Canceled | Moved somewhere else; see [move markers](#move-markers) |
 
-The syntax it reads is documented in [Markdown Extensions](./#tasks): the four
-markers, `@due(...)`, `@done(...)`, `#tag` and the `!!` / `!!!` priorities. It
-also reads the dates and priorities written by Obsidian Tasks, Dataview, org
-mode and Logseq: see [Dates from other tools](#dates-from-other-tools).
-Nothing here requires any change to your notes — if you already write
-`- [ ] something`, you already have a task list.
+Any list bullet works — `-`, `*`, `+`, `1.` or `1)` — and a task may be
+indented under another one. Nested tasks are treated as independent tasks: mbr
+does not roll a parent's progress up from its children.
 
-> [!IMPORTANT]
-> The task browser is **server and GUI only** (`mbr -s`, `mbr -g`). Its index is
-> built by reading live files, which a static build has no way to do, so a built
-> site has no task panel and no `/.mbr/tasks` endpoint. See
-> [Applicability](#why-not-in-static-builds) below.
-
-## Layout
-
-```
-┌─ folders ────┬─ [filter field.....................] [filters]   ─┐
-│ v  Home   42 │        ( category | calendar )                    │
-│   > docs  12 │  ┌──────────────────────────────────────────────┐ │
-│   > notes 30 │  │ Weekly notes            3/7 ▓▓▓░░░░          │ │
-│              │  │   docs/notes                                 │ │
-│              │  │  ● [ ] write the report  #work  [Aug 5]       │ │
-│              │  │    [ ] follow up                             │ │
-└──────────────┴──┴──────────────────────────────────────────────┘ │
+```markdown
+- [ ] Unchecked task
+- [x] Completed task
+- [-] Canceled task
+* [ ] Parent task
+	* [ ] A subtask, counted on its own
 ```
 
-**Left pane — folders.** The whole repository as a tree, each folder carrying
-the number of matching tasks in it *and everything below it*. Selecting a folder
-scopes the results to it and its subfolders; selecting **Home** clears the
-scope. The counts ignore the folder selection on purpose, so picking one folder
-never empties out the siblings you might want to switch to.
+## Live Example
 
-**Right pane — results.** A filter field, the two mode tabs, and the task list.
+- [ ] Write documentation
+- [x] Set up project structure
+- [-] Use complex build system (not needed!)
 
-### Where it opens
+## Annotations
 
-The panel opens where you already are. The folder of the note you pressed `t`
-on starts selected — with the tree expanded down to it — so the first thing you
-see is the work nearest to what you were reading, not the top of the
-repository. Selecting **Home** widens to everything, and one click on any other
-folder goes wherever you meant to go instead.
+Annotations may appear anywhere in a task's text. They are lifted out of the
+displayed text and rendered as their own elements, so the line stays readable.
 
-If that folder has nothing matching in it, the panel widens to the whole
-repository by itself rather than opening on an empty list. That happens only on
-the way in: once you are in, a folder you pick yourself stays picked even when
-it turns up empty.
+| Syntax | Meaning | Notes |
+|--------|---------|-------|
+| `@due(<date>)` | Due date | Rendered as a calendar chip |
+| `@done(<date>)` | Completion time | Rendered as a ✓ chip |
+| `#tag` | Tag | `A–Z`, `a–z`, `0–9`, `_` and `-`; must follow a space or start the text |
+| `!!` | High priority | An orange dot |
+| `!!!` | Urgent | A red dot; wins over `!!` |
 
-The [**Show** filter](#filtering) widens the same way, and the two are tried in
-order: first what counts as an entry, and only then the folder scope — giving up
-the folder you were standing in is the bigger change of subject, so it goes
-last.
+Obsidian Tasks emoji (`📅 2026-08-05`), Dataview fields (`[due:: 2026-08-05]`)
+and org / Logseq `SCHEDULED:` / `DEADLINE:` lines are read too; see [Dates from
+other tools](#dates-from-other-tools).
 
-Opening from the home page or a section page — neither of which is a file —
-starts unscoped, exactly as it always has.
+```markdown
+- [ ] Write the report !! #work @due(2026-08-05)
+- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
+- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
+```
 
-## The two modes
+Live:
 
-### By Note (the default)
+- [ ] Write the report !! #work @due(2026-08-05)
+- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
+- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
 
-One heading per file, tasks in the order they appear in it. The heading is the
-note's title, with its folder underneath in smaller type, and clicking it opens
-that note.
+A few rules worth knowing:
 
-The note you opened the panel from is pinned to the top of the list, so its
-tasks are the first ones you see; everything else keeps the server's order
-below it. Calendar mode does not pin — a heading there is a date, not a file.
+- **`#tag` needs whitespace in front of it.** That is what keeps
+  `page.md#anchor` from becoming a tag.
+- **`!!` needs whitespace on both sides** (or the end of the line), so `wow!!`
+  is emphasis, not a priority.
+- **A tag is one word.** `#in-progress` and `#in_progress` are tags;
+  `#in progress` is the tag `#in` followed by the word "progress".
+- **There is no low priority.** Normal is the default and draws no dot.
 
-The `x/y` and progress bar on the right count **every task in the file**,
-including ones the current filter has hidden — so a file showing you one
-matching task can still read `3/7`. That is deliberate: the number answers "how
-far along is this note?", not "how much of what I am looking at is done?".
+![A launch checklist: done tasks with check chips, open tasks with priority dots, tag pills and due-date chips, a struck-through cancelled task, and TODO and FIXME highlighted below](../images/screens/tasks-in-note.png)
 
-### By Due
+*Tasks as mbr draws them, with a `TODO:` and a `FIXME` marker below.*
 
-One heading per due-date bucket, in this order:
+## Date formats
 
-| Bucket | Contains | Progress bar |
-|--------|----------|--------------|
-| Overdue | Due on a day that has already passed | No — a backlog has no useful denominator |
-| Today | Due today | Yes |
-| Tomorrow | Due tomorrow | Yes |
-| Upcoming | Everything later, with a subheading per date | Yes, on "Upcoming" as a whole |
-| No due date | Everything undated | No |
+`@due(...)` and `@done(...)` take the same grammar:
 
-Here the `x/y` counts everything matching your filters **except** the status
-filter, so turning "Complete" on and off moves tasks in and out of the list
-without moving the progress bar.
+| Form | Example |
+|------|---------|
+| Date only | `@due(2026-08-05)` |
+| Date + 24-hour time | `@due(2026-08-05 15:00)` |
+| Date + 12-hour time | `@due(2026-08-05 03:00 PM)` |
 
-Canceled tasks are ignored entirely in calendar mode — they do not appear, do
-not count, and cannot create a bucket. A canceled task has no meaningful
-deadline.
+Dates are **naive and local**: mbr does no timezone conversion and no UTC
+round trip, so `2026-08-05 09:00` means nine in the morning wherever you are.
+A due date with no time is treated as the start of that day, and a task is
+overdue only once that whole day has passed — a task due today at 09:00 still
+reads as "Today" at five in the afternoon.
 
-#### Week and month grids
+> [!NOTE]
+> An annotation whose contents are not a date is **not** an annotation.
+> `@due(next tuesday)` stays in the text exactly as written, so a mistyped date
+> shows up as your typo rather than as a task that quietly lost its deadline.
 
-**By Due** has a view switch: **List** (the buckets above), **Week** and
-**Month**. The grids put each task on a day:
+## Move markers
 
-| The task has | It goes on |
-|--------------|------------|
-| A done date and a ticked box | Its done date, drawn done |
-| Otherwise a due date (any [notation](#dates-from-other-tools)) | Its due date |
-| Otherwise only a scheduled date | Its scheduled date |
-| No date at all | Nowhere — see below |
+When a task moves to another note — most often a dated daily note — record
+where it went with a trailing `> DATE`, and where it came from with a trailing
+`< DATE`:
 
-A done task with no done date but a due date sits on its due date, drawn done.
-Canceled tasks and [incomplete markers](#incomplete-markers) never appear. A
-day lists its open tasks first, then timed ones by time (a time on the date, or
-a time the text starts with, like `09:30 call`), then by priority.
+```markdown
+- [>] Draft the agenda > 2026-08-06
+- [ ] Draft the agenda < 2026-08-04
+```
 
-Days in the past that still have an open task placed by its **due** date have
-their date in red. A scheduled date is when you plan to start, not a deadline,
-so a past day holding only scheduled (or done) tasks stays plain. When tasks
-were due before the range on screen, an **Overdue (12)** chip in the header
-switches to the List view filtered to overdue tasks. ‹ › page by a week or a
-month and **Today** comes back; the filter text, folder, status and priority
-filters apply to the grids as they do to the list.
-
-Click a day (or press `Enter` on it) to list its tasks as the usual cards, with
-their checkboxes: completing or cancelling works there exactly as in the list.
-A task line in the grid is a link to the task in its note.
-
-An undated task in a [day note](calendar/#periodic-notes) is not drawn on the
-grid: it has no date of its own. It does count toward that day's mark in the
-[calendar companion](calendar/#task-markers).
-
-The Week and Month views need the calendar (`[calendar] enabled`, the
-default). On a screen narrower than 600px Month shows as Week. The choice of
-view lasts as long as the panel is open.
-
-## Filtering
-
-Type in the filter field to narrow by text. Bare words match the task's text
-**or** one of its tags, several words are ANDed together, and a `#tag` token
-matches tags only:
-
-| Query | Matches |
-|-------|---------|
-| `report` | Any task whose text contains "report", or tagged `#report…` |
-| `the report` | Tasks matching **both** words |
-| `#work` | Tasks tagged `#work` (prefix match, so `#wo` finds it while you type) |
-| `report #work` | Both conditions |
-
-The filter-options button (sliders) opens the rest of the filters:
-
-- **Status** — a multi-select of Incomplete / Complete / Canceled. It starts on
-  **Incomplete only**, and the last box cannot be cleared (an empty selection
-  means "incomplete" to the server, which would be confusing to look at).
-- **Priority** — Normal, High, Urgent. Empty means all.
-- **Due** — Any, Overdue, Due today, Due tomorrow, Upcoming, or No due date.
-- **Show** — Tasks only (the default), Markers only, or Tasks + markers. See
-  [Incomplete markers](#incomplete-markers). Greyed out in **By Due**, which
-  lists tasks only.
-
-  It starts on **Tasks only** so the list is your checkboxes and not a mix of
-  those and every `TODO:` in the repository. If that finds nothing — a
-  repository whose work is all written as markers, say — the panel widens to
-  **Tasks + markers** by itself rather than opening on "No tasks match these
-  filters", and moves the control to match, so what you see is always what the
-  filter says. It widens at most once, and never once you have set **Show**
-  yourself: your choice stays put even when it selects nothing.
-
-  A repository can change the starting position with the
-  [`tasks_default_include`](../reference/configuration/#task-settings) config
-  option.
-
-The folder scope is the one filter that does *not* start empty: it starts on
-the folder of the note you were reading (see [Where it
-opens](#where-it-opens)).
-
-Every filter change is a fresh query; nothing is filtered in the browser, so
-the counts and the list can never disagree.
-
-## Keyboard
-
-The panel is driven the same way [search](../reference/keyboard-shortcuts/) is,
-so it should feel familiar.
-
-| Key | Action |
-|-----|--------|
-| `t` | Open the panel |
-| `Ctrl+n` / `Ctrl+p`, `↓` / `↑` | Move between tasks and headings |
-| `Enter` | Open the focused task in its file (or collapse/expand a focused heading) |
-| `Space` | Complete ↔ reopen the focused task *(editing only)* |
-| `x` | Cancel ↔ reopen the focused task *(editing only)* |
-| `←` / `→` | Collapse / expand the focused group |
-| `Tab` | Switch between the folder pane and the results pane |
-| `Ctrl+d` / `Ctrl+u` | Scroll the active pane half a page |
-| `Ctrl+f` / `Ctrl+b` | Scroll the active pane a full page |
-| `Esc` | Close the filter options, then the panel |
-
-In the **Week** and **Month** views the arrows move between days instead, as in
-the [calendar overlay](calendar/#the-calendar-overlay):
-
-| Key | Action |
-|-----|--------|
-| `↓` or `Enter` in the filter field | Move into the grid |
-| Arrows, or `h` `j` `k` `l` in the grid | Move between days |
-| `[` / `]`, PageUp / PageDown | Previous / next week or month |
-| `t` | Today |
-| `m` / `w` / `a` | Month / Week / List |
-| `/` | Back to the filter field |
-| `Enter` | List the focused day's tasks |
-| `Space` / `x` | On a day with one task, complete / cancel it; otherwise list the day *(editing only)* |
-| `↑` / `↓` (or `k` / `j`), `Enter`, `Space`, `x` | In a day's list: move, open, complete, cancel |
-| `Esc` | Close the day's list, then the panel |
-
-Typing goes to the filter field, which keeps focus the whole time. `Space`,
-`x`, `←` and `→` only take over once you have moved onto a task with the arrow
-keys — and any keystroke in the filter field hands them back — so filtering for
-"buy milk" works exactly as you would expect. `Space` and `x` stay with the
-field on a heading and on an [incomplete marker](#incomplete-markers), neither
-of which has a status to change.
-
-## Jumping to a task
-
-`Enter` (or a click on the task's text) opens the note it lives in and scrolls
-straight to the line, clear of the sticky header, with a brief highlight so you
-can see which one you came for. The link is an ordinary fragment
-(`/docs/notes/#mbr-task-42`, or `#mbr-marker-42` for an [incomplete
-marker](#incomplete-markers)), so it can be bookmarked, shared, or opened in a
-new tab.
-
-## Toggling a task
-
-With [editing](../modes/editing/) enabled, tasks can be completed from either
-place:
-
-- **In the panel**: click a checkbox, press `Space`, or press `x` to cancel.
-  Right-clicking a checkbox cancels too.
-- **In the document**: left-click a rendered checkbox to complete or reopen it;
-  right-click to cancel.
-
-The card or checkbox moves immediately and the change is written to the file
-behind it. If the write is refused, it moves back and tells you why — most
-usefully when the note has changed somewhere else since the page was rendered
-(on disk, in another editor, or on another device — anywhere in the note, since
-an added line moves every task below it), in which case nothing is written: a checkbox in the document offers to reload the page for the latest
-version, and the panel refreshes its list so you can try again. On a vault the
-server has to fetch from the cloud first (the iOS app over iCloud), a note that
-is still downloading says so; try again in a moment.
-
-The page does **not** reload for your own toggle. A done chip appears
-(or disappears) in place, your scroll position and the panel's filters survive,
-and on a server that requires an [edit
-token](../modes/editing/#entering-the-token) the token — which is kept in memory
-only — is still there for the next click.
-
-Only the marker byte and the done stamp are rewritten. The stamp is written in
-the notation the line already uses, so mbr never adds a foreign notation to a
-vault a plugin manages:
-
-| The line has… | Completing it appends |
-|---------------|-----------------------|
-| Any Obsidian Tasks emoji (`📅`, `⏳`, `⏫`, `🔁`, …) | ` ✅ 2026-11-06` |
-| Any Dataview inline field (`[due:: …]`, `(priority:: high)`, …) | ` [completion:: 2026-11-06]` |
-| Neither | ` @done(2026-11-06 14:32)` |
-
-A line that already carries a done date in any of these notations is not
-stamped twice, and reopening or cancelling a task removes whichever one it has.
-
-Indentation,
-bullet style, spacing, your other annotations, the line's ending (a CRLF file
-stays CRLF) and the presence or absence of a trailing newline are all preserved.
-See [`tasks_stamp_done`](../reference/configuration/#task-settings) to turn the
-stamp off, and [In-Browser Editing](../modes/editing/#task-toggling) for the
-endpoint behind it.
-
-Without editing enabled, the checkboxes stay inert and `Space` / `x` stay
-unbound — no control appears that cannot do anything.
+Both markers are stripped from the displayed text. The `>` form marks the task
+canceled (it lives somewhere else now) and its destination date is kept and
+shown as a → chip; the `<` form is recognised only so it does not clutter the
+display, and is otherwise discarded.
 
 ## Dates from other tools
 
 Vaults kept with other tools write task dates their own way. mbr reads these
 too, strips them from the task's text, and shows them as the same chips as
 `@due(...)`. It never rewrites them; the only thing it writes is the done stamp
-described in [Toggling a task](#toggling-a-task).
+described in [Editing tasks](#editing-tasks).
 
 **Obsidian Tasks emoji**
 
@@ -353,7 +187,7 @@ October 31. A planning line comes after the task line, so a due date on the
 task line wins over `DEADLINE:`.
 
 **Scheduled dates** show as their own chip, in the document and in the panel.
-They do not change which task is overdue or which [By Due](#by-due) bucket it
+They do not change which task is overdue or which [By Due](../features/tasks/#by-due) bucket it
 falls in; only the due date does.
 
 NotePlan's trailing `> 2026-11-03` is still read as "moved to that day", as
@@ -367,7 +201,9 @@ Not every loose end gets a checkbox. A sentence like
 The market fell 10% (source: TK).
 ```
 
-is unfinished work too, and the panel lists it beside your real tasks.
+is unfinished work too. mbr highlights it in the page and the
+[task browser](../features/tasks/#incomplete-markers) lists it beside your real
+tasks.
 
 Any line containing one of the `incomplete_markers` — `TK`, `TODO`, `FIXME` or
 `XXX` by default — becomes a **marker** entry. Matching happens *anywhere* in
@@ -386,120 +222,26 @@ Markers are skipped where the word is obviously not a note to self:
 A line is only ever **one** entry. `- [ ] TODO: ship it` is a task, never also
 a marker — the checkbox wins.
 
-### They are read-only
+On the page, the marker word gets a yellow wash (a paragraph, heading, list
+item or table cell that *starts* with a marker, like `TODO: call Bob`, is washed
+whole) and an anchor, `#mbr-marker-{line}`, that the task browser links to. The
+marker list, the match rule and the per-mode defaults (on in server and GUI,
+off in static builds) are in
+[Incomplete-Marker Highlighting](../reference/configuration/#incomplete-marker-highlighting).
 
-A marker is a pointer at a line, not a state you can change. There is no
-checkbox on its card — not a disabled one, none at all — and `Space` and `x` do
-nothing to it, staying with the filter field the way they do on a heading. There
-is no marker byte in the file to rewrite, so the write endpoint refuses one
-outright.
+## Where tasks are and are not found
 
-Everything else about the card follows from that: a marker's text is the whole
-source line verbatim (`#tags`, `!!` and `@due(...)` are neither parsed nor
-stripped, because a marker has no annotation grammar), it carries no tag pills
-or date chips, and its priority is always normal.
+mbr scans markdown files line by line and skips fenced code
+blocks, indented code blocks, HTML blocks and YAML frontmatter — so a `- [ ]`
+inside an example like the ones above is documentation, not a task.
 
-Inside that line, the marker word itself — and only the marker word — carries
-the same highlight the rendered page gives it, so a card and the paragraph it
-points at read as the same thing. The server sends the word's position along
-with the text, so the card highlights exactly the occurrence that made the line
-a marker: in ``Set `TODO` in config and TK fix it`` the backticked `TODO` is
-code, and it is the `TK` that lights up.
+## Editing tasks
 
-### Where they appear, and where they do not
-
-| | |
-|---|---|
-| **By Note** | Yes — in source order, among that note's tasks |
-| **By Due** | Never. A marker has no due date, so no bucket could hold one; the **Show** filter is greyed out and pinned to "Tasks only" there, and your choice comes back when you switch to **By Note** |
-| **Progress counters** | Never counted. A note's `x/y` and its bar describe its checkboxes alone, so a stray `TODO:` cannot make a finished note look unfinished |
-| **Folder counts** | Counted — they are real matches |
-
-Clicking one jumps to its line and flashes it, exactly as a task does. The
-fragment is `#mbr-marker-42` rather than `#mbr-task-42`, because the anchor
-lives on the highlight instead of on a checkbox.
-
-### Turning them off
-
-Markers in the panel follow the same switch as the highlighting on the page:
-[`mark_incomplete`](../reference/configuration/#incomplete-marker-highlighting).
-With it off there is no highlight and therefore no anchor to link to, so there
-are no markers in the panel either — `mbr -s --no-mark-incomplete` gives you
-back a panel of checkboxes only. Setting `incomplete_markers = []` does the same
-thing.
-
-For the highlighting itself — the two shapes of wash, the exact match rule, and
-the `id="mbr-marker-{line}"` anchor — see [Incomplete-Marker
-Highlighting](../reference/configuration/#incomplete-marker-highlighting).
-
-## Configuration
-
-| Option | Default | Effect |
-|--------|---------|--------|
-| `tasks_enabled` | `true` | Turn the panel and its endpoint off (`--no-tasks`) |
-| `tasks_stamp_done` | `true` | Maintain a done stamp (`@done(...)`, or the line's own `✅` / `[completion::]` notation) when a task is completed |
-| `tasks_default_include` | `"tasks"` | Where the **Show** filter starts: `"tasks"`, `"markers"` or `"all"` (config/env only) |
-| `tasks_ignore_globs` | `[]` | Folders whose tasks the panel ignores (config/env only) |
-| `mark_incomplete` | server/GUI on | Also gates [incomplete markers](#incomplete-markers) in the panel (`--no-mark-incomplete`) |
-| `incomplete_markers` | `["TK", "TODO", "FIXME", "XXX"]` | Which words count as a marker |
-
-See [Task Settings](../reference/configuration/#task-settings) and
-[Incomplete-Marker
-Highlighting](../reference/configuration/#incomplete-marker-highlighting) for
-the details.
-
-## Hiding a folder from the panel
-
-A folder of checklist *templates* is the usual problem: dozens of permanently
-unchecked boxes that are nobody's actual work, crowding out the real ones. Name
-its contents in `tasks_ignore_globs`:
-
-```toml
-# .mbr/config.toml
-tasks_ignore_globs = ["templates/**"]
-```
-
-Matching files are left out of the index the panel is built from, so they vanish
-from all of it at once — the list, the folder pane, and every count.
-
-The documents themselves are untouched: they still render, still show their
-checkboxes, and those checkboxes still toggle when editing is on. The panel is a
-view over your tasks, not the definition of them. Patterns match a file's
-repository-relative path, so use `templates/**` (the folder's contents), not
-`templates`; see
-[Task Settings](../reference/configuration/#task-settings) for the full pattern
-rules.
-
-## Why not in static builds
-
-Tasks are a live view. The index is built by reading the markdown files as they
-are *now*, and it is kept current by the same file watcher that drives live
-reload — so it has meaning only where those files exist and can change. A static
-build is a snapshot; a task list frozen into one would start lying the moment
-somebody ticked a box. Built pages therefore ship no task chunk at all, and the
-panel's trigger renders nothing.
-
-The task **syntax** is unaffected: priority dots, tag pills and date chips are a
-markdown extension and render everywhere, static builds included.
-
-## Cost when you do not use it
-
-None worth measuring. The index is built lazily on the very first task query and
-never at startup, holds only the files that actually contain tasks, and is then
-kept fresh per-file by the watcher. A server whose user never presses `t` never
-reads a file for it.
-
-The first query on a very large repository pays one sequential pass over the
-markdown; it reports `scan_in_progress` while the repository scan is still
-running, and the panel shows partial results in the meantime rather than making
-you wait.
-
-## See Also
-
-- [Task syntax](./#tasks) — markers, annotations and date formats
-- [Incomplete-Marker
-  Highlighting](../reference/configuration/#incomplete-marker-highlighting) —
-  how `TK`/`TODO` are matched and highlighted on the page
-- [In-Browser Editing](../modes/editing/) — enabling writes
-- [Keyboard Shortcuts](../reference/keyboard-shortcuts/)
-- [Configuration Reference](../reference/configuration/#task-settings)
+With [editing](../features/editing/) enabled, checkboxes in a rendered page become
+clickable: a left click completes or reopens a task, and a right click cancels
+it. Only the marker byte (and the `@done(...)` stamp) is rewritten; your
+indentation, bullet style, spacing, other annotations and line endings are left
+exactly as you wrote them. See the
+[task browser](../features/tasks/#toggling-a-task) for the same thing from the
+panel, and
+[`tasks_stamp_done`](../reference/configuration/#task-settings) for the stamp.

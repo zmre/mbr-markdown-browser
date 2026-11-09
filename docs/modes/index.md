@@ -6,7 +6,8 @@ order: 2
 
 # Modes of Operation
 
-mbr offers four distinct modes, each optimized for different workflows.
+mbr runs four ways on the desktop, each suited to a different workflow, plus a
+QuickLook extension for Finder and an app for iPhone and iPad.
 
 ## Mode Overview
 
@@ -44,6 +45,8 @@ flowchart LR
 | Server | `-s` | Development, browsing | Yes | Yes (Live grep) |
 | CLI | `-o` | Pipe to tools, scripts | No | No |
 | Build | `-b` | Deploy to static hosts | N/A | Yes (Pagefind) |
+| QuickLook | (Finder, Space) | Glance at a note without opening anything | N/A | No |
+| iOS app | (MBR app) | Read and edit notes on iPhone and iPad | On refresh | Yes (native) |
 
 ## Choosing a Mode
 
@@ -97,12 +100,15 @@ mbr -b --output ./public ~/notes
 - [Server Mode](server/) - Web server with live reload
 - [Build Mode](build/) - Static site generation
 - [QuickLook](quicklook/) - macOS Finder preview integration
+- [iPhone and iPad](ios/) - The MBR app for iOS and iPadOS
 
 ## Server and GUI Only
 
-Two capabilities need live files behind the page, so they exist in server and
-GUI mode and are absent from a static build:
+Some capabilities need live files behind the page, so they exist in server
+and GUI mode (and the iOS app) and are absent from a static build. The full
+table is in [Where each feature works](../features/#where-each-feature-works).
 
-- [In-Browser Editing](editing/) - Edit markdown from the browser (on by default in the GUI; `--edit` for the server)
-- [Editing Properties](editing-frontmatter/) - Edit frontmatter as a form or as YAML, with suggestions from your notes
-- [Review Notes](review/) - Annotate a page and copy the review out as markdown (`r` / `R`)
+- [In-Browser Editing](../features/editing/) - Edit markdown from the browser (on by default in the GUI; `--edit` for the server)
+- [Editing Properties](../features/editing-properties/) - Edit frontmatter as a form or as YAML, with suggestions from your notes
+- [Review Notes](../features/review/) - Annotate a page and copy the review out as markdown (`r` / `R`)
+- [Task Browser](../features/tasks/) - Find, filter and complete every task (`t`)

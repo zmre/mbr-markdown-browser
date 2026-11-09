@@ -453,7 +453,7 @@ jobs:
           done
           if [ -n "$missing" ]; then
             echo "::error::Missing required repository secrets:$missing"
-            echo "See docs/releasing.md for how to produce each one." >&2
+            echo "See docs/reference/releasing.md for how to produce each one." >&2
             exit 1
           fi
           echo "All five signing secrets are present."
@@ -808,7 +808,7 @@ jobs:
   # Clippy check, and deploy keys are on its bypass list. GITHUB_TOKEN cannot
   # be, so its push is rejected. Classic branch protection cannot exempt a
   # deploy key at all, which is why main must not have any. The key's private half is the HOMEBREW_CASK_DEPLOY_KEY secret;
-  # see docs/releasing.md for the one-time setup. Because the push goes over
+  # see docs/reference/releasing.md for the one-time setup. Because the push goes over
   # SSH with that key, this job's token only needs to read the release.
   #
   # A deploy-key push, unlike a GITHUB_TOKEN one, DOES trigger workflows, hence
@@ -986,5 +986,5 @@ jobs:
             sleep $((attempt * 5))
             git pull --rebase origin main
           done
-          echo "::error::Could not push the cask update after 5 attempts. Run scripts/update-cask.sh $VERSION <sha256> by hand (see docs/releasing.md)."
+          echo "::error::Could not push the cask update after 5 attempts. Run scripts/update-cask.sh $VERSION <sha256> by hand (see docs/reference/releasing.md)."
           exit 1

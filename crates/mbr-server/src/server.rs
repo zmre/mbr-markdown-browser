@@ -3870,7 +3870,7 @@ impl Server {
     ///    against `edit_token_hash` as a bearer token (`401` otherwise).
     ///
     /// Deriving (4) from the peer IP alone was a bypass: behind the
-    /// TLS-terminating reverse proxy that `docs/modes/editing.md` recommends,
+    /// TLS-terminating reverse proxy that `docs/features/editing.md` recommends,
     /// every request arrives from 127.0.0.1, so a configured `edit_token_hash`
     /// was never checked. A configured token is now *always* enforced.
     fn check_edit_access(

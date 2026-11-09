@@ -7,7 +7,7 @@
 # <sha256> is the checksum of mbr-macos-arm64.dmg from the release's SHA256SUMS.
 # The release workflow's `update-homebrew-cask` job calls this after every
 # stable release; run it by hand only to repair a bad bump (see
-# docs/releasing.md).
+# docs/reference/releasing.md).
 #
 # Rewrites exactly the cask's top-level `  version "..."` and `  sha256 "..."`
 # lines and nothing else. awk rather than `sed -i`: BSD and GNU sed disagree on

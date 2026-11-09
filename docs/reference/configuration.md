@@ -314,8 +314,8 @@ mbr -s --title-prefix "My Site: " --title-suffix " | Docs" ~/notes
 
 The task browser finds every markdown task (`- [ ]`, `- [x]`, `- [-]`, `- [>]`)
 in the repository and lets you filter and group them — see
-[Task Browser](../markdown/tasks/) for the user guide and
-[Markdown Extensions](../markdown/#tasks) for the syntax. It is **server/GUI only**:
+[Task Browser](../features/tasks/) for the user guide and
+[Markdown Extensions](../markdown/tasks/) for the syntax. It is **server/GUI only**:
 the index is built by reading live files, so static builds never expose it —
 `tasks_enabled` has no effect on `mbr -b`, and built pages always report
 `tasksEnabled: false` to the frontend.
@@ -323,7 +323,7 @@ the index is built by reading live files, so static builds never expose it —
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tasks_enabled` | bool | `true` | Enable `POST /.mbr/tasks` and the task panel. Disable with `--no-tasks` or `MBR_TASKS_ENABLED=false`; the endpoint then returns `404`. |
-| `tasks_stamp_done` | bool | `true` | Maintain a done stamp when a task is toggled through `POST /.mbr/task`, written in the line's own notation: ` ✅ YYYY-MM-DD` on an Obsidian Tasks emoji line, ` [completion:: YYYY-MM-DD]` on a Dataview line, else `@done(...)` (see [Tasks](../markdown/tasks.md)). Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
+| `tasks_stamp_done` | bool | `true` | Maintain a done stamp when a task is toggled through `POST /.mbr/task`, written in the line's own notation: ` ✅ YYYY-MM-DD` on an Obsidian Tasks emoji line, ` [completion:: YYYY-MM-DD]` on a Dataview line, else `@done(...)` (see [Tasks](../features/tasks.md)). Set with `MBR_TASKS_STAMP_DONE=false`; there is no CLI flag. |
 | `tasks_default_include` | string | `"tasks"` | Where the panel's **Show** filter starts: `"tasks"`, `"markers"` or `"all"`. Set with `MBR_TASKS_DEFAULT_INCLUDE`; there is no CLI flag. |
 | `tasks_ignore_globs` | array | `[]` | Glob patterns whose matching files contribute nothing to the task browser. Set with `MBR_TASKS_IGNORE_GLOBS='["templates/**"]'`; there is no CLI flag. |
 
@@ -424,7 +424,7 @@ gets a foreign one:
 Reopening or canceling the task removes that stamp again, and completing an
 already-completed task does **not** add a second one or re-date the first. The
 `@done(...)` timestamp is local wall-clock time, matching the naive/local dates
-`@due(...)` uses. See [Tasks](../markdown/tasks.md) for the full table.
+`@due(...)` uses. See [Tasks](../features/tasks.md) for the full table.
 
 Set `tasks_stamp_done = false` to have the endpoint rewrite nothing but the
 marker byte, leaving any done stamp exactly as its author wrote it. Either way
@@ -444,7 +444,7 @@ server** (`mbr -s`); static builds never edit. A value set here or in
 `MBR_EDIT_ENABLED` beats either default (so `edit_enabled = false` keeps a
 repository read-only in the GUI too), and `--edit` / `--no-edit` beat both. When enabled, a
 pencil button appears next to the info button and opens a Milkdown/Crepe editor
-for the current markdown file. See the [editing guide](../modes/editing.md).
+for the current markdown file. See the [editing guide](../features/editing.md).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -512,7 +512,7 @@ tag_sources = [
 build_tag_pages = true
 ```
 
-See the [Tags feature documentation](tags/) for complete details.
+See the [Tags feature documentation](../features/tags/) for complete details.
 
 ### Relationship Settings
 
@@ -564,11 +564,11 @@ relationship_tracking = true
 Setting `relationship_types` **replaces** this list wholesale, so a repository that
 adds its own types must copy the defaults it still wants (the `employer` type in
 particular powers the implicit edge from a person's `company: "[[…]]"` — see
-[Contacts](../markdown/contacts/#company-links)).
+[Contacts](../features/contacts/#company-links)).
 
 Relation types not listed here are still tracked, but as directed edges with no
 automatic reverse relabelling. See the
-[Relationships & Genealogy documentation](../markdown/relationships/) for the frontmatter
+[Relationships & Genealogy documentation](../features/relationships/) for the frontmatter
 schema and a walkthrough.
 
 **Self-inverse types are coerced to symmetric.** `inverse` names the *other* half
@@ -598,7 +598,7 @@ warning.
 > **Note:** Typed relationships are visualized by the d3-based genealogy charts
 > on `type: person` pages and as edges in the info panel's mini link graph —
 > not by mermaid. See
-> [Relationships & Genealogy](../markdown/relationships/) for both.
+> [Relationships & Genealogy](../features/relationships/) for both.
 
 > **Note:** Setting `oembed_timeout_ms` to `0` disables OpenGraph fetching entirely, rendering bare URLs as plain links. YouTube and Giphy embeds still work since they don't require network calls.
 
@@ -649,7 +649,7 @@ mbr automatically tracks bidirectional links between pages. The info panel (Ctrl
 - **Links Out**: Pages this document links to
 - **Links In**: Pages that link to this document (backlinks)
 
-This feature enables wiki-style backlink navigation without requiring any special syntax. The same data powers the info panel's **mini link graph**, which walks outward from the current page by fetching neighbouring pages' `links.json` files client-side (a few at a time, capped and session-cached) — see [Relationships & Genealogy](../markdown/relationships/#link-graph-in-the-sidebar).
+This feature enables wiki-style backlink navigation without requiring any special syntax. The same data powers the info panel's **mini link graph**, which walks outward from the current page by fetching neighbouring pages' `links.json` files client-side (a few at a time, capped and session-cached) — see [Relationships & Genealogy](../features/relationships/#link-graph-in-the-sidebar).
 
 **How it works:**
 
@@ -698,15 +698,15 @@ When disabled, the `links.json` endpoint returns 404, no link files are generate
 
 ### Flashcard Settings
 
-Two options tune [flashcard notes](../markdown/flashcards.md) (`type:
+Two options tune [flashcard notes](../features/flashcards.md) (`type:
 flashcard`). Both apply in every mode, static builds included: Concentric runs
 session-only where nothing can be written, and the progress indicators read the
 review history already in the page.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `flashcards_concentric_threshold` | number | `0.7` | Growth bar for [Concentric (FSRS) mode](../markdown/flashcards.md#concentric--fsrs) |
-| `flashcards_progress_indicators` | bool | `true` | Reading-view [progress indicators](../markdown/flashcards.md#progress-in-the-page) |
+| `flashcards_concentric_threshold` | number | `0.7` | Growth bar for [Concentric (FSRS) mode](../features/flashcards.md#concentric--fsrs) |
+| `flashcards_progress_indicators` | bool | `true` | Reading-view [progress indicators](../features/flashcards.md#progress-in-the-page) |
 
 **Concentric threshold (`flashcards_concentric_threshold`):** after every
 rating, Concentric folds one card into the stack, and checks again, while at
@@ -752,10 +752,10 @@ There are no CLI flags for either.
 ### Slide Settings
 
 The `[slides]` table sets the Reveal.js options of every
-[slide deck](../markdown/slides.md) in the repository (`type: slides` or
+[slide deck](../features/slides.md) in the repository (`type: slides` or
 `style: slides`). Every key is optional; an unset key keeps the deck mbr has
 always played, so a repository without the table sees no change. A note's
-[`slides:` frontmatter map](../markdown/slides.md#deck-settings) overrides
+[`slides:` frontmatter map](../features/slides.md#deck-settings) overrides
 these key by key, and a slide's own `--- {data-transition=…}` /
 `data-background-*` attributes beat both. Applies in every mode, static builds
 included.
@@ -814,9 +814,9 @@ them when the deck starts.
 ### Calendar Settings
 
 The `[calendar]` table configures calendar-aware browsing: which notes are
-[periodic notes](../markdown/calendar.md#periodic-notes) (daily, weekly,
+[periodic notes](../features/calendar.md#periodic-notes) (daily, weekly,
 monthly, quarterly and yearly notes, recognized by file name), which
-frontmatter fields [date a note](../markdown/calendar.md#note-dates), and the
+frontmatter fields [date a note](../features/calendar.md#note-dates), and the
 calendar UI. Every key is optional; a repository without the table gets the
 defaults below. Applies in every mode, static builds included.
 
@@ -828,8 +828,8 @@ defaults below. Applies in every mode, static builds included.
 | `date_fields` | array of frontmatter keys | `["date", "created"]` | Frontmatter fields consulted, in order, when the file name carries no date. Dot keys reach nested maps (`taxonomy.published`). |
 | `week_start` | `locale`, `monday`, `sunday`, `saturday` | `locale` | First column of every calendar grid. `locale` follows the reader's locale (Sunday for `en-US`, Monday for most others). |
 | `week_numbers` | bool | on if the repository has week notes | Show the ISO week-number column in calendar grids. |
-| `companion` | `auto`, `on-demand`, `off` | `auto` | The [daily-note companion](../markdown/calendar/#the-daily-note-companion): `auto` docks it as a right column on day notes (from 1280px wide, 1440px with the docked sidebar) and offers it as a drawer elsewhere; `on-demand` only as a drawer (`C` or the calendar button); `off` not at all. |
-| `agenda_chips` | bool | `true` | Draw a subtle time chip on [agenda entries](../markdown/calendar/#agenda-entries), list items that start with a time (`- 09:30 Standup`), and mark the current and next entry on today's day note. |
+| `companion` | `auto`, `on-demand`, `off` | `auto` | The [daily-note companion](../features/calendar/#the-daily-note-companion): `auto` docks it as a right column on day notes (from 1280px wide, 1440px with the docked sidebar) and offers it as a drawer elsewhere; `on-demand` only as a drawer (`C` or the calendar button); `off` not at all. |
+| `agenda_chips` | bool | `true` | Draw a subtle time chip on [agenda entries](../features/calendar/#agenda-entries), list items that start with a time (`- 09:30 Standup`), and mark the current and next entry on today's day note. |
 
 ```toml
 # .mbr/config.toml
@@ -893,9 +893,9 @@ something can be asked about. `review_enabled` therefore has no effect on
 |--------|------|---------|-------------|
 | `review_enabled` | bool | `true` | Emit `data-mbr-line` on block elements. Disable with `--no-review` or `MBR_REVIEW_ENABLED=false`. |
 
-**One exception survives `--no-review`.** With [editing](../modes/editing.md)
+**One exception survives `--no-review`.** With [editing](../features/editing.md)
 on, definition-list terms (`<dt>`) keep their `data-mbr-line`, because that line
-is how a [flashcard](../markdown/flashcards.md) review addresses its card —
+is how a [flashcard](../features/flashcards.md) review addresses its card —
 without it the spaced-repetition mode would quietly disappear. No other element
 is numbered, so the flag keeps its meaning everywhere else; with both review
 and editing off, nothing is.
@@ -916,7 +916,7 @@ review_enabled = false
 | `<blockquote>` | a block quote |
 | `<pre>` | a fenced or indented code block |
 | `<table>` | a table |
-| `<dt>` / `<dd>` | a definition list term / definition (also how a [flashcard](../markdown/flashcards.md) review addresses its card) |
+| `<dt>` / `<dd>` | a definition list term / definition (also how a [flashcard](../features/flashcards.md) review addresses its card) |
 
 On a heading the attribute is written **before** any `{#id .class}` the author
 supplied, because an HTML parser keeps the first of a pair of duplicate
@@ -1025,10 +1025,10 @@ The endpoint detects these issue types:
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
-| `slide_setting_problem` | An entry of the note's [`slides:` frontmatter map](../markdown/slides.md#deck-settings) that the deck ignores — an unknown key or a value outside its set. The rest of the map still applies; the ignored key keeps the repository's setting. Carries `field` (e.g. `slides.transition`) and `message`. A `slides.background_image` that does not resolve is reported as `broken_media_reference`. |
-| `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../markdown/contacts/). |
+| `slide_setting_problem` | An entry of the note's [`slides:` frontmatter map](../features/slides.md#deck-settings) that the deck ignores — an unknown key or a value outside its set. The rest of the map still applies; the ignored key keeps the repository's setting. Carries `field` (e.g. `slides.transition`) and `message`. A `slides.background_image` that does not resolve is reported as `broken_media_reference`. |
+| `contact_data_problem` | On a `type: person` / `type: organization` note, an entry in a contact field (`aliases`, `phones`, `dates`, …) had a shape mbr cannot read (e.g. a map with two keys where one `label: value` pair belongs). The entry was skipped; the rest of the card renders. Carries `field` and `message`. See [Contacts](../features/contacts/). |
 | `unplayable_media` | A video that exists and serves correctly but whose track layout matches a combination implicated in browser decode failures. Advisory only — see [Unplayable Media Detection](#unplayable-media-detection) below. Requires the `media-metadata` feature. |
-| `periodic_duplicate` | Two notes name the same [calendar period](../markdown/calendar.md#periodic-notes) (`daily/2026-10-31.md` and `archive/20261031.md`). The first by URL is the periodic note; this one is left out of periodic navigation. Carries `period` (the canonical key) and `kept` (the other note's URL). Reported on the note that lost; a static build logs it as a `WARN` line. |
+| `periodic_duplicate` | Two notes name the same [calendar period](../features/calendar.md#periodic-notes) (`daily/2026-10-31.md` and `archive/20261031.md`). The first by URL is the periodic note; this one is left out of periodic navigation. Carries `period` (the canonical key) and `kept` (the other note's URL). Reported on the note that lost; a static build logs it as a `WARN` line. |
 | `relationship_cycle` | Two or more notes form a `parent`/`child` (or other inverse-pair) cycle. Impossible data, and it makes the genealogy chart unrenderable. Reported on every note in the cycle. |
 | `ambiguous_relationship_endpoint` | A relationship endpoint named a title/alias shared by several notes; mbr resolved it to one of them. Reported on the note that declared the endpoint. |
 | `ambiguous_wikilink` | A body `[[Wikilink]]` named a title/stem shared by several notes. Reported on the page containing the link. |
@@ -1036,7 +1036,7 @@ The endpoint detects these issue types:
 The last three come from the relationship index and are additionally gated on
 `relationship_tracking` (`ambiguous_wikilink` excepted — wikilink resolution is
 always on). See
-[Relationships → Data problems mbr reports](../markdown/relationships/#data-problems-mbr-reports)
+[Relationships → Data problems mbr reports](../features/relationships/#data-problems-mbr-reports)
 for what each one means and how to fix it. `relationship_cycle` and
 `ambiguous_relationship_endpoint` are also logged as `WARN` lines at startup, in
 both server and build mode; `ambiguous_wikilink` is not, because whether a shared

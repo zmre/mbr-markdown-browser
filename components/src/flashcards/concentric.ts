@@ -4,7 +4,7 @@
  * 1989; Burns 2004) — a few cards at a time, a failed card comes back soon, a
  * known one goes to the back, new cards are folded in one at a time while the
  * stack is being answered well, and a card answered Easy twice running is put
- * away. `docs/markdown/flashcards.md` explains where each constant below comes
+ * away. `docs/features/flashcards.md` explains where each constant below comes
  * from.
  *
  * Pure: no DOM, no clock, and the randomness is injected as `rng` (the shape
