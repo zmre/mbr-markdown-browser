@@ -243,7 +243,7 @@ function indexMarkdown(
     'marked `rewritten` under "any save" is one the safety net cannot keep: any save rewrites lines of it; ' +
     'those are always minimized. ' +
     '**Read `repro.anon.md` before sharing it**: anonymization is automatic and keeps markdown ' +
-    'syntax, not meaning. See docs/modes/editing.md, "Checking your own notes".\n\n';
+    'syntax, not meaning. See docs/features/editing.md, "Checking your own notes".\n\n';
   if (ranked.length > 0) {
     out +=
       '## Causes\n\n' +

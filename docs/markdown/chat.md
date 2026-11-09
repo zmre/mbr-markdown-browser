@@ -1,7 +1,7 @@
 ---
 title: Chat Transcripts
 description: Render conversations as speech bubbles with a chat code block
-order: 7
+order: 13
 ---
 
 # Chat Transcripts
@@ -115,7 +115,7 @@ left.
 - **Headings inside a message** render, but are left out of the page's table of
   contents and get no anchor id — a bubble is not a section of the document.
 - **Task checkboxes inside a message** render as plain, read-only boxes. The
-  [Task Browser](tasks.md) does not look inside code blocks, so a task there
+  [Task Browser](../features/tasks.md) does not look inside code blocks, so a task there
   could not be found or toggled anyway. A `TODO:` inside a message is
   highlighted but is not listed in the Task Browser, for the same reason.
 - **Moving or renaming a note** through mbr's editor does not find links that

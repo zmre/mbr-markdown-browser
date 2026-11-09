@@ -1,19 +1,30 @@
 ---
 title: Reference
-description: Technical reference documentation for mbr
-order: 5
+description: CLI flags, configuration, keyboard shortcuts, the HTTP API, architecture and development
+order: 6
 ---
 
 # Reference
 
-Technical reference documentation for mbr's CLI, architecture, and development.
+Look-up material: every flag, setting, key and endpoint, plus how mbr is built
+and how to work on it.
+
+## Using mbr
 
 | Document | Description |
 |----------|-------------|
 | [CLI Reference](cli/) | Command line options and flags |
 | [Configuration Reference](configuration/) | Configuration file format, environment variables, and feature settings |
-| [Tags](tags/) | Tag navigation, tag sources, wikilink syntax, and template customization |
-| [Keyboard Shortcuts](keyboard-shortcuts/) | Quick reference for all keyboard shortcuts |
+| [Keyboard Shortcuts](keyboard-shortcuts/) | Every keyboard shortcut, by panel |
+| [HTTP API](http-api/) | The server's endpoints: pages, `site.json`, search, tasks |
 | [Integration](integration/) | Using mbr with Obsidian, VS Code, Git, CI/CD, and other tools |
+
+## Working on mbr
+
+| Document | Description |
+|----------|-------------|
 | [Architecture](architecture/) | Technical overview of mbr's design, modules, and implementation details |
 | [Development Guide](development/) | Building from source, development workflows, and contributing |
+| [Building the iOS App](ios-development/) | Building and testing the iPhone and iPad app |
+| [Releasing](releasing/) | Cutting a release |
+| [Benchmarks](../benchmarks/) | Performance measurements over time |

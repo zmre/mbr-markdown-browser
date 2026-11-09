@@ -3185,7 +3185,7 @@ main li.mbr-agenda-next {
   }
 
   /* Raw `<details>` blocks. GFM passes literal `<details><summary>` straight
-   * through, and `docs/markdown/index.md` actively recommends it as the way to
+   * through, and `docs/markdown/definition-lists.md` actively recommends it as the way to
    * get a real toggle -- so a block the reader left closed prints with its body
    * missing.
    *
@@ -3452,7 +3452,7 @@ main li.mbr-agenda-next {
  * each item of a list directly inside the section is a card. There is no
  * page-wide form. `style: kanban` in frontmatter puts the class on `<body>`,
  * where `.kanban` pours the whole page into 85vh-tall columns and the
- * `.kanban > ul` card rules match nothing, so docs/markdown/kanban.md tells
+ * `.kanban > ul` card rules match nothing, so docs/features/kanban.md tells
  * authors not to use it.
  */
 

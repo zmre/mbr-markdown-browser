@@ -45,7 +45,7 @@
  * `MBR_UPDATE_OUTLINES=1 cargo test -p mbr-core editor_parity` from the
  * repository root for its renderer outline, and review the `.outline.json`.
  * Until the editor handles it, list it in `editor-parity.test.ts`'s
- * `ROUND_TRIP_FAILS`. See docs/modes/editing.md, "Checking your own notes".
+ * `ROUND_TRIP_FAILS`. See docs/features/editing.md, "Checking your own notes".
  *
  * Exit status: 0 when the check ran (whatever it found), 2 on bad arguments
  * or a failed run (details in `<report>/run.log`).

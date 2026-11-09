@@ -18,26 +18,36 @@ description: The fast, complete markdown browser and static site generator
 
 ## Quick Links
 
-| Section | Description |
-|---------|-------------|
-| [Getting Started](getting-started/) | Installation and first steps |
-| [Modes of Operation](modes/) | GUI, Server, Build, and QuickLook |
-| [In-Browser Editing](modes/editing/) | Edit markdown from the browser (server/GUI) |
-| [Editing Properties](modes/editing-frontmatter/) | Edit frontmatter as a form or as YAML, with suggestions from your notes |
-| [Review Notes](modes/review/) | Annotate a page and copy the review out as markdown (server/GUI) |
-| [Customization](customization/) | Themes, templates, and components |
-| [Markdown Extensions](markdown/) | Extended syntax reference |
-| [Page Styles and Types](markdown/styles/) | Restyle a whole page from frontmatter |
-| [Task Browser](markdown/tasks/) | Find, filter and complete tasks (server/GUI) |
-| [Calendar and Periodic Notes](markdown/calendar/) | Daily, weekly and monthly notes, note dates, and the `d` / `[` / `]` keys |
-| [Flashcards](markdown/flashcards/) | Review a note's definition lists as flashcards, with spaced repetition |
-| [Relationships & Genealogy](markdown/relationships/) | Typed relationships between notes |
-| [Contacts](markdown/contacts/) | People and organizations: contact card, labeled fields, org relationships |
-| [Chat Transcripts](markdown/chat/) | Conversations as speech bubbles |
-| [CLI Reference](reference/cli/) | Command line options |
-| [Configuration Reference](reference/configuration/) | Config file, environment variables, and feature settings |
-| [Architecture](reference/architecture/) | Technical overview |
-| [Development](reference/development/) | Building and contributing |
+**Start here:** [Installation](getting-started/) · [Quick Start](getting-started/quickstart/)
+
+**Running mbr:** [GUI](modes/gui/) · [Server](modes/server/) · [Static sites](modes/build/) · [QuickLook](modes/quicklook/) · [iPhone and iPad](modes/ios/) — compared in [Modes of Operation](modes/)
+
+**Writing notes — [Markdown Syntax](markdown/):**
+
+| Page | What it covers |
+|------|----------------|
+| [Frontmatter](markdown/frontmatter/) | Titles, tags, types, dates and your own fields |
+| [Links and Wikilinks](markdown/links/) | Relative links, `[[wikilinks]]`, tag links |
+| [Tasks](markdown/tasks/) | Checkboxes, priorities, due dates, `TODO:` markers |
+| [Day Agenda Entries](markdown/agenda/) | `* 9:00 - 10:00 Standup` as a day timeline |
+| [Alerts](markdown/alerts/), [Code](markdown/code/), [Diagrams](markdown/diagrams/), [Math](markdown/math/) | Callouts, highlighted code, mermaid, KaTeX |
+| [Media](markdown/media/) | Video, audio, PDFs and embeds with image syntax |
+| [Definition Lists](markdown/definition-lists/), [Sections](markdown/sections/), [Asides](markdown/asides/), [Chat](markdown/chat/) | FAQs, section attributes, pull quotes and sidenotes, chat transcripts |
+
+**What mbr does with them — [Features](features/):**
+
+| Page | What it covers |
+|------|----------------|
+| [Browsing](features/browsing/), [Search](features/search/), [Links](features/links/), [Tags](features/tags/) | Finding your way around |
+| [Calendar](features/calendar/) | Daily, weekly and monthly notes, the day companion, the calendar overlay |
+| [Task Browser](features/tasks/) | Every task in the repository, filtered and grouped |
+| [Slides](features/slides/), [Flashcards](features/flashcards/), [Kanban](features/kanban/), [Page Styles](features/page-styles/) | Other ways to show a note |
+| [Contacts](features/contacts/), [Relationships](features/relationships/) | People, organizations, family trees and org charts |
+| [Editing](features/editing/), [Properties](features/editing-properties/), [Review Notes](features/review/) | Writing from the page |
+
+**Making it yours:** [Customization](customization/) — themes, templates, components and sorting
+
+**Reference:** [CLI](reference/cli/) · [Configuration](reference/configuration/) · [Keyboard Shortcuts](reference/keyboard-shortcuts/) · [HTTP API](reference/http-api/) · [Architecture](reference/architecture/) · [Development](reference/development/)
 
 ## What is mbr?
 
@@ -59,14 +69,15 @@ https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbG5udXhqcWpseDgyaGJ2bDd0MXRqYW
 
 ### Navigation Features
 
-- **File Browser** - Press `-` to open a sidebar with shortcuts, recent files, tag tree, and folder navigation
-- **Full-Text Search** - Press `/` to search across all files instantly
-- **Link Explorer** - Press `f` for outgoing links, `F` for backlinks, or `T` for table of contents
-- **Tag Hierarchy** - Nested tags like `project/frontend` create browsable trees
+- **[File Browser](features/browsing/)** - Press `-` to open a sidebar with shortcuts, recent files, tag tree, and folder navigation
+- **[Full-Text Search](features/search/)** - Press `/` to search across all files instantly
+- **[Link Explorer](features/links/)** - Press `f` for outgoing links, `F` for backlinks, or `T` for table of contents
+- **[Tag Hierarchy](features/tags/)** - Nested tags like `project/frontend` create browsable trees
 - **Breadcrumbs** - Navigate up through the directory structure
-- **Next/Prev** - Press `L` to go to the next file and `H` to go to the previous one
-- **Info** - Press `Ctrl-g` to open an info window showing table of contents and frontmatter
-- **Task Browser** - Press `t` to find, filter and complete every task in the repository (server/GUI mode)
+- **[Next/Prev](features/browsing/#breadcrumbs-and-next-previous)** - Press `L` to go to the next file and `H` to go to the previous one
+- **[Info](features/links/#the-info-panel)** - Press `Ctrl-g` to open an info window showing table of contents and frontmatter
+- **[Task Browser](features/tasks/)** - Press `t` to find, filter and complete every task in the repository (server/GUI mode)
+- **[Calendar](features/calendar/)** - Press `d` for today's daily note, `[` / `]` for the previous and next, `c` for the calendar overlay
 
 ## How It Works
 

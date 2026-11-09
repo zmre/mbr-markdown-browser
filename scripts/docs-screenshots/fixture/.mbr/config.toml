@@ -1,0 +1,4 @@
+# Fixture for scripts/docs-screenshots.sh. Not part of the docs site.
+sidebar_style = "single"
+theme = "indigo"
+title_prefix = ""

@@ -1,536 +1,58 @@
 ---
-title: Markdown Extensions
-description: Extended markdown features in mbr
+title: Markdown Syntax
+description: Every piece of markdown syntax mbr understands, from CommonMark and GFM to math, agendas and section attributes
 order: 3
 ---
 
-# Markdown Extensions
+# Markdown Syntax
 
-mbr uses [pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) with all extensions enabled, plus additional features for richer content.
+This section is about what you **type**. mbr reads standard CommonMark and
+GitHub-flavored markdown with every
+[pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) extension turned
+on, and adds a few constructs of its own. None of it is required: a plain
+markdown file renders as you would expect, and everything below stays readable
+in any other editor.
+
+What mbr *does* with your notes (slides, flashcards, the task browser, the
+calendar, contacts) is under [Features](../features/).
 
 ![A note in dark mode showing a tip callout, a table and a syntax-highlighted Rust code block](../images/screens/hero-dark.png)
 
 *Callouts, tables and highlighted code, here in dark mode.*
 
-## Standard Extensions
-
-These are pulldown-cmark's built-in extensions:
-
-| Extension | Syntax | Example |
-|-----------|--------|---------|
-| [Tables](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_table.html) | GFM tables | `\| Col1 \| Col2 \|` |
-| [Footnotes](https://pulldown-cmark.github.io/pulldown-cmark/specs/footnotes.html) | `[^1]` references | `Text[^1]` + `[^1]: Note` |
-| [Strikethrough](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_strikethrough.html) | `~~text~~` | ~~deleted text~~ |
-| [Task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html) | `- [ ]` / `- [x]` | Checkboxes in lists |
-| [Smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html) | `"quotes"`, `--` | Curly quotes, em-dashes |
-| [Heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html) | `# Title {#id}` or `# Title {.myclass}` | Custom anchor IDs or classes |
-| Definition lists | `Term` on one line, `: Definition` on the next | Rendered as a [click-to-expand FAQ](#definition-lists--faq-style); a [flashcard deck](flashcards/) on a `type: flashcard` page |
-| Autolinks | `<https://...>` | Clickable URLs |
-| [Math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html) | `$...$` / `$$...$$`, or a ` ```latex `, ` ```katex `, ` ```math ` or ` ```asciimath ` fence | LaTeX (or AsciiMath) via KaTeX; see [Math with KaTeX](#math-with-katex) |
-| [Wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html) | `[[Doc Filename]]` | Links to "Doc Filename.md" — resolved in the **current folder first**, otherwise the first match in **any** folder (Obsidian-style) |
-
-Links to other notes work in every common spelling: `[x](../abc.md)`,
-`[x](../abc)`, `[x](../abc/)`, `[x](/abc)` and `[x](/abc.md)` all reach
-`abc.md`, and a link to a folder (`[x](../projects)`) reaches its index note or
-listing. mbr writes each one out at the page's canonical URL (`…/abc/`), so the
-link works the same in the server, the GUI and a static build. An extension-less
-target that is a real file (`[license](../LICENSE)`) is left as written.
-
-When several notes answer to one wikilink name, mbr picks the first
-(lexicographically smallest URL) and reports the ambiguity in the page-problems
-panel of the page containing the link — the only place that can say which note
-*that* link reached, since resolution is current-folder first. See
-[Data problems mbr reports](relationships/#data-problems-mbr-reports).
-
-## YAML Frontmatter
-
-Add metadata to any markdown file:
-
-```yaml
----
-title: My Document
-description: A helpful guide
-tags: documentation, guide
-date: 2025-01-09
-author: Your Name
-custom_field: Any value
----
-
-# Content starts here
-```
-
-Frontmatter must be at the very top of the file: the opening `---` is the
-first line (a UTF-8 byte-order mark before it is fine). The block needs a
-non-blank first line and a closing `---` or `...`. This is how GitHub,
-Obsidian and Jekyll read it. A `---` anywhere else is ordinary markdown: a
-horizontal rule (a section or slide break), or the underline of a setext
-heading when it sits directly under a line of text. So in a slides deck
-
-```markdown
----
-## Quick navigation
-
-* In-links
-* Out-links
-
----
-```
-
-is a slide with a heading and a list, never a second metadata block.
-
-### Using Frontmatter
-
-Frontmatter powers:
-- **Page titles**: Browser tab and heading
-- **Descriptions**: Search results and previews
-- **Tags**: Navigation and filtering
-- **Custom fields**: Available in templates
-- **Special page types**: like [slides](slides/) or [person](relationships/)
-- **Page styles**: `style` and `type` set the [body class](styles/) that restyles the whole page
-
-### Supported Fields
-
-| Field | Purpose |
-|-------|---------|
-| `title` | Page title |
-| `description` | Meta description |
-| `tags` | Comma-separated tags |
-| `date` | Publication date |
-| `author` | Author name |
-| `type` | Note type; also becomes a [body class](styles/) |
-| `style` | Display [style(s)](styles/) applied as body classes |
-| Any field | Available via `frontmatter_json` |
-
-## GitHub-style Alerts
-
-Use callout boxes for important information:
-
-```markdown
-> [!NOTE]
-> Helpful information that users should know.
-```
-
-Available box types: `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`.
-
-### Live Examples
-
-> [!NOTE]
-> Helpful information that users should know, like tips for getting the most out of mbr.
-
-> [!TIP]
-> Optional advice to help users succeed. Try pressing `-` to open the file browser!
-
-> [!IMPORTANT]
-> Key information users need to know. mbr requires no special directory structure.
-
-> [!WARNING]
-> Urgent info that needs immediate attention. Back up your files before bulk operations.
-
-> [!CAUTION]
-> Advises about risks or negative outcomes. Running with `--template-folder` overrides local `.mbr/` settings.
-
-### remark-hint Shorthand
-
-mbr also recognizes the [remark-hint](https://github.com/sergioramos/remark-hint) shorthand. A paragraph that begins with one of these markers is rendered as the matching GitHub-style alert, with the marker stripped from the displayed text:
-
-| Marker | Renders as |
-|--------|-----------|
-| `!> ` | Tip |
-| `?> ` | Warning |
-| `x> ` | Caution |
-
-```markdown
-!> A helpful tip.
-?> Something to watch out for.
-x> A risky operation.
-```
-
-This shorthand is always on (no configuration required). The marker must appear at the very start of a paragraph and be followed by a space; otherwise the text is left untouched.
-
-## Tasks
-
-mbr extends GitHub's task lists with two extra markers and a small set of
-annotations, all of which render as chips, pills and dots rather than as raw
-text. The same syntax feeds the [task browser](tasks/), which finds
-every task in the repository and lets you filter and group them.
-
-### Markers
-
-| Marker | Status | Meaning |
-|--------|--------|---------|
-| `- [ ]` | Open | Not done yet |
-| `- [x]` | Done | Completed (`- [X]` works too) |
-| `- [-]` | Canceled | Abandoned — struck through, and never counted in a progress bar |
-| `- [>]` | Canceled | Moved somewhere else; see [move markers](#move-markers) |
-
-Any list bullet works — `-`, `*`, `+`, `1.` or `1)` — and a task may be
-indented under another one. Nested tasks are treated as independent tasks: mbr
-does not roll a parent's progress up from its children.
-
-```markdown
-- [ ] Unchecked task
-- [x] Completed task
-- [-] Canceled task
-* [ ] Parent task
-	* [ ] A subtask, counted on its own
-```
-
-### Live Example
-
-- [ ] Write documentation
-- [x] Set up project structure
-- [-] Use complex build system (not needed!)
-
-### Annotations
-
-Annotations may appear anywhere in a task's text. They are lifted out of the
-displayed text and rendered as their own elements, so the line stays readable.
-
-| Syntax | Meaning | Notes |
-|--------|---------|-------|
-| `@due(<date>)` | Due date | Rendered as a calendar chip |
-| `@done(<date>)` | Completion time | Rendered as a ✓ chip |
-| `#tag` | Tag | `A–Z`, `a–z`, `0–9`, `_` and `-`; must follow a space or start the text |
-| `!!` | High priority | An orange dot |
-| `!!!` | Urgent | A red dot; wins over `!!` |
-
-Obsidian Tasks emoji (`📅 2026-08-05`), Dataview fields (`[due:: 2026-08-05]`)
-and org / Logseq `SCHEDULED:` / `DEADLINE:` lines are read too; see [Dates from
-other tools](tasks/#dates-from-other-tools).
-
-```markdown
-- [ ] Write the report !! #work @due(2026-08-05)
-- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
-- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
-```
-
-Live:
-
-- [ ] Write the report !! #work @due(2026-08-05)
-- [x] File the receipts #admin @done(2026-08-04 12:11 PM)
-- [ ] Ship the release !!! #release @due(2026-08-04 15:00)
-
-A few rules worth knowing:
-
-- **`#tag` needs whitespace in front of it.** That is what keeps
-  `page.md#anchor` from becoming a tag.
-- **`!!` needs whitespace on both sides** (or the end of the line), so `wow!!`
-  is emphasis, not a priority.
-- **A tag is one word.** `#in-progress` and `#in_progress` are tags;
-  `#in progress` is the tag `#in` followed by the word "progress".
-- **There is no low priority.** Normal is the default and draws no dot.
-
-### Date formats
-
-`@due(...)` and `@done(...)` take the same grammar:
-
-| Form | Example |
-|------|---------|
-| Date only | `@due(2026-08-05)` |
-| Date + 24-hour time | `@due(2026-08-05 15:00)` |
-| Date + 12-hour time | `@due(2026-08-05 03:00 PM)` |
-
-Dates are **naive and local**: mbr does no timezone conversion and no UTC
-round trip, so `2026-08-05 09:00` means nine in the morning wherever you are.
-A due date with no time is treated as the start of that day, and a task is
-overdue only once that whole day has passed — a task due today at 09:00 still
-reads as "Today" at five in the afternoon.
-
-> [!NOTE]
-> An annotation whose contents are not a date is **not** an annotation.
-> `@due(next tuesday)` stays in the text exactly as written, so a mistyped date
-> shows up as your typo rather than as a task that quietly lost its deadline.
-
-### Move markers
-
-When a task moves to another note — most often a dated daily note — record
-where it went with a trailing `> DATE`, and where it came from with a trailing
-`< DATE`:
-
-```markdown
-- [>] Draft the agenda > 2026-08-06
-- [ ] Draft the agenda < 2026-08-04
-```
-
-Both markers are stripped from the displayed text. The `>` form marks the task
-canceled (it lives somewhere else now) and its destination date is kept and
-shown as a → chip; the `<` form is recognised only so it does not clutter the
-display, and is otherwise discarded.
-
-### Where tasks are and are not found
-
-The task browser scans markdown files line by line and skips fenced code
-blocks, indented code blocks, HTML blocks and YAML frontmatter — so a `- [ ]`
-inside an example like the ones above is documentation, not a task.
-
-### Editing tasks
-
-With [editing](../modes/editing/) enabled, checkboxes in a rendered page become
-clickable: a left click completes or reopens a task, and a right click cancels
-it. Only the marker byte (and the `@done(...)` stamp) is rewritten; your
-indentation, bullet style, spacing, other annotations and line endings are left
-exactly as you wrote them. See the
-[task browser](tasks/#toggling-a-task) for the same thing from the
-panel, and
-[`tasks_stamp_done`](../reference/configuration/#task-settings) for the stamp.
-
-## Chat Transcripts
-
-A ```` ```chat ```` code block renders a conversation as speech bubbles, in the
-format of the Obsidian Chat View plugin:
-
-```chat
-> Bob
-{{Alice|Lunch at noon?|11:02}}
-{{Bob|Sounds good|11:03}}
-```
-
-See [Chat Transcripts](chat/) for the full syntax.
-
-## Pull Quotes
-
-Use double `>>` for emphasized quotations:
-
-```markdown
->> This important quote stands out from the surrounding text.
-```
-
-### Live Example
-
->> The goal of mbr is simple: take any collection of markdown files and make them instantly browsable, searchable, and publishable -- without requiring special syntax or directory structures.
-
-Pull quotes render with larger font size, italic styling, and a distinctive left border.
-
-## Marginalia (Sidenotes)
-
-On wide screens, marginalia appear in the right margin. On narrow screens, they appear as a dagger (†) that reveals content on hover/click.
-
-Use triple `>>>` for margin notes:
-
-```markdown
-Main paragraph text that readers focus on.
-
->>> This aside provides supplementary context.
-
-Continuation of the main content.
-```
-
-### Live Example
-
-mbr's marginalia feature is inspired by Tufte CSS and academic publishing traditions where sidenotes provide additional context without interrupting the flow of the main text.
-
->>> Edward Tufte popularized sidenotes in his books on data visualization. They allow readers to absorb supplementary information at their own pace.
-
-
-## Mermaid Diagrams
-
-Code blocks with `mermaid` language render as diagrams:
-
-````markdown
-```mermaid
-graph LR
-    A[Start] --> B{Decision}
-    B -->|Yes| C[Result 1]
-    B -->|No| D[Result 2]
-```
-````
-
-Renders as:
-
-```mermaid
-graph LR
-    A[Start] --> B{Decision}
-    B -->|Yes| C[Result 1]
-    B -->|No| D[Result 2]
-```
-
-### Supported Diagram Types
-
-- Flowcharts (`graph` or `flowchart`)
-- Sequence diagrams (`sequenceDiagram`)
-- Class diagrams (`classDiagram`)
-- State diagrams (`stateDiagram`)
-- Gantt charts (`gantt`)
-- Pie charts (`pie`)
-- And more...
-
-### Layout and Look
-
-mbr renders diagrams with the `dagre` layout and the `classic` look. Mermaid 12
-made ELK and the `neo` look its defaults; mbr keeps the earlier ones so that
-existing diagrams do not change shape or colour, and because dagre is the faster
-layout. A single diagram can opt in with Mermaid's own front matter:
-
-````markdown
-```mermaid
----
-config:
-  layout: elk
-  look: neo
----
-graph LR
-    A --> B
-```
-````
-
-See [Mermaid documentation](https://mermaid.js.org/) for full syntax.
-
-## Math with KaTeX
-
-mbr supports mathematical notation using [KaTeX](https://katex.org/), rendered from LaTeX syntax.
-
-### Inline Math
-
-Wrap expressions in single dollar signs for inline math:
-
-```markdown
-The quadratic formula is $x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$ which solves $ax^2 + bx + c = 0$.
-```
-
-Renders as: The quadratic formula is $x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$ which solves $ax^2 + bx + c = 0$.
-
-### Display Math
-
-Use double dollar signs for block-level equations:
-
-```markdown
-$$
-\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
-$$
-```
-
-Renders as:
-
-$$
-\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
-$$
-
-### More Examples
-
-**Matrices:**
-
-$$
-\begin{pmatrix}
-a & b \\
-c & d
-\end{pmatrix}
-\begin{pmatrix}
-x \\
-y
-\end{pmatrix} =
-\begin{pmatrix}
-ax + by \\
-cx + dy
-\end{pmatrix}
-$$
-
-**Summations and products:**
-
-$$
-\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
-$$
-
-### Multi-line math with fenced blocks
-
-`$$ … $$` is *inline* markdown: the math is a span inside a paragraph, so
-anything that ends the paragraph ends the math too. A blank line does, and so
-does a line that starts a list, quote or heading (`- `, `+ `, `* `, `1. `,
-`> `, `# `), which is easy to write in an `aligned` environment:
-
-```markdown
-$$
-\begin{aligned}
-a &= b \\
-- c &= d
-\end{aligned}
-$$
-```
-
-Here `- c &= d` starts a bullet list, and the reader gets a broken paragraph
-and a list instead of an equation.
-
-A fenced code block whose language is `latex`, `katex` or `math` is rendered as
-display math instead. A fence's body is taken verbatim, so blank lines and
-lines starting with `-` or `>` are just TeX:
-
-````markdown
-```latex
-\begin{aligned}
-a &= b \\
-- c &= d
-\end{aligned}
-```
-````
-
-Renders as:
-
-```latex
-\begin{aligned}
-a &= b \\
-- c &= d
-\end{aligned}
-```
-
-The language is the first word of the info string and is matched without
-regard to case (` ```LaTeX ` works). Use ` ```tex ` (or any other language)
-when you want TeX *source* shown as a highlighted code block rather than
-typeset. In QuickLook previews, which do not load KaTeX, math fences are shown
-as highlighted code.
-
-### AsciiMath
-
-A ` ```asciimath ` fence holds [AsciiMath](https://asciimath.org/), a lighter
-notation that mbr converts to TeX in the browser (with
-[asciimath2tex](https://github.com/christianp/asciimath2tex)) and then renders
-with KaTeX. The converter is loaded only on pages that have an AsciiMath block.
-
-````markdown
-```asciimath
-sum_(i=1)^n i^3 = ((n(n+1))/2)^2
-```
-````
-
-Renders as:
-
-```asciimath
-sum_(i=1)^n i^3 = ((n(n+1))/2)^2
-```
-
-Each fence is one expression: a line break is treated as a space, as in other
-AsciiMath renderers. Use one fence per equation. AsciiMath is available only in
-fences, not inline.
-
-See the [KaTeX documentation](https://katex.org/docs/supported.html) for the full list of supported LaTeX commands.
-
-## Syntax Highlighting
-
-Code blocks are highlighted using highlight.js:
-
-### Live Examples
-
-```rust
-fn main() {
-    let message = "Hello from mbr!";
-    println!("{}", message);
-}
-```
-
-```python
-def greet(name: str) -> str:
-    """Return a friendly greeting."""
-    return f"Hello, {name}!"
-```
-
-```javascript
-const render = async (markdown) => {
-  const html = await mbr.parse(markdown);
-  document.body.innerHTML = html;
-};
-```
-
-### Supported Languages
-
-`bash`, `javascript`, `typescript`, `python`, `ruby`, `rust`, `go`, `java`, `json`, `yaml`, `toml`, `html`, `css`, `sql`, `markdown`, and many more.
+## At a glance
+
+| Syntax | Looks like | Page |
+|--------|-----------|------|
+| Frontmatter | `---` / `title: …` / `---` at the top | [Frontmatter](frontmatter/) |
+| Links and wikilinks | `[text](other.md)`, `[[Other Note]]`, `[[Tags:rust]]` | [Links and Wikilinks](links/) |
+| Alerts | `> [!NOTE]`, `!> tip` | [Alerts](alerts/) |
+| Tasks | `- [ ] Call Bob !! @due(2026-11-10) #work`, `TODO:` | [Tasks](tasks/) |
+| Agenda entries | `* 9:00 - 10:00 Standup` | [Day Agenda Entries](agenda/) |
+| Code | ```` ```rust ```` | [Code Blocks](code/) |
+| Diagrams | ```` ```mermaid ```` | [Mermaid Diagrams](diagrams/) |
+| Math | `$x^2$`, `$$…$$`, ```` ```latex ````, ```` ```asciimath ```` | [Math](math/) |
+| Pull quotes | `>> quote` | [Pull Quotes, Marginalia and Footnotes](asides/) |
+| Marginalia | `>>> sidenote` | [Pull Quotes, Marginalia and Footnotes](asides/#marginalia--sidenotes) |
+| Footnotes | `text[^1]` + `[^1]: note` | [Pull Quotes, Marginalia and Footnotes](asides/#footnotes) |
+| Definition lists | `Term` + `: definition` | [Definition Lists (FAQ)](definition-lists/) |
+| Section attributes | `--- {#intro .dark}` | [Section Attributes](sections/) |
+| Images, video, audio, PDF | `![caption](demo.mp4)` | [Media](media/) |
+| Embeds | a bare YouTube, Giphy or web URL on its own line | [Media](media/#youtube-embedding) |
+| Chat transcripts | ```` ```chat ```` | [Chat Transcripts](chat/) |
+
+Standard pulldown-cmark extensions, each documented upstream:
+[tables](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_table.html),
+[footnotes](https://pulldown-cmark.github.io/pulldown-cmark/specs/footnotes.html),
+[strikethrough](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_strikethrough.html),
+[task lists](https://pulldown-cmark.github.io/pulldown-cmark/third_party/gfm_tasklist.html),
+[smart punctuation](https://pulldown-cmark.github.io/pulldown-cmark/third_party/smart_punct.html),
+[heading attributes](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html),
+[math](https://pulldown-cmark.github.io/pulldown-cmark/specs/math.html),
+definition lists and
+[wikilinks](https://pulldown-cmark.github.io/pulldown-cmark/specs/wikilinks.html).
+
+The small ones are covered right here.
 
 ## Tables
 
@@ -548,210 +70,34 @@ GFM-style tables with alignment:
 | A    |   B    |     C |
 | D    |   E    |     F |
 
-## Footnotes
+A table wider than the page scrolls sideways by itself instead of widening the
+page.
 
-Add references that link to notes:
+## Strikethrough
 
-```markdown
-Here is a statement that needs citation[^1].
+`~~deleted text~~` renders as ~~deleted text~~.
 
-[^1]: This is the footnote content.
-```
+## Smart Punctuation
 
-### Live Example
-
-mbr uses pulldown-cmark for markdown parsing[^1], which provides excellent CommonMark compliance and performance[^2].
-
-Footnotes appear at the bottom of the page. On desktop (hover-capable devices),
-hovering a footnote reference shows a preview card with the note's content;
-clicking still jumps to the definition at the bottom.
-
-## Definition Lists (FAQ Style)
-
-Definition lists render as an FAQ. Each term becomes a question you can open,
-and its definition stays collapsed until you do:
-
-```markdown
-What is mbr?
-: A markdown browser, previewer and static site generator.
-
-Does this need JavaScript?
-: No. The expand and collapse are pure CSS.
-```
-
-### Live Example
-
-What is mbr?
-: A markdown browser, previewer and static site generator. Click the question
-  above to toggle this answer.
-
-Where do I read more?
-: Start with the [Quickstart](../getting-started/quickstart/), then the
-  [CLI Reference](../reference/cli/).
-
-Can one question have several answers?
-: Yes — repeat the `:` line.
-: Every answer of that question opens together.
-
-### Leave a Blank Line Between Entries
-
-This is the one gotcha worth knowing. Without a blank line, the next term is
-swallowed as a lazy continuation of the previous definition:
-
-```markdown
-First question?
-: First answer.
-Second question?          <-- becomes part of the FIRST answer's text
-: Second answer.
-```
-
-Written that way you get **one** question with three answers instead of three
-questions. Separate every entry with a blank line:
-
-```markdown
-First question?
-: First answer.
-
-Second question?
-: Second answer.
-```
-
-An empty answer (a `:` with nothing after it) followed by a blank line ends
-the whole list, as an empty list item does: the next question starts a new
-list, and a `:` line right after the blank line is plain text.
-
-### Behavior
-
-- **Click a question, or Tab to it,** to reveal its answer. For keyboard users
-  focus alone opens it — there is nothing to press.
-- **Tab again** to reach links inside the answer. The answer stays open while
-  focus is anywhere inside it.
-- **Links inside a closed answer are skipped by Tab** and hidden from screen
-  readers, so you never land on content you cannot see.
-- A question that owns **several answers** opens all of them at once.
-
-### Accepted Limitations
-
-The disclosure is CSS `:focus` with no JavaScript and no `<details>` element,
-which buys two rough edges:
-
-- **Clicking an open question does not close it.** The click only re-focuses a
-  question that already has focus, and CSS cannot toggle. Clicking a *different*
-  question, or anywhere off the list, does close it.
-- **Clicking inside an open answer closes it,** because focus moves to the page
-  body. This mostly bites when selecting an answer's text; start the selection
-  from the end of the question instead, or print the page.
-
-If you need a real toggle, write literal `<details>`/`<summary>` HTML in your
-markdown instead, or override the rules in `.mbr/theme.css`.
-
-### Printing
-
-Print styles force every answer open and drop the disclosure markers, so a
-printed page or PDF export shows the complete Q&A rather than a list of
-unanswered questions. The same goes for the rest of the page: collapsed heading
-sections, clipped link cards and closed `<details>` blocks are all expanded
-before printing — see [Printing](../customization/themes/#printing) for the
-full list and for the browser-version caveat on `<details>`.
-
-### Restyling
-
-Colors, spacing, the marker and the animation are all driven by `--mbr-dl-*`
-custom properties — see
-[Definition Lists in CSS Theming](../customization/themes/#definition-lists--faq).
+Straight quotes become curly ("quotes", 'quotes'), `--` becomes an en dash,
+`---` within a line an em dash, and `...` an ellipsis. Code spans and code
+blocks are left alone.
 
 ## Heading Anchors
 
-Headers automatically get anchor IDs:
+Every heading gets an anchor id:
 
 ```markdown
 ## My Section
 ```
 
-Links to `#my-section`. Override with explicit IDs:
+links as `#my-section`. Set your own, or add classes, with heading attributes:
 
 ```markdown
-## My Section {#custom-id}
+## My Section {#custom-id .highlight}
 ```
 
-## Section Attributes
-
-When `enable_sections` is active (default for server/GUI mode), horizontal rules (`---`) divide content into `<section>` elements. You can add attributes to the **following** section by placing an attribute block after the rule:
-
-```markdown
---- {#intro .highlight}
-
-This content is in a section with id="intro" and class="highlight".
-
---- {.slide data-transition="fade"}
-
-This section has class="slide" and a custom data attribute.
-
----
-
-Plain section (no attributes).
-```
-
-### Attribute Syntax
-
-The attribute block follows [pulldown-cmark's heading attributes syntax](https://pulldown-cmark.github.io/pulldown-cmark/specs/heading_attrs.html), plus quoted values:
-
-| Syntax | Result | Example |
-|--------|--------|---------|
-| `#id` | ID attribute | `{#intro}` → `id="intro"` |
-| `.class` | CSS class | `{.highlight}` → `class="highlight"` |
-| `key=value` | Custom attribute | `{data-x=y}` → `data-x="y"` |
-| `key="value"` | Quoted value | `{title="Hello World"}` |
-| `key='value'` | Single-quoted value | `{data-q='say "hi"'}` → `data-q="say &quot;hi&quot;"` |
-
-Values are used exactly as written. Smart punctuation does not touch them, so `--`, `...` and quotes inside a value stay as typed: `--- {style="--pico-color: cyan;"}` sets the CSS custom property. A `#` or `.` inside a quoted value is part of the value (`style="color: #fff"` sets no id). Backslash escapes and HTML entities are not decoded inside the braces.
-
-Multiple attributes can be combined:
-
-```markdown
---- {#section-1 .slide .center data-transition="slide" data-background="#fff"}
-```
-
-### The First Section
-
-Content before the first rule is section one, so an attribute rule at the very
-top of a note (only frontmatter and blank lines before it) applies to that
-first section rather than opening a new one. No empty section and no `<hr>` is
-produced:
-
-```markdown
----
-title: Deck
----
-
---- {#cover .dark}
-
-This content is in the first section, with id="cover" and class="dark".
-```
-
-A plain `---` at the top, or an attribute rule anywhere after content, divides
-sections as usual.
-
-### Use Cases
-
-**Presentation slides:** Add Reveal.js-style attributes for slide transitions and backgrounds. For defaults that apply to a whole deck (or every deck in the repository), see [Deck Settings](slides/#deck-settings).
-
-**Styling:** Target specific sections with CSS using IDs or classes. Two
-classes ship with mbr: `.media-float-left` and `.media-float-right` float the
-section's image, video, audio, PDF or YouTube embed beside its text (see
-[Floating Media Beside Text](media/#floating-media-beside-text)).
-
-**JavaScript hooks:** Add data attributes for interactive behavior.
-
-### Live Example
-
---- {#demo-section .highlighted-section}
-
-This section has `id="demo-section"` and `class="highlighted-section"`. Inspect the HTML to verify!
-
----
-
-Back to a plain section.
+Hover a heading to reveal its `#` permalink.
 
 ## Auto-linking
 
@@ -762,22 +108,11 @@ URLs in angle brackets become clickable:
 <user@example.com>
 ```
 
-## See Also
+A bare URL alone on its own line becomes an embed instead; see
+[Media](media/#youtube-embedding).
 
-- [Media Embedding](media/) - Videos, audio, PDFs, and more
-- [Task Browser](tasks/) - Find, filter and complete tasks across the repository
-- [Relationships & Genealogy](relationships/) - Typed frontmatter relationships and family trees
-- [Contacts](contacts/) - People and organizations with a contact card, labeled phones/emails/addresses and partial dates
-- [Page Styles and Types](styles/) - Restyle a whole page with `style` and `type` frontmatter
-- [Presentation Slides](slides/) - Create slide presentations from markdown
-- [Chat Transcripts](chat/) - Conversations as speech bubbles with a `chat` code block
-- [Flashcards](flashcards/) - Turn definition lists into a flashcard deck, with spaced repetition
-- [Slides Example](test-slides/) - A live example presentation
+## Raw HTML
 
-
-## Footnotes
-
-[^1]: pulldown-cmark is a Rust library that parses markdown to events, allowing flexible rendering.
-
-[^2]: The library uses SIMD optimizations for faster text processing.
-
+HTML in a note is passed through, so `<details>`, `<kbd>`, `<picture>` and the
+like all work. Relative `src` and `href` values in it are resolved like
+markdown links (see [Links](links/)).

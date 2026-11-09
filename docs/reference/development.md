@@ -1,6 +1,7 @@
 ---
 title: Development Guide
 description: Building and contributing to mbr
+order: 7
 ---
 
 # Development Guide
@@ -216,6 +217,48 @@ CI, since it needs a browser; run it after layout or `theme.css` changes. The
 rules it guards are also pinned by `components/src/overflow.test.ts`, which
 does run in CI.
 
+## Documentation Screenshots
+
+Screenshots in `docs/images/screens/` are 1440×900 CSS pixels at 2× (2880×1800),
+compressed with pngquant. Only take one of something a reader of the docs
+site cannot already see by scrolling: anything behind a key or button, anything
+server/GUI-only, anything outside the browser (QuickLook, Finder, the GUI's
+menus, iOS), and states the docs repository does not have (today's daily note,
+a person with relatives). Syntax with a live example on its page needs none.
+
+**Browser shots** are scripted:
+
+```bash
+scripts/docs-screenshots.sh                       # all of them, light
+scripts/docs-screenshots.sh --dark                # dark variants (-dark suffix)
+scripts/docs-screenshots.sh --only tag-page,day-companion
+```
+
+It serves `scripts/docs-screenshots/fixture/` (a sample repository with daily
+notes and agenda entries, tasks with due dates, a deck with a review history,
+and people with family and work relationships) with this checkout's debug
+build, and drives it with `agent-browser`. The fixture's daily note is
+`2026-11-08`; the calendar shots need that to be "today", so rename it (and
+the links to it) when retaking them on another date.
+
+**iOS shots** come from the simulator with `apple/ios/scripts/screenshots.sh`;
+see [Building the iOS App](ios-development/#screenshots).
+
+**By hand** (no automation can reach them), with the fixture or the docs
+folder:
+
+| Shot | How |
+|------|-----|
+| `quicklook-preview.png` | Select a note in Finder, press Space; `⌘⇧4`, Space, click the preview window |
+| `quicklook-thumbnails.png` | Finder icon view (`⌘1`) on `daily/`, icon size at maximum |
+| `quicklook-contact.png` | Space on `people/mary-doe.md` |
+| `quicklook-day-calendar.png` | Space on `daily/2026-11-08.md` (needs `[calendar] enabled`, the default) |
+| `gui-window.png` | `mbr -g` on the fixture, window at 1440×900, menu bar visible |
+| `gui-find-bar.png` | `⌘F` in the GUI, search "launch" on `projects/website.md` |
+| `gui-open-picker.png` | Launch `MBR.app` from the Dock with no folder |
+
+Compress with `nix shell nixpkgs#pngquant -c pngquant --quality 70-90 --strip --ext .png --force <file>`.
+
 ## Build Commands
 
 ```bash
@@ -307,7 +350,7 @@ CI runner outside the sandbox where `codesign` works, and gates itself with
 present, that script signs with a real Developer ID identity and notarizes and
 staples both the app and the DMG; otherwise (a local run, or a `dry_run`
 release dispatch) it falls back to the same ad-hoc signing described above. See
-[`docs/releasing.md`](../releasing.md) for the signing/notarization pipeline
+[`docs/reference/releasing.md`](releasing.md) for the signing/notarization pipeline
 and the secrets it needs. Either way, the raw `.tar.gz` app bundle is never
 touched by this script and ships only ad-hoc signed.
 

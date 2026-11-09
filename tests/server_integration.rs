@@ -6950,7 +6950,7 @@ async fn test_edit_token_enforced_for_loopback_callers_when_configured() {
     let file = repo.create_markdown("note.md", original);
     let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
     // `edit_require_token_on_loopback` stays FALSE on purpose: this is the
-    // reverse-proxy deployment documented in docs/modes/editing.md, where every
+    // reverse-proxy deployment documented in docs/features/editing.md, where every
     // proxied request reaches mbr from 127.0.0.1. A configured token must still
     // be enforced, or the proxy silently disables authentication entirely.
     let server = TestServer::start_with_config_fn(&repo, move |config| {

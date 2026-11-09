@@ -1,6 +1,7 @@
 ---
 title: Architecture
 description: Technical overview of mbr
+order: 6
 ---
 
 # Architecture

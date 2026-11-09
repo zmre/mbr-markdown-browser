@@ -9,14 +9,14 @@
  *
  * Sources for the built-ins, so they can be checked when the Rust side moves:
  * - `type`, `style` and the body class: `crates/mbr-core/src/templates.rs`
- *   (`body_class_list`), `docs/markdown/styles.md`.
+ *   (`body_class_list`), `docs/features/page-styles.md`.
  * - Contacts: `crates/mbr-core/src/contact.rs` (`Contact::from_map`,
  *   `labeled_values`, `PartialDate`, `ADDRESS_FIELDS`, `WELL_KNOWN_DATES`) and
- *   `docs/markdown/contacts.md` (suggested labels).
+ *   `docs/features/contacts.md` (suggested labels).
  * - Relationships: `crates/mbr-core/src/relationships.rs`
  *   (`parse_declared_relationships`: `type`/`to`/`from`/`label` reserved, any
  *   other key an edge attribute; `company_employer_relationship`) and
- *   `docs/markdown/relationships.md`.
+ *   `docs/features/relationships.md`.
  * - Tags: `crates/mbr-core/src/config.rs` (`TagSource`, `default_tag_sources`).
  * - `order`/`pinned`: `crates/mbr-core/src/sorting.rs` (sort fields).
  * - `slides` (deck settings): `crates/mbr-core/src/slides.rs`
@@ -172,7 +172,7 @@ export const OKF_STATUSES: readonly EnumOption[] = [
   { value: 'deprecated', help: 'Kept for reference; do not rely on it.' },
 ];
 
-/** Suggested labels per labeled field (`docs/markdown/contacts.md`). */
+/** Suggested labels per labeled field (`docs/features/contacts.md`). */
 export const CONTACT_LABELS: Readonly<Record<string, readonly string[]>> = {
   emails: ['home', 'work', 'other', 'school'],
   phones: ['mobile', 'main', 'home', 'work', 'home_fax', 'work_fax', 'pager', 'other'],

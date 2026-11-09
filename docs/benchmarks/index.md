@@ -4,6 +4,7 @@ description: Performance tracking across releases
 style: full-width
 tags:
   - rust
+order: 7
 ---
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>

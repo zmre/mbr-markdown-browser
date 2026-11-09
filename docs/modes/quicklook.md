@@ -24,8 +24,8 @@ With mbr's QuickLook extension, markdown files render as formatted HTML instead 
 - **Table of contents**: In the QuickLook info panel
 - **Frontmatter display**: Shows metadata in a clean format
 - **Plain text and source files**: Shown verbatim, with syntax highlighting where available
-- **Contact cards**: `type: person` and `type: organization` notes get the same [contact card](../markdown/contacts.md) as in mbr (see [Contacts](#contacts) below)
-- **Day calendar**: a note with [agenda entries](../markdown/calendar.md#agenda-entries) shows its day as a mini month and a timeline (see [Day calendar](#day-calendar) below)
+- **Contact cards**: `type: person` and `type: organization` notes get the same [contact card](../features/contacts.md) as in mbr (see [Contacts](#contacts) below)
+- **Day calendar**: a note with [agenda entries](../features/calendar.md#agenda-entries) shows its day as a mini month and a timeline (see [Day calendar](#day-calendar) below)
 
 ## Thumbnails
 
@@ -234,7 +234,7 @@ The preview knows only the one file, so the card differs in two ways:
 
 ### Day calendar
 
-A note with [agenda entries](../markdown/calendar.md#agenda-entries)
+A note with [agenda entries](../features/calendar.md#agenda-entries)
 (top-level list items that start with a time, `- 09:00 - 09:15 Standup`)
 previews with a calendar for its day:
 
@@ -249,13 +249,13 @@ The note's times also get the same subtle tint as in mbr. On a wide preview the
 calendar is a column on the right; on a narrow one it sits above the note. It
 follows light and dark mode with the rest of the preview.
 
-The day is the note's [date](../markdown/calendar.md#note-dates): a date in
+The day is the note's [date](../features/calendar.md#note-dates): a date in
 its file name, else its frontmatter `date`, else `created`, else when the file
 was created. The repository's `[calendar]` settings apply (`date_fields`,
 `week_start`, `week_numbers`, `agenda_chips`), and `enabled = false` turns the
 calendar off here too. Since a preview knows only the one file, there are no
 other days to browse, no links and no "Notes from this day"; open the note in
-mbr for the full [companion](../markdown/calendar.md#the-daily-note-companion).
+mbr for the full [companion](../features/calendar.md#the-daily-note-companion).
 Notes without agenda entries carry none of this, and thumbnails never show it.
 
 ### Images and Other Local Assets

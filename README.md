@@ -39,7 +39,7 @@ Oh and on mac, it includes a quicklook plugin that's head and shoulders above an
 | **Instant Preview**          | Sub-second markdown rendering with live reload                                                                                                                                   |
 | **Native GUI**               | macOS/Linux app with native menus and shortcuts (Windows binaries are built and tested in CI, but the GUI window itself is not exercised there)                                  |
 | **Server**                   | `mbr -s` serves any folder of notes to a browser, locally or behind a proxy, with live reload and search                                                                         |
-| **Mobile**                   | An iOS and iPadOS app (in development, in [`apple/ios`](apple/ios/)) that browses an iCloud, Dropbox, or local vault with the same engine and UI                                 |
+| **Mobile**                   | An iOS and iPadOS app (in development, in [`apple/ios`](apple/ios/); see [iPhone and iPad](https://zmre.github.io/mbr-markdown-browser/modes/ios/)) that browses an iCloud, Dropbox, or local vault with the same engine and UI |
 | **Static Sites**             | Optionally generate deployable websites with full-text search                                                                                                                    |
 | **Smart Navigation**         | Browse by folders, tags, recents, and full-text search                                                                                                                           |
 | **Keyboard Friendly**        | Vim-like shortcuts for everything in the UI. Not sure what's available? Just press `?`                                                                                           |
@@ -86,16 +86,18 @@ mbr -s ~/notes        # Start live web server at http://127.0.0.1:5200/
 mbr -b ~/notes        # Build static site to ./build/
 ```
 
-Editing is on in the GUI and off for the server. Use `mbr -s --edit` to edit through the server, or `mbr --no-edit` (or `edit_enabled = false` in `.mbr/config.toml`) to keep the GUI read-only. Editing on a non-loopback host requires a token (`mbr --generate-edit-token`). See [Editing](https://zmre.github.io/mbr-markdown-browser/modes/editing/).
+Editing is on in the GUI and off for the server. Use `mbr -s --edit` to edit through the server, or `mbr --no-edit` (or `edit_enabled = false` in `.mbr/config.toml`) to keep the GUI read-only. Editing on a non-loopback host requires a token (`mbr --generate-edit-token`). See [Editing](https://zmre.github.io/mbr-markdown-browser/features/editing/).
 
 ## Documentation
 
 See the [full documentation](https://zmre.github.io/mbr-markdown-browser/) for detailed guides. **The documentation site itself is built with mbr, serving as a live example of its capabilities.**
 
 - [Getting Started](https://zmre.github.io/mbr-markdown-browser/getting-started/) - Installation and first steps
-- [Modes of Operation](https://zmre.github.io/mbr-markdown-browser/modes/) - GUI, Server, Build, and QuickLook
+- [Modes of Operation](https://zmre.github.io/mbr-markdown-browser/modes/) - GUI, Server, Build, QuickLook, and the iPhone/iPad app
 - [Customization](https://zmre.github.io/mbr-markdown-browser/customization/) - Themes, templates, and components
-- [Markdown Extensions](https://zmre.github.io/mbr-markdown-browser/markdown/) - Extended syntax reference
+- [Markdown Syntax](https://zmre.github.io/mbr-markdown-browser/markdown/) - Everything you can write in a note
+- [Features](https://zmre.github.io/mbr-markdown-browser/features/) - Browsing, search, calendar, tasks, slides, flashcards, contacts, editing
+- [Reference](https://zmre.github.io/mbr-markdown-browser/reference/) - CLI, configuration, keyboard shortcuts, HTTP API
 - [Architecture](https://zmre.github.io/mbr-markdown-browser/reference/architecture/) - Technical overview
 - [Development](https://zmre.github.io/mbr-markdown-browser/reference/development/) - Building and contributing
 

@@ -30,8 +30,8 @@ Partials are prefixed with underscore and included by other templates:
 | `_footer.html` | Page footer |
 | `_scripts.html` | Base JavaScript includes |
 | `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person and organization pages) |
-| `_contact_card.html` | Contact card at the top of `type: person` / `type: organization` pages, from the `contact` variable — see [Contacts](../markdown/contacts/#customizing) |
-| `_calendar_nav.html` | Periodic-note navigation: the prev / up / next bar at the top of `<main>` on a daily, weekly, monthly, quarterly or yearly note, from the `calendar_nav` variable — see [Calendar](../markdown/calendar/#navigating-periodic-notes). The `[` / `]` keys follow its `rel="prev"` / `rel="next"` links |
+| `_contact_card.html` | Contact card at the top of `type: person` / `type: organization` pages, from the `contact` variable — see [Contacts](../features/contacts/#customizing) |
+| `_calendar_nav.html` | Periodic-note navigation: the prev / up / next bar at the top of `<main>` on a daily, weekly, monthly, quarterly or yearly note, from the `calendar_nav` variable — see [Calendar](../features/calendar/#navigating-periodic-notes). The `[` / `]` keys follow its `rel="prev"` / `rel="next"` links |
 | `_person_infobox.html` | Compatibility shim: renders the contact card without its headline, for custom `index.html` files written before the card existed |
 
 ## Template Variables
@@ -70,7 +70,7 @@ These variables are available in all templates:
 | `current_path` | string | Current URL path |
 | `frontmatter_json` | string | All frontmatter as JSON |
 | `calendar_enabled` | bool | `[calendar] enabled`; gates `<mbr-calendar>` in `_footer.html` and the pre-paint script in `_head.html` |
-| `calendar_nav` | object | Only on a [periodic note](../markdown/calendar/#periodic-notes): `period` (canonical key, e.g. `2026-10-31`, `2026-W44`), `kind` (`day`/`week`/`month`/`quarter`/`year`), `label` (English, e.g. `Saturday, October 31, 2026`), `datetime` (for `<time datetime>`; absent for a quarter), `prev` / `next` (the nearest notes of the same kind, or absent) and `up` (the containing week / month / quarter / year notes that exist). Each link has `kind`, `period`, `url` (page-relative in static builds), `label`, `title` and `datetime`. Drawn by `_calendar_nav.html` |
+| `calendar_nav` | object | Only on a [periodic note](../features/calendar/#periodic-notes): `period` (canonical key, e.g. `2026-10-31`, `2026-W44`), `kind` (`day`/`week`/`month`/`quarter`/`year`), `label` (English, e.g. `Saturday, October 31, 2026`), `datetime` (for `<time datetime>`; absent for a quarter), `prev` / `next` (the nearest notes of the same kind, or absent) and `up` (the containing week / month / quarter / year notes that exist). Each link has `kind`, `period`, `url` (page-relative in static builds), `label`, `title` and `datetime`. Drawn by `_calendar_nav.html` |
 
 ### Directory Pages (`section.html`, `home.html`)
 

@@ -148,7 +148,7 @@ const actorWidget: WidgetRenderer = (ctx) => {
 // Relationships
 // ============================================================================
 
-/** Attribute names worth suggesting on an edge (docs/markdown/relationships.md). */
+/** Attribute names worth suggesting on an edge (docs/features/relationships.md). */
 const EDGE_ATTRIBUTES = ['married', 'divorced', 'since', 'until', 'place', 'note'];
 
 interface Registry {

@@ -4,7 +4,7 @@
 #
 #   Usage: scripts/notarize.sh <artifact.zip|.dmg|.pkg>
 #
-# Required in the environment (see docs/releasing.md for how to produce them):
+# Required in the environment (see docs/reference/releasing.md for how to produce them):
 #   APPLE_API_KEY_P8      base64 of the App Store Connect AuthKey_XXXX.p8
 #   APPLE_API_KEY_ID      the ten-character Key ID
 #   APPLE_API_ISSUER_ID   the team's issuer UUID

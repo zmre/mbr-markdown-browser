@@ -74,7 +74,7 @@ include it, so your browser's native find is left untouched.
 | `↑` / `↓` | Navigate items |
 | `Enter` | Open selected |
 
-See [Server Mode: File Browser Sidebar](server.md#file-browser-sidebar) for full details on the browser panel.
+See [Server Mode: File Browser Sidebar](../features/browsing.md#file-browser-sidebar) for full details on the browser panel.
 
 ### Live Reload
 
@@ -100,7 +100,7 @@ To browse read-only, set `edit_enabled = false` in the repository's
 `.mbr/config.toml`, set `MBR_EDIT_ENABLED=false`, or launch with `--no-edit`.
 The default and `--no-edit` apply to every folder you open in the window, not
 just the first. If the GUI is bound to a non-loopback `--host` without an
-`edit_token_hash`, editing stays off. See [In-Browser Editing](editing.md).
+`edit_token_hash`, editing stays off. See [In-Browser Editing](../features/editing.md).
 
 ### Switching Directories or Opening a File
 

@@ -218,6 +218,12 @@ build on `windows-msvc` without a prebuilt ffmpeg SDK:
 
 Server mode, GUI mode, static site generation, and search all work normally.
 
+## iPhone and iPad
+
+The MBR app for iOS and iPadOS is built from source for now; see
+[Building the iOS App](../reference/ios-development/). What it does is
+described in [iPhone and iPad](../modes/ios/).
+
 ## Verify Installation
 
 ```bash
@@ -236,4 +242,8 @@ mbr -s README.md
 * [Quick Start Guide](quickstart/) - Get productive in 5 minutes
 
 * [Modes of Operation](../modes/) - Learn about GUI, Server, and Build modes
+
+* [Markdown Syntax](../markdown/) - Everything you can write in a note
+
+* [Features](../features/) - Browsing, search, the calendar, tasks, slides and more
 

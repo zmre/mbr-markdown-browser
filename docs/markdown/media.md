@@ -1,6 +1,7 @@
 ---
 title: Media Embedding
 description: Embed videos, audio, and PDFs in markdown
+order: 12
 ---
 
 # Media Embedding
@@ -285,7 +286,7 @@ With oembed disabled, bare URLs render as plain links. YouTube and Giphy embeds 
 
 To put an embed beside the text that goes with it, start a section with the
 `media-float-right` or `media-float-left` class (see
-[Section Attributes](index.md#section-attributes)):
+[Section Attributes](sections.md)):
 
 ```markdown
 --- {.media-float-left}
@@ -306,7 +307,7 @@ below its floated media, so nothing spills into the next one. OpenGraph link
 cards and GitHub gists are not floated: they are wide cards meant to sit on a
 line of their own.
 
-In [slides](slides/#media-beside-text) the same classes go on a slide.
+In [slides](../features/slides/#media-beside-text) the same classes go on a slide.
 
 ## File Organization
 

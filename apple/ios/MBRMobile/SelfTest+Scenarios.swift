@@ -284,7 +284,7 @@ extension SelfTest {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         return 'ok';
         """)
-        await session.load(URL(string: "mbr://localhost/markdown/flashcards/")!, label: "deck page")
+        await session.load(URL(string: "mbr://localhost/features/flashcards/")!, label: "deck page")
         _ = await self.js(session, """
         for (let i = 0; i < 50 && !customElements.get('mbr-flashcards'); i++) await new Promise(r => setTimeout(r, 100));
         document.querySelector('mbr-flashcards')?.open();
