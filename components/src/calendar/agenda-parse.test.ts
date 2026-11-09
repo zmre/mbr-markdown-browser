@@ -208,4 +208,19 @@ describe('leadingText', () => {
     li.innerHTML = '09:00 Call<br>second line'
     expect(leadingText(li).text).toBe('09:00 Call')
   })
+
+  it('reads a line wrapped in span.mbr-agenda-line as it read the bare one', () => {
+    const html = '09:00 - 09:15 Standup\n<ul>\n<li>Bob</li>\n</ul>\n'
+    const bare = document.createElement('li')
+    bare.innerHTML = html
+    const wrapped = document.createElement('li')
+    wrapped.innerHTML = html
+    const span = document.createElement('span')
+    span.className = 'mbr-agenda-line'
+    span.append(wrapped.firstChild!)
+    wrapped.prepend(span)
+    expect(leadingText(wrapped).text).toBe(leadingText(bare).text)
+    expect(leadingText(wrapped).text.trim()).toBe('09:00 - 09:15 Standup')
+    expect(leadingText(wrapped).segments[0].node).toBe(span.firstChild)
+  })
 })
