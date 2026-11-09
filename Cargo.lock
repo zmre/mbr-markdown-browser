@@ -3049,7 +3049,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mbr-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aho-corasick",
  "argon2",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "mbr-ffi"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "chrono",
@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "mbr-markdown-browser"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "clap 4.6.7",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "mbr-server"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -3202,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "mbr-ssg"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "futures",
  "mbr-core",
