@@ -3028,10 +3028,12 @@ body.slides-container > mbr-calendar {
 /* ==================== Agenda Time Chips (calendar chunk) ==================== */
 /*
  * The leading time of each agenda entry ("09:00 - 09:15 Standup") is painted
- * with the CSS Custom Highlight API from StaticRanges: no element is wrapped,
- * so review markers, find-in-page and cached ranges keep their text nodes.
- * `::highlight()` takes only colours and text decoration. Gated by
- * `[calendar] agenda_chips`. */
+ * with the CSS Custom Highlight API from StaticRanges: the time is never
+ * wrapped, so review markers, find-in-page and cached ranges keep their text
+ * nodes. Only where WebKit would not paint it (bare text beside a nested list,
+ * an anonymous block) is the item's leading line moved, unsplit, into a
+ * `span.mbr-agenda-line`, which needs no style. `::highlight()` takes only
+ * colours and text decoration. Gated by `[calendar] agenda_chips`. */
 ::highlight(mbr-agenda-time) {
   background-color: var(--mbr-agenda-chip-bg);
   color: var(--mbr-agenda-chip-color);

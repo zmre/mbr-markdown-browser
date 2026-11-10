@@ -181,7 +181,7 @@ export function parseAgendaText(text: string): AgendaTime | null {
 // ---------------------------------------------------------------------------
 
 /** Block elements that end an item's leading line. */
-const BLOCK_TAGS = new Set(['UL', 'OL', 'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'TABLE', 'DL', 'FIGURE', 'DETAILS', 'SECTION', 'HR'])
+export const BLOCK_TAGS: ReadonlySet<string> = new Set(['UL', 'OL', 'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'TABLE', 'DL', 'FIGURE', 'DETAILS', 'SECTION', 'HR'])
 
 interface Segment {
   readonly node: Text

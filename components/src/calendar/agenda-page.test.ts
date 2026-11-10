@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { agendaEntries } from './agenda-parse.ts'
 import {
+  AGENDA_LINE_CLASS,
   AGENDA_NEXT_CLASS,
   AGENDA_NOW_CLASS,
   AGENDA_TIME_HIGHLIGHT,
   agendaIdFromHash,
   enhancePage,
   nowAndNext,
+  wrapAnonymousLines,
 } from './agenda-page.ts'
 
 const hm = (h: number, m = 0): number => h * 60 + m
@@ -114,5 +117,99 @@ describe('enhancePage', () => {
     const root = mount(DAY)
     enhancePage({ root, agendaChips: false, pageDay: '2026-10-31', reveal: () => {} }).dispose()
     expect(registry.size).toBe(0)
+  })
+})
+
+describe('wrapAnonymousLines', () => {
+  // The renderer's shapes: a tight item with sub-bullets (the one WebKit
+  // paints no highlight in), a plain item, a task item and a loose item.
+  const SHAPES = `<ul>
+<li>09:00 - 09:15 Standup
+<ul>
+<li>Bob</li>
+</ul>
+</li>
+<li>10:00 Plain</li>
+<li><input type="checkbox" class="mbr-task-check" data-mbr-task-status="open" disabled> <span class="mbr-task-text">11:00 Task</span>
+<ul>
+<li>sub</li>
+</ul>
+</li>
+<li>
+<p>12:00 Loose</p>
+<ul>
+<li>sub</li>
+</ul>
+</li>
+</ul>`
+
+  const summary = (entries: ReturnType<typeof agendaEntries>) =>
+    entries.map((e) => ({
+      title: e.title,
+      start: e.start,
+      end: e.end,
+      details: e.details,
+      time: e.timeRange && e.timeRange.startContainer.data.slice(e.timeRange.startOffset, e.timeRange.endOffset),
+    }))
+
+  it('wraps only the bare leading line of a tight item beside a block, keeping its text nodes', () => {
+    const root = mount(SHAPES)
+    const entries = agendaEntries(root)
+    expect(entries).toHaveLength(4)
+    const timeNode = entries[0].timeRange!.startContainer
+    const before = root.innerHTML
+
+    wrapAnonymousLines(entries)
+
+    const spans = root.querySelectorAll(`span.${AGENDA_LINE_CLASS}`)
+    expect(spans).toHaveLength(1)
+    const span = spans[0]
+    expect(span.parentElement).toBe(entries[0].li)
+    expect(entries[0].li.firstChild).toBe(span)
+    expect(span.nextElementSibling?.tagName).toBe('UL')
+    // Moved, not copied or split.
+    expect(span.firstChild).toBe(timeNode)
+    expect(timeNode.data).toBe('09:00 - 09:15 Standup\n')
+    // The other shapes are untouched.
+    expect(root.innerHTML).toBe(before.replace('09:00 - 09:15 Standup\n', `<span class="${AGENDA_LINE_CLASS}">09:00 - 09:15 Standup\n</span>`))
+  })
+
+  it('is idempotent, and the entries read the same after wrapping', () => {
+    const root = mount(SHAPES)
+    const entries = agendaEntries(root)
+    const parsedBefore = summary(entries)
+    wrapAnonymousLines(entries)
+    const once = root.innerHTML
+    wrapAnonymousLines(entries)
+    wrapAnonymousLines(agendaEntries(root))
+    expect(root.innerHTML).toBe(once)
+
+    const reparsed = agendaEntries(root)
+    expect(summary(reparsed)).toEqual(parsedBefore)
+    expect(reparsed[0].timeRange!.startContainer).toBe(entries[0].timeRange!.startContainer)
+  })
+
+  it('leaves a tight item without a block child alone', () => {
+    const root = mount(DAY)
+    const before = root.innerHTML
+    wrapAnonymousLines(agendaEntries(root))
+    expect(root.innerHTML).toBe(before)
+  })
+
+  it('runs when chips are painted, not when they are off', () => {
+    const registry = new Map<string, unknown>()
+    vi.stubGlobal('CSS', { highlights: registry })
+    vi.stubGlobal('Highlight', class {})
+    vi.stubGlobal('StaticRange', class {})
+    const off = mount(SHAPES)
+    enhancePage({ root: off, agendaChips: false, pageDay: null, reveal: () => {} }).dispose()
+    expect(off.querySelector(`.${AGENDA_LINE_CLASS}`)).toBeNull()
+
+    const on = mount(SHAPES)
+    const page = enhancePage({ root: on, agendaChips: true, pageDay: null, reveal: () => {} })
+    expect(on.querySelectorAll(`.${AGENDA_LINE_CLASS}`)).toHaveLength(1)
+    page.dispose()
+    // The wrapper stays, like the ids.
+    expect(on.querySelectorAll(`.${AGENDA_LINE_CLASS}`)).toHaveLength(1)
   })
 })

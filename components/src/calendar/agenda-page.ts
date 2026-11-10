@@ -7,8 +7,10 @@
  *   revealed once the ids exist (the browser's own jump ran before they did);
  * - the leading time of each entry is painted as a chip with the CSS Custom
  *   Highlight API (`::highlight(mbr-agenda-time)` in theme.css), from
- *   `StaticRange`s — never by wrapping text, which would split the text nodes
- *   review markers, find-in-page and cached ranges hold on to;
+ *   `StaticRange`s — never by wrapping the time, which would split the text
+ *   nodes review markers, find-in-page and cached ranges hold on to (an
+ *   item's whole leading line may be moved, unsplit, into a span: see
+ *   {@link wrapAnonymousLines});
  * - on **today's** day note, the entry in progress gets `mbr-agenda-now` and
  *   the next one `mbr-agenda-next` (a class on an existing element is safe),
  *   re-evaluated each minute while the page is visible (`minute-clock.ts`,
@@ -17,7 +19,7 @@
  * Without `CSS.highlights` there is simply no chip. The QuickLook preview
  * runs this too, with its current-time line on {@link EnhancePageOptions.onTick}.
  */
-import { agendaEntries, type AgendaEntry } from './agenda-parse.js'
+import { agendaEntries, BLOCK_TAGS, type AgendaEntry } from './agenda-parse.js'
 import { drawnEnd } from './agenda-layout.js'
 import { onMinute } from './minute-clock.js'
 import { todayKey, type DateKey } from './note-date.js'
@@ -73,9 +75,39 @@ export function highlightsSupported(): boolean {
   return typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight === 'function'
 }
 
-/** Paints the time chips; returns whether anything was registered. */
+/** Class of the span {@link wrapAnonymousLines} puts an item's leading line in. */
+export const AGENDA_LINE_CLASS = 'mbr-agenda-line'
+
+/**
+ * Moves the leading line of each entry whose time is bare text in its `<li>`
+ * beside a block child (a tight item with sub-bullets) into a
+ * `span.mbr-agenda-line`. WebKit paints no Custom Highlight on text in an
+ * anonymous block, which is where inline content beside a block child goes;
+ * in an inline element it paints. The nodes before the first block child are
+ * moved, never split or copied, so every text node (and the ranges, markers
+ * and find-in-page indexes holding it) is unchanged. Idempotent: a wrapped
+ * item's time is no longer a direct child of the `<li>`.
+ */
+export function wrapAnonymousLines(entries: readonly AgendaEntry[]): void {
+  for (const { li, timeRange } of entries) {
+    if (timeRange?.startContainer.parentNode !== li) continue
+    const children = Array.from(li.childNodes)
+    const block = children.findIndex((n) => n.nodeType === 1 && BLOCK_TAGS.has((n as Element).tagName))
+    if (block < 0) continue
+    const span = li.ownerDocument.createElement('span')
+    span.className = AGENDA_LINE_CLASS
+    span.append(...children.slice(0, block))
+    li.insertBefore(span, children[block])
+  }
+}
+
+/**
+ * Paints the time chips; returns whether anything was registered. Wraps the
+ * lines WebKit would not paint first ({@link wrapAnonymousLines}).
+ */
 export function paintTimeChips(entries: readonly AgendaEntry[]): boolean {
   if (!highlightsSupported()) return false
+  wrapAnonymousLines(entries)
   const ranges = entries.flatMap((entry) => (entry.timeRange ? [new StaticRange(entry.timeRange)] : []))
   if (ranges.length === 0) {
     CSS.highlights.delete(AGENDA_TIME_HIGHLIGHT)
@@ -116,7 +148,9 @@ export interface EnhancePageOptions {
 
 /**
  * Enhances the page once. Returns the entries found and a disposer that
- * removes every listener, tick, class and highlight it added (ids stay).
+ * removes every listener, tick, class and highlight it added (ids and
+ * `span.mbr-agenda-line` wrappers stay: both are harmless, and unwrapping
+ * would move text nodes again under anything holding them).
  */
 export function enhancePage(options: EnhancePageOptions): { entries: AgendaEntry[]; dispose: () => void } {
   const clock = options.now ?? (() => new Date())
