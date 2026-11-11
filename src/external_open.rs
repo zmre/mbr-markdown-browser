@@ -1157,6 +1157,9 @@ mod tests {
         parse_ipc_open_outside_request(true, payload, Some(Path::new("/home/me")))
     }
 
+    // Only the Unix-path test uses it; unused (an error under -D warnings)
+    // on Windows.
+    #[cfg(unix)]
     fn request(directory: &str, file_name: Option<&str>) -> Option<OutsideOpenRequest> {
         Some(OutsideOpenRequest {
             directory: PathBuf::from(directory),
