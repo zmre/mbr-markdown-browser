@@ -3862,3 +3862,23 @@ main li.mbr-agenda-next {
   height: auto;
   aspect-ratio: 1;
 }
+
+/* ============================================
+   404 Suggestions
+   ============================================ */
+
+/* Where a missing page probably went (`_not_found_suggestions.html`, filled
+   by mbr-not-found.min.js). Empty, it takes no room; it is never hidden,
+   because it is an aria-live region and one that appears from display: none
+   is not announced. */
+mbr-not-found-suggestions {
+  display: block;
+}
+
+.mbr-not-found-heading {
+  margin-bottom: 0.5rem;
+}
+
+.mbr-not-found-where {
+  color: var(--pico-muted-color);
+}

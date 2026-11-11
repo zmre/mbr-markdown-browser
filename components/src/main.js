@@ -41,3 +41,5 @@ export * from './mbr-slides.ts';
 export * from './mbr-flashcards.ts';
 // Trigger, docked column and floating button; the companion lives in mbr-calendar.min.js.
 export * from './mbr-calendar.ts';
+// 404 pages: tiny trigger; the matcher and renderer live in mbr-not-found.min.js.
+export * from './mbr-not-found-suggestions.ts';

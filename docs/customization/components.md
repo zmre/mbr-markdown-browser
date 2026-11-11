@@ -58,6 +58,7 @@ At the moment, we're bundling all the always-on components together in `mbr-comp
 | `mbr-flashcards.min.js` | Flashcard review overlay (+ ts-fsrs, Concentric mode, the section filter) and review writer | A flashcard deck is first opened |
 | `mbr-flashcards-reading.min.js` | Collapsed review-history summaries and the progress borders/pies on flashcard pages | At idle, on a `type: flashcard` page |
 | `mbr-calendar.min.js` | The daily-note companion (mini month, day agenda, notes from this day) and the agenda time chips | At idle, on a periodic note or a note with time-prefixed bullets; else on `C` or the calendar button |
+| `mbr-not-found.min.js` | Where a missing page probably went: the 404 page's suggestions and the page-problems panel's "Did you mean" links | On a 404 page; when the page-problems panel first opens with broken links |
 
 Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 

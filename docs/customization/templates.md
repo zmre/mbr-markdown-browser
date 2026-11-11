@@ -31,6 +31,7 @@ Partials are prefixed with underscore and included by other templates:
 | `_scripts.html` | Base JavaScript includes |
 | `_display_enhancements.html` | Display-enhancement loaders (mermaid, hljs; `<mbr-genealogy>` on person and organization pages) |
 | `_contact_card.html` | Contact card at the top of `type: person` / `type: organization` pages, from the `contact` variable — see [Contacts](../features/contacts/#customizing) |
+| `_not_found_suggestions.html` | The 404 page's "where did it go" suggestions (`<mbr-not-found-suggestions>`); included by `error.html` for a 404 only — see [404 Suggestions](#404-suggestions) |
 | `_calendar_nav.html` | Periodic-note navigation: the prev / up / next bar at the top of `<main>` on a daily, weekly, monthly, quarterly or yearly note, from the `calendar_nav` variable — see [Calendar](../features/calendar/#navigating-periodic-notes). The `[` / `]` keys follow its `rel="prev"` / `rel="next"` links |
 | `_person_infobox.html` | Compatibility shim: renders the contact card without its headline, for custom `index.html` files written before the card existed |
 
@@ -406,6 +407,9 @@ Create `.mbr/error.html` to customize the 404 and error page experience:
         {% endif %}
       </nav>
 
+      {# Where the missing page probably went (404s only). #}
+      {% if error_code == 404 %}{% include "_not_found_suggestions.html" %}{% endif %}
+
       <p>Try searching for what you need:</p>
       <mbr-search></mbr-search>
     </div>
@@ -425,7 +429,17 @@ When you build a static site with `mbr -b`, a `404.html` file is automatically g
 - **Netlify** - Recognizes `404.html` as the custom error page
 - **Most static hosts** - Follow the same convention
 
-The generated `404.html` uses relative paths so it works correctly regardless of where your site is deployed (root domain or subdirectory).
+A host serves `404.html` at whatever URL was missing (`/a/b/c/`), so its links to `.mbr/` assets and to the site root are anchored at the deployment path rather than relative to the page: `/.mbr/` by default. If the site is published under a path (a GitHub project page at `/my-repo/`), set [`base_url`](../reference/configuration.md#deployment-path) to it. Every other page uses relative paths and works under any prefix.
+
+### 404 Suggestions
+
+The default `error.html` includes `_not_found_suggestions.html` for a 404 only. It holds one element, `<mbr-not-found-suggestions>`, which stays empty until it finds where the missing page probably went (see [When a page is not found](../features/links.md#when-a-page-is-not-found)). A custom `.mbr/error.html` written before it existed renders unchanged, without suggestions; to add them, include the partial where they should appear:
+
+```html
+{% if error_code == 404 %}{% include "_not_found_suggestions.html" %}{% endif %}
+```
+
+You can also override `_not_found_suggestions.html` itself in `.mbr/`.
 
 **Important:** In static mode, the `requested_url` variable is not available since the 404 page is pre-generated. The error page shows a generic message instead.
 
