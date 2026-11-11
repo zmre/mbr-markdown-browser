@@ -111,6 +111,24 @@ describe('getCanonicalPath', () => {
   });
 });
 
+describe('a root-anchored basePath (static 404.html)', () => {
+  afterEach(() => {
+    window.__MBR_CONFIG__ = undefined;
+  });
+
+  it('builds root-anchored URLs at any depth', async () => {
+    const urls: string[] = [];
+    window.__MBR_CONFIG__ = { serverMode: false, guiMode: false, basePath: '/my-repo/' };
+    const shared = await importFreshShared({ markdown_files: [] }, urls);
+    expect(shared.getBasePath()).toBe('/my-repo/');
+    expect(shared.resolveUrl('/docs/guide/')).toBe('/my-repo/docs/guide/');
+    expect(urls).toContain('/my-repo/.mbr/site.json');
+    const { getMbrAssetBase } = await import('./dynamic-loader.ts');
+    expect(getMbrAssetBase()).toBe('/my-repo/.mbr/');
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('canonicalPathFor', () => {
   // [pathname, basePath (the build's `relative_root`), canonical]
   const staticCases: Array<[string, string, string]> = [
@@ -132,6 +150,13 @@ describe('canonicalPathFor', () => {
     ['/mbr-markdown-browser/modes', '../', '/modes/'],
     // Decoded, like site.json's url_path.
     ['/pre%20fix/my%20notes/a%20b/', '../../', '/my notes/a b/'],
+    // A static 404.html: served at the missing URL, with a root-anchored
+    // basePath (the configured `base_url`) instead of a depth-relative one.
+    ['/old/deep/plan/', '/', '/old/deep/plan/'],
+    ['/old/deep/plan', '/', '/old/deep/plan/'],
+    ['/my-repo/old/deep/plan/', '/my-repo/', '/old/deep/plan/'],
+    ['/my-repo/', '/my-repo/', '/'],
+    ['/my-repo/a%20b/file.pdf', '/my-repo/', '/a b/file.pdf/'],
   ];
 
   for (const [pathname, basePath, expected] of staticCases) {

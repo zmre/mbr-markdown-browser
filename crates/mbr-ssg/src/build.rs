@@ -2315,12 +2315,19 @@ impl Builder {
             Some("The requested page could not be found."),
         );
 
-        // Static mode settings - 404.html is at root level (depth 0); error
-        // pages omit title affixes
+        // A host serves 404.html at whatever URL was missing (`/a/b/c/`), not
+        // at the root it is written to, so a depth-relative `.mbr/` would name
+        // `/a/b/c/.mbr/` and the page would load no CSS, no components and no
+        // site.json. Its links are anchored at the deployment's root instead.
+        // Error pages omit title affixes.
+        let base_url = mbr_core::config::normalize_base_url(&self.config.base_url)
+            .map_err(|e| BuildError::Config(Box::new(e)))?;
         page_context::insert_page_chrome(
             &mut context,
             &PageChrome {
-                mode: ModeFlags::Static { depth: 0 },
+                mode: ModeFlags::StaticRooted {
+                    base_url: base_url.clone(),
+                },
                 sidebar_style: &self.config.sidebar_style,
                 sidebar_max_items: self.config.sidebar_max_items,
                 graph_depth: self.config.graph_depth,
@@ -2342,7 +2349,7 @@ impl Builder {
             "breadcrumbs".to_string(),
             serde_json::Value::Array(vec![serde_json::json!({
                 "name": "Home",
-                "url": "./"
+                "url": base_url
             })]),
         );
 

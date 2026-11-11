@@ -1,0 +1,7 @@
+{#- Where a missing page probably went: notes of the same (or a similar) name
+    elsewhere, else the notes still in its folder. Matched in the browser from
+    site.json, so it works in server mode and on a static build's 404.html.
+    `error.html` includes this for a 404 only; a custom `.mbr/error.html` opts
+    in with `{% if error_code == 404 %}{% include "_not_found_suggestions.html" %}{% endif %}`.
+    The element stays empty until it has something to show. -#}
+<mbr-not-found-suggestions aria-live="polite"></mbr-not-found-suggestions>

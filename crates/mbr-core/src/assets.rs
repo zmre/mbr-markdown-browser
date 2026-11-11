@@ -81,6 +81,11 @@ pub const FLASHCARDS_READING_JS: &[u8] =
 /// search calendar button. Ships in static builds: everything it draws comes from `site.json` and
 /// the pages themselves (only the later task markers need a server).
 pub const CALENDAR_JS: &[u8] = include_bytes!("../templates/components-js/mbr-calendar.min.js");
+/// "Where did it go?": the site.json matcher and renderer behind the 404
+/// page's suggestions and the page-errors panel's "Did you mean" links,
+/// lazy-loaded by `<mbr-not-found-suggestions>` (404 pages only) and
+/// `<mbr-page-errors>`. Ships in static builds, whose `404.html` uses it.
+pub const NOT_FOUND_JS: &[u8] = include_bytes!("../templates/components-js/mbr-not-found.min.js");
 
 /// QuickLook's day calendar (design/calendar.md §4.7): a self-contained IIFE
 /// that mbr-ffi's `quicklook.rs` inlines into a preview of a dated note with
@@ -133,6 +138,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
         JS,
     ),
     ("/components/mbr-calendar.min.js", CALENDAR_JS, JS),
+    ("/components/mbr-not-found.min.js", NOT_FOUND_JS, JS),
     ("/hljs.dark.css", hljs::HLJS_DARK_CSS, CSS),
     ("/hljs.atom-one-dark.css", hljs::HLJS_ATOM_ONE_DARK_CSS, CSS),
     ("/hljs.js", hljs::HLJS_JS, JS),

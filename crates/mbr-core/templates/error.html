@@ -38,6 +38,8 @@
         <p class="error-url"><code>{{ requested_url }}</code></p>
         {% endif %}
 
+        {% if error_code == 404 %}{% include "_not_found_suggestions.html" %}{% endif %}
+
         <footer>
           <nav>
             <ul>
