@@ -13,6 +13,9 @@ import {
 } from './media-errors.js';
 import { ICON_BUTTON_CSS } from './controls.ts';
 import { icon, iconTriangleAlert, iconX } from './icons.ts';
+import { loadNotFoundChunk } from './not-found-chunk.js';
+import type { SuggestedPage } from './not-found/match.js';
+import { safeDecodePath, siteNav } from './shared.js';
 
 /**
  * The tagged variants emitted by `src/page_errors.rs`. Extending this union
@@ -229,6 +232,19 @@ declare global {
 }
 
 /**
+ * The decoded canonical site path a rendered link points at. errors.json
+ * reports the href exactly as it went into the page (`../moved/`), so it is
+ * resolved against the page's own URL, the way the browser resolves it.
+ */
+export function linkTargetPath(target: string, pageUrl: string): string | null {
+  try {
+    return safeDecodePath(new URL(target, pageUrl).pathname);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Per-page error indicator. Appears only in server / GUI mode, and only when
  * the current page has at least one detected problem: server-side ones from
  * `errors.json` (broken link, broken media, unresolved wikilink, unplayable
@@ -255,6 +271,16 @@ export class MbrPageErrorsElement extends LitElement {
    */
   @state()
   private _runtimeErrors: RuntimeMediaError[] = [];
+
+  /**
+   * "Did you mean" pages per broken link `target`, from the not-found chunk's
+   * matcher. Computed once, the first time the panel is open with broken
+   * links in it — never for a page whose panel nobody opens.
+   */
+  @state()
+  private _didYouMean: ReadonlyMap<string, SuggestedPage[]> = new Map();
+
+  private _didYouMeanRequested = false;
 
   override connectedCallback() {
     super.connectedCallback();
@@ -353,6 +379,47 @@ export class MbrPageErrorsElement extends LitElement {
     this._isOpen = true;
   }
 
+  override updated(): void {
+    if (!this._isOpen || this._didYouMeanRequested) return;
+    const broken = this._errors.filter(
+      (e): e is BrokenInternalLinkError => e.type === 'broken_internal_link'
+    );
+    if (broken.length === 0) return;
+    this._didYouMeanRequested = true;
+    void this._loadDidYouMean(broken);
+  }
+
+  private async _loadDidYouMean(broken: BrokenInternalLinkError[]): Promise<void> {
+    try {
+      const [chunk, site] = await Promise.all([loadNotFoundChunk(), siteNav]);
+      if (!chunk || !site) return;
+      const found = new Map<string, SuggestedPage[]>();
+      for (const e of broken) {
+        const path = linkTargetPath(e.target, window.location.href);
+        if (path === null || found.has(e.target)) continue;
+        const pages = chunk.didYouMean(path, site);
+        if (pages.length > 0) found.set(e.target, pages);
+      }
+      this._didYouMean = found;
+    } catch (err) {
+      // Suggestions are a nicety: the broken link itself is still listed.
+      console.warn('[mbr-page-errors] no "did you mean" suggestions:', err);
+    }
+  }
+
+  private _renderDidYouMean(target: string): TemplateResult | typeof nothing {
+    const pages = this._didYouMean.get(target);
+    if (!pages || pages.length === 0) return nothing;
+    return html`
+      <div class="did-you-mean">
+        Did you mean
+        ${pages.map(
+          (page, i) => html`${i > 0 ? ', ' : ''}<a href=${page.url} title=${page.url}>${page.title}</a>`
+        )}?
+      </div>
+    `;
+  }
+
   private _close() {
     this._isOpen = false;
   }
@@ -377,6 +444,7 @@ export class MbrPageErrorsElement extends LitElement {
               <li>
                 <code class="target">${e.target}${e.anchor ?? ''}</code>
                 ${e.text ? html`<span class="text"> — ${e.text}</span>` : nothing}
+                ${this._renderDidYouMean(e.target)}
               </li>
             `
           )}
@@ -909,6 +977,11 @@ export class MbrPageErrorsElement extends LitElement {
     .text {
       color: var(--pico-muted-color, #666);
       font-style: italic;
+    }
+
+    .did-you-mean {
+      margin-top: 0.2rem;
+      font-size: 0.9em;
     }
 
     .candidates {

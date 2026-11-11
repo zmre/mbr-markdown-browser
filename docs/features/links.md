@@ -118,6 +118,40 @@ other problems; see
 Links to files outside the served folder are not broken links; see
 [Links outside the folder](#links-outside-the-folder).
 
+When a link's target is missing, the panel also offers up to three **Did you
+mean** links: notes elsewhere in the site with the same name (the usual case
+when a note was moved to another folder) or with a name that was extended or
+shortened (`meeting` ↔ `meeting-notes`). Fix the link by hand, or follow one to
+check it is the right note. Nothing is offered for a link that only lacks its
+trailing slash: its target exists.
+
+### When a page is not found
+
+Following a link to a page that is gone shows mbr's 404 page, which suggests
+where the page probably went:
+
+- **Notes with the same name elsewhere** — the last part of the missing URL
+  (`/work/project-plan/` → `project-plan`, an index note's folder name for
+  `/clients/acme/index.md`) compared with every note's file name and URL,
+  ignoring case and treating spaces, `-` and `_` alike. A missing PDF or image
+  linked directly is looked for by its exact file name.
+- **Notes whose name was extended or shortened** — `meeting` finds
+  `meeting-notes` and `weekly-meeting-notes`, but never a name that merely
+  contains it mid-word, and only for names of four or more characters.
+- **Otherwise, its folder** — when nothing matches but the missing page's own
+  folder still exists, the 404 page links to that folder and lists the notes
+  directly in it. If the folder is gone too, nothing is suggested (it does not
+  look further up; the page's Home button and search are there for that).
+
+Matches that share more leading folders with the missing URL come first; at
+most six are shown. Everything is computed in the browser from the site index,
+so it works the same in the GUI, the server, the iOS app and a static build's
+`404.html` (set [`base_url`](../reference/configuration.md#deployment-path)
+when the site is published under a path, such as a GitHub project page).
+A custom `.mbr/error.html` keeps working as before; it can add the suggestions
+by including the [`_not_found_suggestions.html`](../customization/templates.md#404-suggestions)
+partial.
+
 ![The Page Problems panel open beside a note, listing one broken internal link](../images/screens/page-errors.png)
 
 *The page-problems panel.*

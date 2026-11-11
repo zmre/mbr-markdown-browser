@@ -324,6 +324,112 @@ body > footer {
   border-top: 1px solid var(--pico-secondary-border);
 }
 
+/* ==================== Repository Links ==================== */
+
+/*
+ * Links a repository adds through three small partials
+ * (docs/customization/templates.md): `_page_header_links.html` (`<li>` items
+ * at the end of the header's right-hand group), `_page_footer_links.html`
+ * (`<li>` items in `nav.mbr-footer-links`) and `_browse_footer.html` (links
+ * slotted into the bottom of `<mbr-browse>` / `<mbr-browse-single>`). All
+ * three are empty by default and must then change nothing.
+ *
+ * A link holding an SVG is drawn like the header's own icon buttons: a 36px
+ * ghost box in the icon colour, filled on hover. An SVG without its own
+ * `width` gets 20px, the size of the built-in icons.
+ */
+body > header nav > ul > li > a:has(> svg),
+nav.mbr-footer-links > ul > li > a:has(> svg) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  box-sizing: border-box;
+  min-width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0 0.5rem;
+  border-radius: var(--mbr-control-radius, 8px);
+  color: var(--mbr-icon-color, var(--pico-muted-color));
+  line-height: 1;
+  text-decoration: none;
+}
+
+/* Touch: the 40x44 target of the built-in buttons (controls.ts). */
+@media (max-width: 600px), (pointer: coarse) {
+  body > header nav > ul > li > a:has(> svg),
+  nav.mbr-footer-links > ul > li > a:has(> svg) {
+    min-width: 40px;
+    height: 44px;
+  }
+}
+
+body > header nav > ul > li > a:has(> svg):hover,
+nav.mbr-footer-links > ul > li > a:has(> svg):hover {
+  color: var(--mbr-icon-color-hover, var(--pico-color));
+  background: var(--mbr-control-hover-bg, rgba(127, 127, 127, 0.12));
+}
+
+body > header nav > ul > li > a > svg:not([width]),
+nav.mbr-footer-links svg:not([width]),
+:is(mbr-browse, mbr-browse-single) > a > svg:not([width]) {
+  width: 20px;
+  height: 20px;
+}
+
+body > header nav > ul > li > a > svg,
+nav.mbr-footer-links svg,
+:is(mbr-browse, mbr-browse-single) > a > svg {
+  flex: none;
+}
+
+/* Nothing in the partial (only its comment): no empty row in the footer. */
+nav.mbr-footer-links:not(:has(> ul > *)) {
+  display: none;
+}
+
+/* Pico makes the nav the flex row (space-between); one centred group here. */
+nav.mbr-footer-links {
+  justify-content: center;
+}
+
+nav.mbr-footer-links > ul {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/*
+ * The sidebar's links are light-DOM children of the browse element, shown
+ * through a `<slot>` in its footer; the element hides that footer when the
+ * partial holds nothing but its comment. Until the element is defined there
+ * is no slot, so the links would render where they stand (the header, or the
+ * top of the page): hidden until then.
+ *
+ * Selectors carry `body` so they outweigh Pico's `nav li a` rules, which reach
+ * `<mbr-browse>`'s children because it sits in a header `<li>`.
+ */
+:is(mbr-browse, mbr-browse-single):not(:defined) > * {
+  display: none;
+}
+
+body :is(mbr-browse, mbr-browse-single) > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0.25rem;
+  border-radius: var(--mbr-control-radius, 8px);
+  color: var(--mbr-icon-color, var(--pico-muted-color));
+  font-size: 0.875rem;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+body :is(mbr-browse, mbr-browse-single) > a:hover {
+  color: var(--pico-primary);
+  background: var(--mbr-control-hover-bg, rgba(127, 127, 127, 0.12));
+}
+
 /* Template icons (`{{ icon(name=…) }}`, templates/icons/). A labeled button
  * puts 8px between its icon and its text. */
 .mbr-icon {
@@ -3940,4 +4046,24 @@ main li.mbr-agenda-next {
 :is(.media-float-right, .media-float-left) figure > object {
   height: auto;
   aspect-ratio: 1;
+}
+
+/* ============================================
+   404 Suggestions
+   ============================================ */
+
+/* Where a missing page probably went (`_not_found_suggestions.html`, filled
+   by mbr-not-found.min.js). Empty, it takes no room; it is never hidden,
+   because it is an aria-live region and one that appears from display: none
+   is not announced. */
+mbr-not-found-suggestions {
+  display: block;
+}
+
+.mbr-not-found-heading {
+  margin-bottom: 0.5rem;
+}
+
+.mbr-not-found-where {
+  color: var(--pico-muted-color);
 }

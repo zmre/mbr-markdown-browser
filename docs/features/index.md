@@ -17,7 +17,7 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 |---------|------------|
 | [Browsing](browsing/) | The file browser sidebar (`-`), folders, recent files, pinned shortcuts, breadcrumbs, next/previous |
 | [Search](search/) | Full-text and frontmatter search (`/`), by folder, type or date |
-| [Links, Backlinks and the Info Panel](links/) | Links out and in (`f` / `F`), table of contents (`T`), the info panel and its link graph (`Ctrl+G`) |
+| [Links, Backlinks and the Info Panel](links/) | Links out and in (`f` / `F`), table of contents (`T`), the info panel and its link graph (`Ctrl+G`), broken links and where a missing page went |
 | [Tags](tags/) | Tag pages and the tag tree, from any frontmatter field |
 | [Calendar](calendar/) | Daily, weekly and monthly notes, the day companion, the calendar overlay (`c`) |
 
@@ -46,6 +46,8 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | Feature | GUI | Server | Static site | iOS | QuickLook |
 |---------|:---:|:------:|:-----------:|:---:|:---------:|
 | Browsing, search, links, tags | ✓ | ✓ | ✓ | ✓ | |
+| 404 suggestions | ✓ | ✓ | ✓ (`404.html`) | ✓ | |
+| Broken-link panel and "Did you mean" | ✓ | ✓ | | | |
 | Calendar and day companion | ✓ | ✓ | ✓ | ✓ | day calendar |
 | Task browser | ✓ | ✓ | | ✓ | |
 | Slides, kanban, page styles | ✓ | ✓ | ✓ | ✓ | |

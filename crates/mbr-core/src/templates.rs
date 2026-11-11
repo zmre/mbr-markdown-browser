@@ -615,6 +615,20 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../templates/_footer_custom.html"),
     ),
     ("_scripts.html", include_str!("../templates/_scripts.html")),
+    // Empty link slots a repository overrides instead of copying the partial
+    // around them (docs/customization/templates.md).
+    (
+        "_page_header_links.html",
+        include_str!("../templates/_page_header_links.html"),
+    ),
+    (
+        "_page_footer_links.html",
+        include_str!("../templates/_page_footer_links.html"),
+    ),
+    (
+        "_browse_footer.html",
+        include_str!("../templates/_browse_footer.html"),
+    ),
     (
         "_display_enhancements.html",
         include_str!("../templates/_display_enhancements.html"),
@@ -623,6 +637,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     (
         "_calendar_nav.html",
         include_str!("../templates/_calendar_nav.html"),
+    ),
+    (
+        "_not_found_suggestions.html",
+        include_str!("../templates/_not_found_suggestions.html"),
     ),
     // Compat shim for customized `index.html` files written before the card.
     (
@@ -707,6 +725,64 @@ mod tests {
         assert!(
             tera.get_template_names().any(|n| n == "index.html"),
             "built-in defaults should still be registered"
+        );
+    }
+
+    /// Renders the default `error.html` for `code`, optionally as the
+    /// "Downloading" page.
+    fn render_default_error(code: u16, downloading: bool) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None).expect("templates should build");
+        let mut ctx = HashMap::new();
+        crate::page_context::insert_error_keys(&mut ctx, code, "Title", None);
+        ctx.insert("sidebar_style".to_string(), serde_json::json!("panel"));
+        if downloading {
+            ctx.insert("downloading".to_string(), serde_json::json!(true));
+            ctx.insert("note_name".to_string(), serde_json::json!("note"));
+        }
+        templates.render_error(ctx).expect("error page renders")
+    }
+
+    /// The 404 page's "where did it go" suggestions are for a missing page
+    /// only: a refused (403), failed (500) or downloading (503) page has a
+    /// target that exists.
+    #[test]
+    fn test_error_page_carries_not_found_suggestions_for_404_only() {
+        assert!(render_default_error(404, false).contains("<mbr-not-found-suggestions"));
+        for code in [403, 500, 503] {
+            assert!(
+                !render_default_error(code, false).contains("<mbr-not-found-suggestions"),
+                "{code}"
+            );
+        }
+        assert!(!render_default_error(503, true).contains("<mbr-not-found-suggestions"));
+    }
+
+    /// A custom `.mbr/error.html` keeps working untouched (no suggestions),
+    /// and can opt in by including the partial.
+    #[test]
+    fn test_custom_error_page_opts_in_to_suggestions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr_dir = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr_dir).unwrap();
+        std::fs::write(mbr_dir.join("error.html"), "<p>custom {{ error_code }}</p>").unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let mut ctx = HashMap::new();
+        crate::page_context::insert_error_keys(&mut ctx, 404, "Not Found", None);
+        let html = templates.render_error(ctx.clone()).unwrap();
+        assert_eq!(html.trim(), "<p>custom 404</p>");
+
+        std::fs::write(
+            mbr_dir.join("error.html"),
+            "<p>custom</p>{% if error_code == 404 %}{% include \"_not_found_suggestions.html\" %}{% endif %}",
+        )
+        .unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        assert!(
+            templates
+                .render_error(ctx)
+                .unwrap()
+                .contains("<mbr-not-found-suggestions")
         );
     }
 
@@ -1652,5 +1728,198 @@ mod tests {
         assert!(html.contains("<h1>Jane Doe</h1>"));
         assert!(html.contains("mbr-contact-card"));
         assert!(html.contains("tel:+13035550100"));
+    }
+
+    // ------------------------------------------------------------------
+    // Link partials: _page_header_links / _page_footer_links / _browse_footer
+    // ------------------------------------------------------------------
+
+    /// The three link partials, each with a marker an override writes.
+    const LINK_OVERRIDES: [(&str, &str); 3] = [
+        (
+            "_page_header_links.html",
+            r#"<li><a href="https://example.com/zz-header" aria-label="ZZ header">H</a></li>"#,
+        ),
+        (
+            "_page_footer_links.html",
+            r#"<li><a href="https://example.com/zz-footer">ZZ footer</a></li>"#,
+        ),
+        (
+            "_browse_footer.html",
+            r#"<a href="https://example.com/zz-browse">ZZ browse</a>"#,
+        ),
+    ];
+
+    /// Every page template that carries the header, a page footer or a sidebar,
+    /// rendered with `sidebar_style`, from a repository whose `.mbr/` holds
+    /// `overrides`. Returns `(template, html)` pairs.
+    fn render_link_pages(
+        overrides: &[(&str, &str)],
+        sidebar_style: &str,
+    ) -> Vec<(&'static str, String)> {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr_dir = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr_dir).unwrap();
+        overrides
+            .iter()
+            .for_each(|(name, body)| std::fs::write(mbr_dir.join(name), body).unwrap());
+        let templates = Templates::new(tmp.path(), None).expect("templates should build");
+
+        let base = HashMap::from([
+            ("sidebar_style".to_string(), json!(sidebar_style)),
+            ("parent_path".to_string(), json!("/")),
+            ("tag_source".to_string(), json!("tags")),
+            ("tag_label".to_string(), json!("Tag")),
+            ("tag_label_plural".to_string(), json!("Tags")),
+            ("tag_display_value".to_string(), json!("rust")),
+            ("tag_count".to_string(), json!(0)),
+            ("page_count".to_string(), json!(0)),
+            ("tags".to_string(), json!([])),
+            ("pages".to_string(), json!([])),
+            ("media_type".to_string(), json!("video")),
+        ]);
+        let markdown = templates
+            .render_markdown("<p>body</p>", SimpleMetadata::new(), base.clone())
+            .expect("index.html should render");
+        let render = |name: &str| {
+            Templates::render_template_with_tera(&templates.tera.read(), name, base.clone())
+                .unwrap_or_else(|e| panic!("{name} should render: {e:?}"))
+        };
+        vec![
+            ("index.html", markdown),
+            ("section.html", render("section.html")),
+            ("home.html", render("home.html")),
+            ("tag.html", render("tag.html")),
+            ("tag_index.html", render("tag_index.html")),
+            ("media_viewer.html", render("media_viewer.html")),
+        ]
+    }
+
+    /// The text strictly between the first `start` and the next `end` after it.
+    fn between<'a>(html: &'a str, start: &str, end: &str) -> &'a str {
+        let from = html
+            .find(start)
+            .unwrap_or_else(|| panic!("no {start:?} in:\n{html}"))
+            + start.len();
+        let len = html[from..]
+            .find(end)
+            .unwrap_or_else(|| panic!("no {end:?} after {start:?} in:\n{html}"));
+        &html[from..from + len]
+    }
+
+    #[test]
+    fn test_link_partials_default_to_nothing_visible() {
+        for style in ["auto", "single"] {
+            for (template, html) in render_link_pages(&[], style) {
+                let header_tail = between(&html, "<mbr-search></mbr-search></li>", "</ul>");
+                assert_eq!(
+                    header_tail.trim(),
+                    "",
+                    "{template} ({style}): default header links must add nothing (Tera comments only)"
+                );
+                let footer = between(
+                    &html,
+                    r#"<nav class="mbr-footer-links" aria-label="Footer links"><ul>"#,
+                    "</ul></nav>",
+                );
+                assert_eq!(
+                    footer.trim(),
+                    "",
+                    "{template} ({style}): default footer links must add nothing (Tera comments only)"
+                );
+                let browse = if style == "single" {
+                    between(&html, "<mbr-browse-single>", "</mbr-browse-single>")
+                } else {
+                    between(&html, "<mbr-browse>", "</mbr-browse>")
+                };
+                assert_eq!(
+                    browse.trim(),
+                    "",
+                    "{template} ({style}): default browse footer must add nothing (Tera comments only)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_link_partial_overrides_render_in_place() {
+        let [header, footer, browse] = LINK_OVERRIDES.map(|(_, body)| body);
+        for style in ["auto", "single"] {
+            for (template, html) in render_link_pages(&LINK_OVERRIDES, style) {
+                // Header: the end of the right-hand group, after search.
+                let header_html = between(&html, "<header", "</header>");
+                assert!(
+                    between(header_html, "<mbr-search></mbr-search></li>", "</ul>")
+                        .contains(header),
+                    "{template} ({style}): header links belong after <mbr-search>:\n{html}"
+                );
+                // Footer: inside the page footer's links nav.
+                let page_footer = between(
+                    &html,
+                    r#"<footer class="container" data-pagefind-ignore>"#,
+                    "</footer>",
+                );
+                assert!(
+                    between(page_footer, r#"class="mbr-footer-links""#, "</nav>").contains(footer),
+                    "{template} ({style}): footer links belong in nav.mbr-footer-links:\n{html}"
+                );
+                // Sidebar: children of whichever browse element the style emits.
+                let (inside, other) = if style == "single" {
+                    (
+                        between(&html, "<mbr-browse-single>", "</mbr-browse-single>"),
+                        "<mbr-browse>",
+                    )
+                } else {
+                    (
+                        between(&html, "<mbr-browse>", "</mbr-browse>"),
+                        "<mbr-browse-single>",
+                    )
+                };
+                assert!(
+                    inside.contains(browse),
+                    "{template} ({style}): browse footer belongs inside the sidebar element:\n{html}"
+                );
+                assert!(!html.contains(other), "{template} ({style}): one sidebar");
+                // Each appears exactly once.
+                for marker in [header, footer, browse] {
+                    assert_eq!(
+                        html.matches(marker).count(),
+                        1,
+                        "{template} ({style}): {marker} once"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The idiom the docs give for an internal link: site-absolute when the
+    /// server leaves `relative_root` unset, page-relative in a static build.
+    ///
+    /// `| safe` is load-bearing: Tera escapes the `default` literal itself
+    /// (`/` → `&#x2F;`, which a browser decodes in an attribute), and without
+    /// `safe` the output is escaped a second time into `&amp;#x2F;`, which the
+    /// browser reads as a relative path.
+    #[test]
+    fn test_header_link_relative_root_idiom() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mbr")).unwrap();
+        std::fs::write(
+            tmp.path().join(".mbr/_page_header_links.html"),
+            r#"<li><a href="{{ relative_root | default(value="/") | safe }}about/">About</a></li>"#,
+        )
+        .unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        // The href as a browser reads it (character references decoded).
+        let href = |extra: &[(&str, serde_json::Value)]| {
+            let mut ctx = HashMap::from([("sidebar_style".to_string(), json!("auto"))]);
+            ctx.extend(extra.iter().map(|(k, v)| (k.to_string(), v.clone())));
+            let html = templates
+                .render_markdown("<p>body</p>", SimpleMetadata::new(), ctx)
+                .unwrap();
+            between(&html, r#"<li><a href=""#, r#"">About"#).replace("&#x2F;", "/")
+        };
+        assert_eq!(href(&[]), "/about/");
+        assert_eq!(href(&[("relative_root", json!(""))]), "about/");
+        assert_eq!(href(&[("relative_root", json!("../../"))]), "../../about/");
     }
 }

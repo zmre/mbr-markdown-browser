@@ -82,6 +82,14 @@ pub enum ModeFlags {
         /// Page depth used to compute `relative_base`/`relative_root`.
         depth: usize,
     },
+    /// A static page whose URL is not known when it is written: `404.html`,
+    /// which a host serves at whatever path was missing. `relative_base` and
+    /// `relative_root` are anchored at the deployment's root instead
+    /// (`{base_url}.mbr/`, `{base_url}`), so they resolve at any depth.
+    StaticRooted {
+        /// [`crate::config::Config::base_url`], normalized (`/`, `/my-repo/`).
+        base_url: String,
+    },
 }
 
 /// Common page "chrome": mode flags, sidebar configuration, and title
@@ -133,6 +141,14 @@ pub fn insert_page_chrome(ctx: &mut HashMap<String, Value>, chrome: &PageChrome<
             ctx.insert("server_mode".to_string(), json!(false));
             ctx.insert("relative_base".to_string(), json!(relative_base(*depth)));
             ctx.insert("relative_root".to_string(), json!(relative_root(*depth)));
+        }
+        ModeFlags::StaticRooted { base_url } => {
+            ctx.insert("server_mode".to_string(), json!(false));
+            ctx.insert(
+                "relative_base".to_string(),
+                json!(format!("{base_url}.mbr/")),
+            );
+            ctx.insert("relative_root".to_string(), json!(base_url));
         }
     }
     ctx.insert("sidebar_style".to_string(), json!(chrome.sidebar_style));
@@ -933,6 +949,31 @@ mod tests {
         // Static builds never carry the task browser: its index reads live files.
         assert_eq!(ctx.get("tasks_enabled"), Some(&json!(false)));
         assert!(!ctx.contains_key("repo_id"));
+    }
+
+    #[test]
+    fn test_insert_page_chrome_static_rooted() {
+        let mut ctx = HashMap::new();
+        insert_page_chrome(
+            &mut ctx,
+            &PageChrome {
+                mode: ModeFlags::StaticRooted {
+                    base_url: "/my-repo/".to_string(),
+                },
+                sidebar_style: "auto",
+                sidebar_max_items: 5,
+                graph_depth: 2,
+                tasks_enabled: false,
+                review_enabled: false,
+                tasks_default_include: IncludeFilter::Tasks,
+                title_affixes: None,
+                root_dir: None,
+                calendar: &CalendarChrome::default(),
+            },
+        );
+        assert_eq!(ctx.get("server_mode"), Some(&json!(false)));
+        assert_eq!(ctx.get("relative_base"), Some(&json!("/my-repo/.mbr/")));
+        assert_eq!(ctx.get("relative_root"), Some(&json!("/my-repo/")));
     }
 
     #[test]

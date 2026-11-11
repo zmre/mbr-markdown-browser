@@ -618,6 +618,31 @@ mbr -b --oembed-timeout-ms 500 ~/notes
 
 Oembed fetching is parallelized and cached, so the overhead is minimal even for large repositories.
 
+### Deployment Path
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `base_url` | string | `"/"` | The URL path a static build is deployed under: `/` at a host's root, `/my-repo/` for a GitHub project page. Env: `MBR_BASE_URL`. |
+
+Only the build's `404.html` reads it. Every other page links to its assets and
+to other pages relatively, so it works under any prefix. A host serves
+`404.html` at whatever URL was missing (`/a/b/c/`), though, so relative links
+there would point at `/a/b/c/.mbr/…` and the page would load no styles,
+components or site index. In `404.html` the asset folder, the site root
+(`__MBR_CONFIG__.basePath`), the breadcrumb and the Home button are therefore
+anchored at `base_url`: `/.mbr/` by default, `/my-repo/.mbr/` with
+`base_url = "/my-repo/"`.
+
+```toml
+# GitHub Pages project site: https://user.github.io/my-repo/
+base_url = "/my-repo/"
+```
+
+The value is normalized to a leading and trailing slash (`my-repo` →
+`/my-repo/`). It must be a path, not a full URL: a scheme or host
+(`https://…`, `//host/`), `?`, `#`, `.`/`..` segments, whitespace, quotes,
+backslashes and angle brackets are refused when the configuration is read.
+
 ### Parallel Building
 
 Static builds process markdown files in parallel for maximum speed:
@@ -1021,7 +1046,7 @@ The endpoint detects these issue types:
 
 | Type | Trigger |
 |------|---------|
-| `broken_internal_link` | An outbound internal link whose target does not resolve (via `path_resolver`). Mirrors the existing build-time link validation, but runs live and non-fatally. |
+| `broken_internal_link` | An outbound internal link whose target does not resolve (via `path_resolver`). Mirrors the existing build-time link validation, but runs live and non-fatally. When the panel is open, a missing target gets up to three **Did you mean** links: notes elsewhere with the same or a similar name (see [Broken links](../features/links.md#broken-links)). |
 | `broken_media_reference` | `<img>`, `<video>`, `<audio>`, or `<source>` whose internal `src` does not exist on disk or via the static-folder overlay. |
 | `unresolved_wikilink` | A literal `[[...]]` that survived into the rendered HTML (e.g. inside a raw-HTML block). Most wikilinks are caught by `broken_internal_link` instead. |
 | `frontmatter_parse_error` | The YAML frontmatter failed to parse, so the **whole** block — every otherwise-valid field included — was discarded. |
@@ -1437,6 +1462,9 @@ MBR_MEDIA_CACHE_SIZE=134217728 # 128MB of video/PDF covers, chapters, captions
 
 # Navigation
 MBR_GRAPH_DEPTH=3
+
+# Static builds deployed under a path (GitHub project pages)
+MBR_BASE_URL=/my-repo/
 
 # Flashcards
 MBR_FLASHCARDS_CONCENTRIC_THRESHOLD=0.8

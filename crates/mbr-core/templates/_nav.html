@@ -2,7 +2,7 @@
       <nav role="navigation" aria-label="Main menu">
         <ul>
           {% if sidebar_style == "single" %}<li><mbr-sidebar-trigger></mbr-sidebar-trigger></li>{% endif %}
-          {% if sidebar_style != "single" %}<li><mbr-browse></mbr-browse></li>{% endif %}
+          {% if sidebar_style != "single" %}<li><mbr-browse>{% include "_browse_footer.html" %}</mbr-browse></li>{% endif %}
           <li><mbr-slides></mbr-slides><mbr-flashcards></mbr-flashcards></li>
         </ul>
         <ul class="mbr-title-group">
@@ -14,6 +14,7 @@
           {% if server_mode and tasks_enabled %}<li><mbr-tasks></mbr-tasks></li>{% endif %}
           <li><mbr-info></mbr-info></li>
           <li><mbr-search></mbr-search></li>
+          {% include "_page_header_links.html" %}
         </ul>
       </nav>
     </header>
