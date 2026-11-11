@@ -34,6 +34,9 @@ Partials are prefixed with underscore and included by other templates:
 | `_not_found_suggestions.html` | The 404 page's "where did it go" suggestions (`<mbr-not-found-suggestions>`); included by `error.html` for a 404 only — see [404 Suggestions](#404-suggestions) |
 | `_calendar_nav.html` | Periodic-note navigation: the prev / up / next bar at the top of `<main>` on a daily, weekly, monthly, quarterly or yearly note, from the `calendar_nav` variable — see [Calendar](../features/calendar/#navigating-periodic-notes). The `[` / `]` keys follow its `rel="prev"` / `rel="next"` links |
 | `_person_infobox.html` | Compatibility shim: renders the contact card without its headline, for custom `index.html` files written before the card existed |
+| `_page_header_links.html` | Your links at the right-hand end of the page header (after search). Empty by default — see [Adding your own links](#adding-your-own-links) |
+| `_page_footer_links.html` | Your links in the page footer of markdown, directory, home, tag and media pages. Empty by default |
+| `_browse_footer.html` | Your links at the bottom of the browse sidebar (both `sidebar_style`s). Empty by default |
 
 ## Template Variables
 
@@ -302,9 +305,77 @@ Create `.mbr/_footer.html`:
 {% endif %}
 ```
 
+## Adding Your Own Links
+
+To put a link — text or an icon: a GitHub mark pointing at the repository, a home page, a social profile — in the page header, the page footer or the bottom of the browse sidebar, override one of three small partials rather than copying `_nav.html` or a page template. They are empty by default, so overriding one replaces nothing of mbr's, and the partials around them keep getting mbr's future fixes and features. A copied `_nav.html` would not.
+
+| Partial | Where it appears | What to write |
+|---------|------------------|---------------|
+| `.mbr/_page_header_links.html` | Right-hand end of the header, after the search button | One `<li>` per link |
+| `.mbr/_page_footer_links.html` | Page footer, on its own centred row | One `<li>` per link |
+| `.mbr/_browse_footer.html` | Bottom of the browse sidebar: below the list in the docked sidebar (`sidebar_style = "single"`), at the end of the drawer otherwise | The links themselves, no `<ul>`/`<li>` |
+
+The footer row and the sidebar strip appear only when the partial holds something, so an empty or comment-only file draws nothing. Error pages show the header links but have no page footer or sidebar.
+
+**A brand icon (GitHub).** mbr's built-in icons are [Lucide](https://lucide.dev), which has no brand marks, so paste the mark as inline SVG. `fill="currentColor"` makes it follow the theme (light and dark), and a link holding only an icon needs an `aria-label`, since the SVG itself is hidden from screen readers:
+
+```html
+{# .mbr/_page_header_links.html #}
+<li>
+  <a href="https://github.com/you/your-repo" aria-label="Source on GitHub" title="Source on GitHub" rel="noopener">
+    <svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">
+      <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/>
+    </svg>
+  </a>
+</li>
+```
+
+In the header and footer, a link holding an SVG is drawn like mbr's own header buttons: a 36px box in the icon colour that fills on hover. An SVG with no `width` gets 20px, the size of the built-in icons. The header has room for one or two icons on a phone; the page title gives way first.
+
+**A plain text link** needs nothing special:
+
+```html
+{# .mbr/_page_footer_links.html #}
+<li><a href="https://example.com">example.com</a></li>
+<li><a href="https://mastodon.social/@you" rel="me noopener">Mastodon</a></li>
+```
+
+**A built-in icon** comes from `icon()` (see [Icons](#icons)):
+
+```html
+{# .mbr/_page_header_links.html #}
+<li><a href="https://example.com" aria-label="Home page">{{ icon(name="house") | safe }}</a></li>
+```
+
+**The sidebar** takes bare links, laid out in a row that wraps. An icon beside text is fine there:
+
+```html
+{# .mbr/_browse_footer.html #}
+<a href="https://github.com/you/your-repo" rel="noopener"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true" focusable="false"><path d="…the GitHub path above…"/></svg>GitHub</a>
+<a href="https://example.com">Home page</a>
+```
+
+**Links into your own site** must work both from the server and from a static build (`-b`), where pages sit at different depths and the site may be served from a sub-path. Start them with `relative_root`, which a static build sets to the way back to the site root (`""`, `../`, `../../`…) and the server leaves unset:
+
+```html
+<li><a href="{{ relative_root | default(value="/") | safe }}about/">About</a></li>
+```
+
+That gives `/about/` from the server and `../../about/` on a page two folders deep in a static build. Keep the `| safe`: Tera escapes the `default` value itself, and without `safe` it is escaped a second time into a broken link.
+
+**Styling.** Override the defaults in `.mbr/user.css`. The header links are `body > header nav > ul > li > a`, the footer links `nav.mbr-footer-links a`, and the sidebar links `mbr-browse > a` (drawer) and `mbr-browse-single > a` (docked sidebar) — they are ordinary page elements, so page CSS reaches them even though the sidebar itself is a web component:
+
+```css
+/* .mbr/user.css */
+nav.mbr-footer-links a { font-size: 0.875rem; }
+:is(mbr-browse, mbr-browse-single) > a { color: var(--pico-primary); }
+```
+
+The iOS app hides mbr's header for its own bar, so header links do not appear there; footer and sidebar links do.
+
 ## Example: Custom Navigation
 
-Create `.mbr/_nav.html`:
+To add a few links to the header, prefer `_page_header_links.html` ([Adding your own links](#adding-your-own-links)): a copied `_nav.html` no longer picks up changes to mbr's header. To replace the header outright, create `.mbr/_nav.html`:
 
 ```html
 <nav>

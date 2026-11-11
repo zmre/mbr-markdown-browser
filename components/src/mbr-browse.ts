@@ -4,6 +4,7 @@ import { subscribeSiteNav, resolveUrl, getCanonicalPath, getCalendarConfig } fro
 import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { DISCLOSURE_CSS, ICON_BUTTON_CSS } from './controls.ts'
+import { SIDEBAR_FOOTER_CSS, hasMeaningfulContent, renderSidebarFooter, slotHasMeaningfulContent } from './slot-content.ts'
 import { ICON_SM, icon, iconCalendarDays, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
 import { CALENDAR_SECTION_CSS, calendarSectionModel, renderCalendarSection } from './calendar/browse-section.js'
 import { calendarOverlayAvailable, folderNodeFiles, openCalendarOverlay } from './calendar/open-overlay.js'
@@ -94,6 +95,10 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   @state()
   private _showMiddlePane = false;
 
+  /** Whether `_browse_footer.html` gave the left pane anything to show. */
+  @state()
+  private _hasFooterContent = false;
+
   // === Data State ===
   @state()
   private _allFiles: MarkdownFile[] = [];
@@ -169,6 +174,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
   override connectedCallback() {
     super.connectedCallback();
+
+    // `_browse_footer.html`, emitted as children by `_nav.html`.
+    this._hasFooterContent = hasMeaningfulContent(this.childNodes);
 
     // Track current page as recently viewed. `getCanonicalPath()` decodes the
     // pathname and strips any static-deployment prefix so the stored value
@@ -889,9 +897,14 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
             ${this._renderDynamicSections()}
           `}
         </div>
+        ${renderSidebarFooter(this._hasFooterContent, this._onFooterSlotChange)}
       </aside>
     `;
   }
+
+  private _onFooterSlotChange = (e: Event): void => {
+    this._hasFooterContent = slotHasMeaningfulContent(e);
+  };
 
   /**
    * The "Calendar" section (design/calendar.md §5.6): today's and this
@@ -1359,7 +1372,7 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, CALENDAR_SECTION_CSS, css`
+  static override styles = [ICON_BUTTON_CSS, DISCLOSURE_CSS, CALENDAR_SECTION_CSS, SIDEBAR_FOOTER_CSS, css`
     :host {
       display: contents;
     }
