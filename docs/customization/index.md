@@ -82,6 +82,15 @@ flowchart TD
 </footer>
 ```
 
+### Add Links to the Header, Footer or Sidebar
+
+```html
+<!-- .mbr/_page_header_links.html -->
+<li><a href="https://github.com/you/your-repo" aria-label="Source on GitHub">GitHub</a></li>
+```
+
+`_page_footer_links.html` and `_browse_footer.html` do the same for the page footer and the bottom of the browse sidebar. See [Adding your own links](templates/#adding-your-own-links) for icons, internal links and styling.
+
 ### Configure Ignored Directories
 
 ```toml

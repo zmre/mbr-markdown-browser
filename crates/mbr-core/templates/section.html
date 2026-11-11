@@ -6,7 +6,7 @@
     <title>{{title_prefix | default(value="")}}{{current_path | default(value="Directory") | escape}}{{title_suffix | default(value="")}}</title>
   </head>
   <body>
-{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
     <main id="wrapper" class="container" data-pagefind-body>
       <span class="sr-only" data-pagefind-weight="10">{{ current_dir_name | default(value="") }}</span>
@@ -69,6 +69,7 @@
           </li>
         </ul>
       </nav>
+      <nav class="mbr-footer-links" aria-label="Footer links"><ul>{% include "_page_footer_links.html" %}</ul></nav>
     </footer>
 {% include "_footer.html" %}
   </body>

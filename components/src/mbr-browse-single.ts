@@ -8,6 +8,7 @@ import { periodicIndexOf } from './calendar/periodic.js'
 import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { ICON_BUTTON_CSS } from './controls.ts'
+import { SIDEBAR_FOOTER_CSS, hasMeaningfulContent, renderSidebarFooter, slotHasMeaningfulContent } from './slot-content.ts'
 import { ICON_SM, icon, iconChevronRight, iconX } from './icons.ts'
 import {
   type MarkdownFile,
@@ -67,6 +68,10 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
   @state()
   private _isDrawerOpen = false;
 
+  /** Whether `_browse_footer.html` gave the sidebar anything to show. */
+  @state()
+  private _hasFooterContent = false;
+
   // === Data State ===
   @state()
   private _allFiles: MarkdownFile[] = [];
@@ -120,6 +125,9 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
 
   override connectedCallback() {
     super.connectedCallback();
+
+    // `_browse_footer.html`, emitted as children by the page template.
+    this._hasFooterContent = hasMeaningfulContent(this.childNodes);
 
     // Read CSS variable for breakpoint
     this._readBreakpointFromCSS();
@@ -740,8 +748,13 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
             ${this._renderTagGroups()}
           `}
       </nav>
+      ${renderSidebarFooter(this._hasFooterContent, this._onFooterSlotChange)}
     `;
   }
+
+  private _onFooterSlotChange = (e: Event): void => {
+    this._hasFooterContent = slotHasMeaningfulContent(e);
+  };
 
   /** The "Calendar" section (design/calendar.md §5.6), shared with `<mbr-browse>`. */
   private _renderCalendarSection(): TemplateResult | typeof nothing {
@@ -956,7 +969,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
   // Styles
   // ========================================
 
-  static override styles = [ICON_BUTTON_CSS, CALENDAR_SECTION_CSS, css`
+  static override styles = [ICON_BUTTON_CSS, CALENDAR_SECTION_CSS, SIDEBAR_FOOTER_CSS, css`
     :host {
       display: block;
     }
