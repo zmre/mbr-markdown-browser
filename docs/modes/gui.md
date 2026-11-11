@@ -113,6 +113,11 @@ native file picker cannot offer both at once, a short prompt asks which kind of 
 to open first. Picking a file opens directly to that file's rendered page rather than
 the repository root it belongs to.
 
+A link in a note to a file outside the open folder (`~/src/app/TODO.md`, or a
+`../` path above the folder's root) leads to a page with an **Open…** button,
+which shows this same dialog starting in that file's folder; see
+[Links outside the folder](../features/links.md#links-outside-the-folder).
+
 ### External Links
 
 The mbr window is a viewer for your notes, not a web browser, so it only ever

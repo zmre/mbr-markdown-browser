@@ -2,7 +2,8 @@ Icons in this folder
 ====================
 
 Every `*.svg` here except `footnote.svg` is the inner shape data of a Lucide
-icon (https://lucide.dev), lucide-static v1.59.0, with the `<svg>` wrapper
+icon (https://lucide.dev), lucide-static v1.59.0 (`globe` and
+`corner-up-right`: v1.72.0), with the `<svg>` wrapper
 removed: mbr applies one wrapper everywhere (24x24 viewBox, `fill="none"`,
 `stroke="currentColor"`, round caps and joins, stroke width from the
 `--mbr-icon-stroke` CSS token). `footnote.svg` is mbr's own, drawn on the same

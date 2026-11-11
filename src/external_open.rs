@@ -53,6 +53,7 @@
 
 use crate::errors::ExternalOpenError;
 use crate::url_path::url_scheme;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the GUI webview should do with a navigation request.
@@ -75,6 +76,91 @@ pub enum NavigationDecision {
 /// so neither can be changed alone. [`parse_ipc_open_request`] re-runs the full
 /// policy on the payload, because anything the page can execute can post here.
 pub const IPC_OPEN_EXTERNAL_PREFIX: &str = "mbr:open-external:";
+
+/// The message `components/src/mbr-outside-link.ts` posts when the reader
+/// presses **Open…** on the `/.mbr/outside/` page, followed by the outside
+/// link's path (`~/…` or absolute). [`parse_ipc_open_outside_request`] reads
+/// it; the two strings must change together.
+pub const IPC_OPEN_OUTSIDE_PREFIX: &str = "mbr:open-outside:";
+
+/// Longest path [`parse_ipc_open_outside_request`] accepts, in bytes. Far
+/// beyond any real path (`PATH_MAX` is 1024 on macOS, 4096 on Linux); a page
+/// posting more is not naming a file.
+const MAX_OUTSIDE_PATH_BYTES: usize = 4096;
+
+/// Where the Open… panel for an outside link starts: the target's folder, with
+/// the target's name preselected where the platform's panel supports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideOpenRequest {
+    pub directory: PathBuf,
+    pub file_name: Option<String>,
+}
+
+/// Validates an Open… request from the `/.mbr/outside/` page.
+///
+/// The payload is page-controlled — any script in a rendered note can post it
+/// — so it is allowed to do exactly one thing: choose where a native file
+/// panel *starts*. Nothing here or downstream opens, reads, stats-and-reports
+/// or launches the path; only what the user then picks in the panel is opened,
+/// through the same path as Open…/Cmd+O. The path is never handed to the OS
+/// default handler (a `.command` or `.app` would execute).
+///
+/// Inert (`None`) unless `gui_active` — fail closed exactly like
+/// [`open_external`], since a server process must never show dialogs on its
+/// host because a page asked. Otherwise the path must be `~`, `~/…` (expanded
+/// with `home`) or absolute, with no control characters and at most
+/// [`MAX_OUTSIDE_PATH_BYTES`]; it is normalized lexically (`.`, `..`), never
+/// canonicalized.
+pub fn parse_ipc_open_outside_request(
+    gui_active: bool,
+    payload: &str,
+    home: Option<&Path>,
+) -> Option<OutsideOpenRequest> {
+    if !gui_active {
+        return None;
+    }
+    let raw = payload.strip_prefix(IPC_OPEN_OUTSIDE_PREFIX)?;
+    if raw.is_empty() || raw.len() > MAX_OUTSIDE_PATH_BYTES || raw.chars().any(char::is_control) {
+        return None;
+    }
+    let path = match raw.strip_prefix('~') {
+        Some("") => home?.to_path_buf(),
+        Some(rest) if rest.starts_with('/') => home?.join(rest.trim_start_matches('/')),
+        Some(_) => return None,
+        None => PathBuf::from(raw),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    let path = path
+        .components()
+        .fold(PathBuf::new(), |mut normal, component| {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normal.pop();
+                }
+                other => normal.push(other),
+            }
+            normal
+        });
+    match (path.parent(), path.file_name()) {
+        (Some(directory), Some(name)) => Some(OutsideOpenRequest {
+            directory: directory.to_path_buf(),
+            file_name: name.to_str().map(str::to_string),
+        }),
+        // The filesystem root (or a bare drive): start there, nothing selected.
+        _ => Some(OutsideOpenRequest {
+            directory: path,
+            file_name: None,
+        }),
+    }
+}
+
+/// Whether a GUI window is running in this process (see [`GUI_ACTIVE`]).
+pub(crate) fn gui_active() -> bool {
+    GUI_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// Schemes that must never be handed to the operating system.
 ///
@@ -1063,5 +1149,83 @@ mod tests {
             unknown.decide("javascript:void(0)"),
             NavigationDecision::Block
         );
+    }
+
+    // ----- Open… from the outside-link page -----
+
+    fn outside(payload: &str) -> Option<OutsideOpenRequest> {
+        parse_ipc_open_outside_request(true, payload, Some(Path::new("/home/me")))
+    }
+
+    // Only the Unix-path test uses it; unused (an error under -D warnings)
+    // on Windows.
+    #[cfg(unix)]
+    fn request(directory: &str, file_name: Option<&str>) -> Option<OutsideOpenRequest> {
+        Some(OutsideOpenRequest {
+            directory: PathBuf::from(directory),
+            file_name: file_name.map(str::to_string),
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outside_open_starts_in_the_targets_folder() {
+        assert_eq!(
+            outside("mbr:open-outside:/Users/me/src/ledgeline/TODO.md"),
+            request("/Users/me/src/ledgeline", Some("TODO.md"))
+        );
+        assert_eq!(
+            outside("mbr:open-outside:~/src/a b.md"),
+            request("/home/me/src", Some("a b.md"))
+        );
+        assert_eq!(outside("mbr:open-outside:~"), request("/home", Some("me")));
+        assert_eq!(outside("mbr:open-outside:/"), request("/", None));
+        // Normalized lexically, never past the root.
+        assert_eq!(
+            outside("mbr:open-outside:/a/./b/../../../c.md"),
+            request("/", Some("c.md"))
+        );
+    }
+
+    #[test]
+    fn outside_open_is_inert_without_a_gui() {
+        assert_eq!(
+            parse_ipc_open_outside_request(
+                false,
+                "mbr:open-outside:/Users/me/x.md",
+                Some(Path::new("/home/me"))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn outside_open_refuses_anything_but_a_home_or_absolute_path() {
+        for payload in [
+            "mbr:open-external:https://example.com",
+            "mbr:open-outside:",
+            "mbr:open-outside:relative/x.md",
+            "mbr:open-outside:../x.md",
+            "mbr:open-outside:~user/x.md",
+            "mbr:open-outside:file:///etc/passwd",
+            "mbr:open-outside:/a\0b",
+            "mbr:open-outside:/a\nb",
+            "open-outside:/x",
+        ] {
+            assert_eq!(outside(payload), None, "{payload:?}");
+        }
+        let long = format!("mbr:open-outside:/{}", "a".repeat(MAX_OUTSIDE_PATH_BYTES));
+        assert_eq!(outside(&long), None);
+        // `~` needs a home directory.
+        assert_eq!(
+            parse_ipc_open_outside_request(true, "mbr:open-outside:~/x", None),
+            None
+        );
+    }
+
+    #[test]
+    fn outside_prefix_matches_the_component() {
+        // `components/src/mbr-outside-link.ts` posts exactly this.
+        assert_eq!(IPC_OPEN_OUTSIDE_PREFIX, "mbr:open-outside:");
     }
 }

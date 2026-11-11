@@ -136,6 +136,26 @@ fn test_fail_on_broken_links_exits_zero_on_clean_repo() {
     );
 }
 
+/// Links out of the repository are not broken links, so they never trip the
+/// CI gate.
+#[test]
+fn test_fail_on_broken_links_ignores_links_outside_the_repository() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "index.md",
+        "# Home\n\n[todo](~/src/project/TODO.md)\n\n[above](../elsewhere/x.md)\n",
+    );
+    let out = TempDir::new().expect("temp output dir");
+    let output = run_build(&repo, out.path(), &["--fail-on-broken-links"]);
+
+    assert!(
+        output.status.success(),
+        "outside links must pass the CI gate.\nstdout:\n{}\nstderr:\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+}
+
 /// Pins the precedence: `--skip-link-checks` wins. Validation never runs, so
 /// `stats.broken_links` stays 0 and `--fail-on-broken-links` cannot fire — the
 /// build exits 0 even though the repo *does* contain a broken link. This is

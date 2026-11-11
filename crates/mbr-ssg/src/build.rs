@@ -422,6 +422,10 @@ pub struct Builder {
     /// non-canonical URL to the canonical one, so getting this right at render
     /// time is the only chance.
     directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
+    /// Links that leave the repository: mapped into a symlink mount, else
+    /// pointed at the shipped `.mbr/outside/` page. Never names an absolute
+    /// path (a build may be published).
+    outside_links: mbr_core::outside_link::OutsideLinkContext,
     /// `__MBR_CONFIG__.calendar`, serialized once for every page.
     calendar_chrome: page_context::CalendarChrome,
 }
@@ -452,6 +456,7 @@ impl Builder {
             ),
         );
 
+        let outside_links = mbr_core::outside_link::OutsideLinkContext::for_repo(&repo);
         let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Ok(Builder {
             config,
@@ -462,6 +467,7 @@ impl Builder {
             build_link_index,
             frontmatter_errors,
             directory_url_probe,
+            outside_links,
             calendar_chrome,
         })
     }
@@ -575,6 +581,7 @@ impl Builder {
 
         // Generate media viewer pages (videos, pdfs, audio)
         self.generate_media_viewer_pages()?;
+        self.generate_outside_link_page()?;
 
         // Validate internal links and report broken ones
         if self.config.skip_link_checks {
@@ -906,6 +913,7 @@ impl Builder {
                     url_depth: None,
                     current_page_url: source_url.clone(),
                     directory_url_probe: None,
+                    outside_links: Some(self.outside_links.clone()),
                 },
             );
 
@@ -1102,6 +1110,7 @@ impl Builder {
             url_depth: Some(url_depth(&info.url_path)),
             current_page_url: info.url_path.clone(),
             directory_url_probe: Some(self.directory_url_probe.clone()),
+            outside_links: Some(self.outside_links.clone()),
         };
 
         tracing::debug!("build: rendering {}", path.display());
@@ -2462,6 +2471,46 @@ impl Builder {
         Ok(())
     }
 
+    /// Writes `.mbr/outside/index.html`, where a link out of the repository
+    /// leads (`mbr_core::outside_link`). Like the media viewers it is filled
+    /// in client-side from `?path=`, so it is the server's page unchanged.
+    fn generate_outside_link_page(&self) -> Result<(), BuildError> {
+        let output_path = self
+            .output_dir
+            .join(mbr_core::outside_link::OUTSIDE_VIEWER_ROUTE.trim_matches('/'))
+            .join("index.html");
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| BuildError::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+
+        let mut context: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                // `.mbr/outside/index.html` is two levels below the root.
+                mode: ModeFlags::Static { depth: 2 },
+                sidebar_style: &self.config.sidebar_style,
+                sidebar_max_items: self.config.sidebar_max_items,
+                graph_depth: self.config.graph_depth,
+                tasks_enabled: false,
+                review_enabled: false,
+                tasks_default_include: self.config.tasks_default_include,
+                title_affixes: Some((&self.config.title_prefix, &self.config.title_suffix)),
+                root_dir: None,
+                calendar: &self.calendar_chrome,
+            },
+        );
+        let html = self.templates.render_outside_link(context)?;
+        fs::write(&output_path, html).map_err(|e| BuildError::WriteFailed {
+            path: output_path,
+            source: e,
+        })
+    }
+
     /// Runs Pagefind to generate the search index using the native Rust library.
     ///
     /// Returns true if Pagefind ran successfully, false otherwise.
@@ -3078,6 +3127,7 @@ mod tests {
             ),
         );
 
+        let outside_links = mbr_core::outside_link::OutsideLinkContext::for_repo(&repo);
         let calendar_chrome = page_context::CalendarChrome::new(&config.calendar);
         Builder {
             config,
@@ -3088,6 +3138,7 @@ mod tests {
             build_link_index,
             frontmatter_errors,
             directory_url_probe,
+            outside_links,
             calendar_chrome,
         }
     }

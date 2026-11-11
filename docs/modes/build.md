@@ -106,7 +106,7 @@ The three reasons are genuinely different problems:
 |--------|---------------|
 | `no such page or file` | Nothing in the output answers this URL. |
 | `points at a page but has no trailing slash` | The page *is* there, so the link appears to work — but pages live at directory-style URLs, and without the slash the browser resolves that page's own relative links one directory too high. The damage lands on the **next** click. A static host has no redirect to repair it (server mode does — see [Server Mode](server/)). Only links to markdown pages are judged this way; a slashless link to a folder listing works and is not reported. |
-| `escapes the site root` | A `../` chain climbed above the site root. Browsers silently discard the excess (RFC 3986 §5.2.4), so the reader lands on an unrelated page instead of seeing an error. |
+| `escapes the site root` | A `../` chain climbed above the site root. Browsers silently discard the excess (RFC 3986 §5.2.4), so the reader lands on an unrelated page instead of seeing an error. A markdown link or quoted raw-HTML `href` that does this is a [link outside the folder](../features/links.md#links-outside-the-folder) and is pointed at `.mbr/outside/` instead, so only an href mbr did not write (an unquoted `<a href=../../x>`) is reported. |
 
 ### Frontmatter Parse Errors
 
@@ -264,14 +264,16 @@ If mbr reports broken links:
    (`page`, `page.md`, `page/`, `/page`, `[[Page]]`) and quoted raw-HTML
    `href`s are all emitted in the canonical form, but an unquoted
    `<a href=../page>` is published as written
-5. For "escapes the site root", count the `../` segments: a link authored in
-   `docs/guide.md` resolves relative to `docs/`, so `../../x` already leaves the
-   repository
+5. For "escapes the site root", look for an unquoted raw-HTML `href`: other
+   links that leave the repository (`../../x` from `docs/guide.md`, `~/x`) go
+   to the [outside-link page](../features/links.md#links-outside-the-folder)
+   and are not reported
 
 Links to mbr's own media viewers — `/.mbr/videos/?path=…` and the `pdfs`,
 `audio` and `images` siblings, with or without the trailing slash — are exempt
 from link checking. They are addressed by their `path=` query rather than by a
-file in the output, so there is nothing for the checker to look for. A
+file in the output, so there is nothing for the checker to look for. The same goes for
+`.mbr/outside/?path=…`, where links to files outside the folder lead. A
 `/.mbr/…` link with no `path=` query is still checked.
 
 ### Large Asset Files

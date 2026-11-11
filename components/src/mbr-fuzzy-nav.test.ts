@@ -188,6 +188,18 @@ describe('MbrFuzzyNavElement link sanitization', () => {
     )
     expect(hrefs).toEqual(['#', '#', 'https://example.com/ok', '/docs/guide/'])
   })
+
+  it('opens a link out of the vault in place, an internet link in a new window', async () => {
+    const root = await openWithOutbound([
+      { to: '/.mbr/outside/?path=~/src/x/TODO.md', text: 'outside', internal: false },
+      { to: 'https://example.com/ok', text: 'internet', internal: false },
+    ])
+
+    const [outside, internet] = Array.from(root.querySelectorAll('a.result-item'))
+    expect(outside.getAttribute('href')).toBe('/.mbr/outside/?path=~/src/x/TODO.md')
+    expect(outside.hasAttribute('target')).toBe(false)
+    expect(internet.getAttribute('target')).toBe('_blank')
+  })
 })
 
 /**

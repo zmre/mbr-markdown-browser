@@ -39,7 +39,7 @@
 //! `MessageBoxW` unconditionally since Windows 1.0, so it has no comctl32
 //! version to get wrong.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Ask the user to choose a markdown file or a folder to open.
 ///
@@ -48,9 +48,34 @@ use std::path::PathBuf;
 /// config has been loaded yet (the very first launch, before `Config::read`
 /// has run).
 pub fn pick_file_or_folder(title: &str, markdown_extensions: &[String]) -> Option<PathBuf> {
-    let dialog = rfd::FileDialog::new()
+    pick_file_or_folder_from(title, markdown_extensions, None, None)
+}
+
+/// [`pick_file_or_folder`], starting in `directory` with `file_name`
+/// preselected where the panel supports it — the Open… of an outside link
+/// (`/.mbr/outside/`), which starts where the link points.
+///
+/// How far preselection goes is rfd's: on macOS (rfd 0.17.2) a starting
+/// directory plus a name becomes `NSOpenPanel.directoryURL = directory/name`
+/// when `directory` exists, which is the panel's own way to open in `directory`
+/// with `name` selected when it exists; a missing `directory` leaves the panel
+/// where it last was. GTK and Windows set the initial folder (and, for GTK, the
+/// name). Nothing about the target is read here beyond what the panel does.
+pub fn pick_file_or_folder_from(
+    title: &str,
+    markdown_extensions: &[String],
+    directory: Option<&Path>,
+    file_name: Option<&str>,
+) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
         .set_title(title)
         .add_filter("Markdown", markdown_extensions);
+    if let Some(directory) = directory {
+        dialog = dialog.set_directory(directory);
+    }
+    if let Some(file_name) = file_name {
+        dialog = dialog.set_file_name(file_name);
+    }
 
     #[cfg(target_os = "macos")]
     {

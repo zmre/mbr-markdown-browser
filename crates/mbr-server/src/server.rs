@@ -282,6 +282,9 @@ struct LinkIndexConfig {
     /// configuration, [`owned_resolver_config`]'s inputs), so an extension-less
     /// or root-relative link is canonicalized here exactly as on the page.
     directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
+    /// The page render's outside-link context ([`ServerState::outside_links`]),
+    /// so the index records a mounted target's in-vault URL as the page does.
+    outside_links: mbr_core::outside_link::OutsideLinkContext,
 }
 
 /// Parse one markdown file and record its contribution to the backlink index.
@@ -310,6 +313,7 @@ fn index_page_links(
         url_depth: None,
         current_page_url: url_path.to_string(),
         directory_url_probe: Some(cfg.directory_url_probe.clone()),
+        outside_links: Some(cfg.outside_links.clone()),
     };
 
     match markdown::extract_outbound_links_from_vault(
@@ -2071,6 +2075,9 @@ pub struct ServerState {
     /// The repository's `[calendar]` table as pages publish it, serialized
     /// once at startup.
     pub calendar: Arc<page_context::CalendarChrome>,
+    /// How page renders treat links that leave the repository (mount mapping,
+    /// else `/.mbr/outside/`), built once: it holds the canonical `$HOME`.
+    pub outside_links: mbr_core::outside_link::OutsideLinkContext,
     /// Text to prepend to all page titles
     pub title_prefix: String,
     /// Text to append to all page titles
@@ -2975,7 +2982,12 @@ impl Server {
             || Arc::new(tokio::sync::Mutex::new(())),
             |previous| Arc::clone(&previous.changes.index_lock),
         );
+        // The local server names a `../` escape by its absolute path: the
+        // reader owns the machine, and the GUI opens its folder from it.
+        let outside_links =
+            mbr_core::outside_link::OutsideLinkContext::for_repo(&repo).naming_absolute_paths();
         let link_index_config = LinkIndexConfig {
+            outside_links: outside_links.clone(),
             base_dir: base_dir.clone(),
             index_file: index_file.clone(),
             markdown_extensions: markdown_extensions.clone(),
@@ -3170,6 +3182,7 @@ impl Server {
             flashcards_progress_indicators,
             slides,
             calendar: Arc::new(page_context::CalendarChrome::new(&calendar)),
+            outside_links: outside_links.clone(),
             title_prefix,
             title_suffix,
             mark_incomplete,
@@ -3234,6 +3247,10 @@ impl Server {
             .route("/.mbr/pdfs/", get(Self::serve_media_viewer))
             .route("/.mbr/audio/", get(Self::serve_media_viewer))
             .route("/.mbr/images/", get(Self::serve_media_viewer))
+            .route(
+                mbr_core::outside_link::OUTSIDE_VIEWER_ROUTE,
+                get(Self::serve_outside_link),
+            )
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
             .route("/{*path}", get(Self::handle))
             .layer(CompressionLayer::new().compress_when(compression_predicate()))
@@ -5282,6 +5299,54 @@ impl Server {
         }
     }
 
+    /// GET /.mbr/outside/?path=<encoded path>
+    ///
+    /// Where a link out of the repository leads (`mbr_core::outside_link`).
+    /// Only page chrome is rendered here: `<mbr-outside-link>` reads `path`
+    /// from the URL and shows it as text, exactly as in a static build. The
+    /// server never looks at the path — no `stat`, nothing about the target
+    /// reaches the page.
+    pub async fn serve_outside_link(State(config): State<ServerState>) -> impl IntoResponse {
+        let mut context = std::collections::HashMap::new();
+        page_context::insert_page_chrome(
+            &mut context,
+            &PageChrome {
+                mode: ModeFlags::Server {
+                    gui_mode: Some(config.gui_mode),
+                    mbr_base: true,
+                },
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
+                tasks_enabled: config.tasks_enabled,
+                review_enabled: config.review_enabled,
+                tasks_default_include: config.tasks_default_include,
+                title_affixes: Some((&config.title_prefix, &config.title_suffix)),
+                root_dir: Some(&config.base_dir),
+                calendar: &config.calendar,
+            },
+        );
+        match config.templates.render_outside_link(context) {
+            Ok(html) => build_response_or_500(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .header(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE)
+                    .body(Body::from(html)),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to render the outside-link page: {e}");
+                Self::render_error_page(
+                    &config,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    Some("Failed to render the outside-link page"),
+                    mbr_core::outside_link::OUTSIDE_VIEWER_ROUTE,
+                )
+            }
+        }
+    }
+
     /// Serves assets from /.mbr/* path.
     ///
     /// Priority:
@@ -6435,6 +6500,7 @@ impl Server {
                                 owned_resolver_config(config),
                             ),
                         ),
+                        outside_links: Some(config.outside_links.clone()),
                     };
 
                     // Kept for resolving the collected links against this
@@ -6731,6 +6797,7 @@ impl Server {
                             owned_resolver_config(config),
                         ),
                     ),
+                    outside_links: Some(config.outside_links.clone()),
                 };
 
                 // Kept for resolving the collected links against this page;
@@ -7786,6 +7853,7 @@ impl Server {
             directory_url_probe: Some(mbr_core::link_transform::filesystem_directory_url_probe(
                 owned_resolver_config(config),
             )),
+            outside_links: Some(config.outside_links.clone()),
         };
 
         // Kept for resolving the page's outbound links (the link cache
@@ -9446,6 +9514,7 @@ mod tests {
     /// The [`LinkIndexConfig`] `Server::init` builds for `fixture_repo`.
     fn test_link_index_config(repo: &Repo, root: &Path) -> LinkIndexConfig {
         LinkIndexConfig {
+            outside_links: mbr_core::outside_link::OutsideLinkContext::for_repo(repo),
             base_dir: root.to_path_buf(),
             index_file: "index.md".to_string(),
             markdown_extensions: vec!["md".to_string()],

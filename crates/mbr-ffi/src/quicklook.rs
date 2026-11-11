@@ -636,6 +636,7 @@ impl QuickLookTarget {
             // wikilinks never resolve globally; the page URL is unused.
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
 
         markdown::render_str(

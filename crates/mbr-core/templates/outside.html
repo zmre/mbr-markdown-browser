@@ -1,0 +1,23 @@
+{% set asset_base = relative_base | default(value="/.mbr/") %}
+<!doctype html>
+<html lang="en">
+  <head>
+{% include "_head.html" %}
+    <title>{{title_prefix | default(value="")}}Outside this folder{{title_suffix | default(value="")}}</title>
+  </head>
+  <body>
+{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% include "_nav.html" %}
+    <main id="wrapper" class="container">
+      <h1>Outside this folder</h1>
+      {# The target is read from `?path=` by the element and drawn as text only:
+         the same page serves a static build, which has no server to fill it in. #}
+      <mbr-outside-link></mbr-outside-link>
+      <noscript>
+        <p>This note links to a file outside the folder mbr is serving, so it can't be shown here. Its path is in this page's address, after <code>?path=</code>.</p>
+      </noscript>
+    </main>
+{% include "_footer.html" %}
+  </body>
+{% include "_scripts.html" %}
+</html>

@@ -1433,6 +1433,42 @@ async fn test_build_skips_mbr_viewer_query_routes() {
     );
 }
 
+/// Links out of the repository (`~/…`, a `../` chain above the root) point at
+/// the shipped `.mbr/outside/` page, relativized, and are not broken links;
+/// the page's own file is written; no absolute local path reaches the output.
+#[tokio::test]
+async fn test_build_points_outside_links_at_the_shipped_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/projects.md",
+        "# Projects\n\n[todo](~/src/ledgeline/TODO.md)\n\n[above](../../elsewhere/x.md)\n\n\
+         [Broken](/missing/)\n",
+    );
+
+    let (output, stats) = build_site_with_stats(&repo).await;
+    let page = fs::read_to_string(output.join("notes/projects/index.html")).unwrap();
+    assert!(
+        page.contains(r#"href="../../.mbr/outside/?path=~/src/ledgeline/TODO.md""#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"href="../../.mbr/outside/?path=../elsewhere/x.md""#),
+        "a build names a `../` escape relative to the root, never absolutely:\n{page}"
+    );
+    let root = repo.path().canonicalize().unwrap();
+    assert!(
+        !page.contains(&*root.parent().unwrap().to_string_lossy()),
+        "no local absolute path in a published page"
+    );
+    let viewer = fs::read_to_string(output.join(".mbr/outside/index.html")).unwrap();
+    assert!(viewer.contains("<mbr-outside-link>"), "{viewer}");
+    assert_eq!(
+        stats.broken_links, 1,
+        "only the genuinely missing page is broken, got {}",
+        stats.broken_links
+    );
+}
+
 /// A `..` chain that climbs out of the output directory produced no diagnostic
 /// while the resolver silently clamped it.
 #[tokio::test]
@@ -1440,7 +1476,9 @@ async fn test_build_detects_link_escaping_the_site_root() {
     let repo = TestRepo::new();
     repo.create_markdown(
         "docs/guide.md",
-        "# Guide\n\n<a href=\"../../../../escape/target/\">out</a>\n",
+        // Unquoted, so it reaches the output as written: a quoted one is an
+        // outside link, pointed at `.mbr/outside/` and not reported.
+        "# Guide\n\n<a href=../../../../escape/target/>out</a>\n",
     );
 
     let (_output, stats) = build_site_with_stats(&repo).await;

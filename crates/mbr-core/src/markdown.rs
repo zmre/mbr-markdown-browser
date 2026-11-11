@@ -1,7 +1,7 @@
 use crate::attrs::ParsedAttrs;
 use crate::errors::MarkdownError;
 use crate::link_index::{OutboundLink, is_internal_link, split_url_anchor};
-use crate::link_transform::{LinkTransformConfig, transform_link};
+use crate::link_transform::{LinkTransformConfig, transform_asset_url, transform_link};
 use crate::media::MediaEmbed;
 use crate::oembed::PageInfo;
 use crate::oembed_cache::OembedCache;
@@ -1910,7 +1910,7 @@ fn transform_section_background_urls(
 /// returned as is.
 fn transform_background_attr(key: &str, value: String, config: &LinkTransformConfig) -> String {
     match key.to_ascii_lowercase().as_str() {
-        "data-background-image" | "data-background-iframe" => transform_link(&value, config),
+        "data-background-image" | "data-background-iframe" => transform_asset_url(&value, config),
         // A `data:` URL carries its own commas; splitting it would mangle the
         // payload (`data:…;base64,../AAAA`).
         "data-background-video"
@@ -1934,14 +1934,16 @@ fn transform_background_attr(key: &str, value: String, config: &LinkTransformCon
                     format!(
                         "{}{}{}",
                         &item[..start],
-                        transform_link(trimmed, config),
+                        transform_asset_url(trimmed, config),
                         &item[end..]
                     )
                 }
             })
             .collect::<Vec<_>>()
             .join(","),
-        "data-background" if is_reveal_background_url(&value) => transform_link(&value, config),
+        "data-background" if is_reveal_background_url(&value) => {
+            transform_asset_url(&value, config)
+        }
         _ => value,
     }
 }
@@ -2039,14 +2041,22 @@ fn transform_raw_html_urls<'h>(html: &'h str, config: &LinkTransformConfig) -> C
             .is_some_and(|name| name.as_str().eq_ignore_ascii_case("srcset"));
         let transformed = if is_srcset {
             match url_path::rewrite_srcset(&decoded, |url| {
-                let transformed = transform_link(url, config);
+                let transformed = transform_asset_url(url, config);
                 (transformed != url).then_some(transformed)
             }) {
                 Cow::Borrowed(_) => continue,
                 Cow::Owned(rewritten) => rewritten,
             }
         } else {
-            let transformed = transform_link(&decoded, config);
+            // `href` is followed, `src`/`poster` are loaded.
+            let is_href = caps
+                .get(2)
+                .is_some_and(|name| name.as_str().eq_ignore_ascii_case("href"));
+            let transformed = if is_href {
+                transform_link(&decoded, config)
+            } else {
+                transform_asset_url(&decoded, config)
+            };
             if transformed == decoded {
                 continue;
             }
@@ -2948,7 +2958,7 @@ fn finalize_render(
         .map(|mut contact| {
             contact.image = contact
                 .image
-                .map(|src| transform_link(&src, &state.link_transform_config));
+                .map(|src| transform_asset_url(&src, &state.link_transform_config));
             contact
         });
 
@@ -2960,7 +2970,7 @@ fn finalize_render(
             slides.settings.background_image = slides
                 .settings
                 .background_image
-                .map(|src| transform_link(&src, &state.link_transform_config));
+                .map(|src| transform_asset_url(&src, &state.link_transform_config));
             slides
         });
 
@@ -3628,7 +3638,7 @@ fn process_event(
         }) => {
             // Transform the URL first for trailing-slash URL convention
             // This applies to all images/media, not just regular images
-            let transformed_url = transform_link(dest_url, &state.link_transform_config);
+            let transformed_url = transform_asset_url(dest_url, &state.link_transform_config);
 
             match MediaEmbed::from_url_and_title(&transformed_url, title) {
                 Some(media) => {
@@ -3859,7 +3869,7 @@ fn process_event(
                 (Event::Html(info.html().into()), state)
             } else if text.trim_start().starts_with("{{") {
                 if let Some(mut vid) = Vid::from_vid(text) {
-                    vid.url = transform_link(&vid.url, &state.link_transform_config);
+                    vid.url = transform_asset_url(&vid.url, &state.link_transform_config);
                     (
                         Event::Html(
                             vid.to_html(false, state.server_mode, state.transcode_enabled)
@@ -3927,6 +3937,7 @@ mod tests {
                 url_depth: None,
                 current_page_url: String::new(),
                 directory_url_probe: None,
+                outside_links: None,
             },
             oembed_cache: None,
             server_mode,
@@ -4044,6 +4055,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         // Tests run with server_mode=false, transcode_enabled=false, mark_incomplete=false
         let result = render(
@@ -4083,6 +4095,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let owned: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
         render(
@@ -4114,6 +4127,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         render(
             path,
@@ -4151,6 +4165,7 @@ mod tests {
             url_depth,
             current_page_url: current_page_url.to_string(),
             directory_url_probe: None,
+            outside_links: None,
         };
         render(
             path,
@@ -4388,6 +4403,7 @@ mod tests {
                     url_depth: None,
                     current_page_url: "/broken-note/".to_string(),
                     directory_url_probe: None,
+                    outside_links: None,
                 },
                 true,
                 false,
@@ -4948,6 +4964,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -5020,6 +5037,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -5053,6 +5071,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -5087,6 +5106,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -5125,6 +5145,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -5163,6 +5184,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let result = render(
             path,
@@ -7219,6 +7241,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
 
@@ -7294,6 +7317,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let (processed, _state) = process_all_events(
             events,
@@ -7908,6 +7932,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
 
         let async_result = render_with_cache(
@@ -8158,6 +8183,7 @@ mod tests {
                 url_depth: None,
                 current_page_url: String::new(),
                 directory_url_probe: None,
+                outside_links: None,
             },
             false,
             false,
@@ -8836,6 +8862,7 @@ mod tests {
                     url_depth: None,
                     current_page_url: String::new(),
                     directory_url_probe: None,
+                    outside_links: None,
                 },
                 false,
                 false,
@@ -8907,6 +8934,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
         let markers: Vec<String> = DEFAULT_MARKERS.iter().map(|m| m.to_string()).collect();
 
@@ -9490,6 +9518,7 @@ mod proptests {
                         url_depth: None,
                         current_page_url: String::new(),
                         directory_url_probe: None,
+                        outside_links: None,
                     },
                     oembed_cache: None,
                     server_mode: true,
