@@ -169,6 +169,17 @@ describe('value completions', () => {
     expect(labels('relationships: [{type: |}]')).toEqual(['parent', 'mentor']);
   });
 
+  it('the map shorthand: types as keys, note links as values', () => {
+    expect(labels('relationships:\n  |')).toEqual(['parent', 'mentor']);
+    expect(labels('relationships:\n  parent: "[[Alice Smith]]"\n  |')).toEqual(['mentor']);
+    expect(option('relationships:\n  |', 'parent').detail).toBe('Parent · family');
+    const none = { knowledge: () => knowledge({ catalog: builtinCatalog() }) };
+    expect(labels('relationships:\n  |', none)).toContain('reports_to');
+    expect(applied('relationships:\n  men|', 'mentor')).toBe('relationships:\n  mentor: ');
+    expect(labels('relationships:\n  mentor: |')).toContain('[[Alice Smith]]');
+    expect(labels('relationships:\n  mentor:\n    - |')).toContain('[[Acme Corp]]');
+  });
+
   it('note links for a link field are quoted, since `[[x]]` unquoted is a nested list', () => {
     const c = complete('type: person\ncompany: |')!;
     const acme = c.options.find((o) => o.label === '[[Acme Corp]]')!;
@@ -260,6 +271,10 @@ describe('yamlScalarText', () => {
 });
 
 describe('yamlDiagnostics', () => {
+  it('reports nothing for the relationships map shorthand', () => {
+    expect(yamlDiagnostics('relationships:\n  reports_to: "[[Hemant Kataria]]"\n  manages: ["[[A]]", "[[B]]"]\n')).toEqual([]);
+  });
+
   it('maps parse errors to ranges in the text', () => {
     const text = 'a: [1\nb: 2';
     const d = yamlDiagnostics(text);

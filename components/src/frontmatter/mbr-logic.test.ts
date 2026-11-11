@@ -7,21 +7,31 @@ import {
   DEFAULT_RELATIONSHIP_TYPES,
   actorOptions,
   addLabeledEntry,
+  addMapEdge,
   addTag,
   createActorMemory,
   edgeDirection,
   edgeOf,
   freshLabel,
+  freshRelationType,
   canFlipDirection,
   humanActorId,
   labeledEntries,
   labeledShape,
+  mapEdgeRows,
+  mapEdgeView,
+  mapEdgesAsList,
   noteLinkOptions,
   relationshipSentence,
+  relationshipsShape,
+  relationshipsToList,
   removeEntry,
+  removeMapEdge,
   removeTag,
   setEdgeField,
   setEntryLabel,
+  setMapEdgeNote,
+  setMapEdgeType,
   tagItems,
   tagSuggestions,
   toggleEdgeDirection,
@@ -78,6 +88,101 @@ describe('relationships', () => {
   it('writes an endpoint as a quoted wikilink', () => {
     const m = openFrontmatter('relationships:\n  - type: parent\n    to:\n');
     expect(setEdgeField(m, ['relationships', 0], 'to', '[[Sam Doe]]').text).toBe('relationships:\n  - type: parent\n    to: "[[Sam Doe]]"\n');
+  });
+});
+
+describe('relationships map shorthand', () => {
+  const P = ['relationships'];
+  const SRC = 'title: Jane # me\nrelationships:\n  reports_to: "[[H]]" # boss\n  manages: [\'[[A]]\', "[[B]]"]\n  child:\n    - "[[C]]"\ntags: [a]\n';
+  const head = 'title: Jane # me\nrelationships:\n';
+  const tail = 'tags: [a]\n';
+  const m = () => openFrontmatter(SRC);
+
+  it('tells the shapes apart (a new value is a list)', () => {
+    expect(relationshipsShape([{ type: 'parent' }])).toBe('list');
+    expect(relationshipsShape({ reports_to: '[[H]]' })).toBe('map');
+    expect(relationshipsShape(null)).toBe('empty');
+    expect(relationshipsShape(undefined)).toBe('empty');
+  });
+
+  it('reads one row per target, in authored order, raw values flagged', () => {
+    const value = { reports_to: '[[H]]', manages: ['[[A]]', '[[B]]'], spouse: null, odd: { to: '[[X]]' }, n: 7 };
+    const rows = mapEdgeRows(value, P);
+    expect(rows.map((r) => [r.type, r.value, r.valuePath, r.raw])).toEqual([
+      ['reports_to', '[[H]]', ['relationships', 'reports_to'], false],
+      ['manages', '[[A]]', ['relationships', 'manages', 0], false],
+      ['manages', '[[B]]', ['relationships', 'manages', 1], false],
+      ['spouse', null, ['relationships', 'spouse'], false],
+      ['odd', { to: '[[X]]' }, ['relationships', 'odd'], true],
+      ['n', 7, ['relationships', 'n'], true],
+    ]);
+    expect(mapEdgeView(rows[0])).toEqual({ type: 'reports_to', to: '[[H]]', from: '', label: '', hasTo: true, hasFrom: false, attributes: [] });
+    expect(relationshipSentence(mapEdgeView(rows[0]), reg, 'Jane')).toBe('Jane reports to H · H manages Jane');
+    // The list form has one item per row, in the same order, nothing dropped.
+    expect(mapEdgesAsList(value)).toEqual([
+      { type: 'reports_to', to: '[[H]]' },
+      { type: 'manages', to: '[[A]]' },
+      { type: 'manages', to: '[[B]]' },
+      { type: 'spouse', to: null },
+      { type: 'odd', to: '[[X]]' },
+      { type: 'n', to: 7 },
+    ]);
+  });
+
+  it('edits a note in place', () => {
+    expect(setMapEdgeNote(m(), P, 2, '[[Q]]').text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ['[[A]]', "[[Q]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+    expect(setMapEdgeNote(m(), P, 0, '').text).toBe(`${head}  reports_to: # boss\n  manages: ['[[A]]', "[[B]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+  });
+
+  it('renames a key whose only note changes type, keeping its place and comment', () => {
+    const next = setMapEdgeType(m(), P, 0, 'assists');
+    expect(next.text).toBe(SRC.replace('reports_to:', 'assists:'));
+    expect(next.normalized).toBe(false);
+    // A map key cannot be empty: an empty type changes nothing.
+    const same = m();
+    expect(setMapEdgeType(same, P, 0, '  ')).toBe(same);
+  });
+
+  it('moves a note into an existing key, turning one note into a list as needed', () => {
+    // A lone note joins a list.
+    expect(setMapEdgeType(m(), P, 0, 'manages').text).toBe(`${head}  manages: ['[[A]]', "[[B]]", "[[H]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+    // A list item joins a lone note, which becomes a list keeping its bytes.
+    const moved = setMapEdgeType(m(), P, 1, 'reports_to');
+    expect(moved.text).toBe(`${head}  reports_to:\n    - "[[H]]" # boss\n    - "[[A]]"\n  manages: ["[[B]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+    expect(moved.normalized).toBe(false);
+    // A list's only item to a new key: the old key goes.
+    expect(setMapEdgeType(m(), P, 3, 'spouse').text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ['[[A]]', "[[B]]"]\n  spouse: "[[C]]"\n${tail}`);
+  });
+
+  it('removes a list item, or the key with its last note', () => {
+    expect(removeMapEdge(m(), P, 1).text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ["[[B]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+    expect(removeMapEdge(m(), P, 3).text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ['[[A]]', "[[B]]"]\n${tail}`);
+    expect(removeMapEdge(m(), P, 0).text).toBe(`${head}  manages: ['[[A]]', "[[B]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+  });
+
+  it('adds a note under a new key, an empty key, a lone note or a list', () => {
+    expect(addMapEdge(m(), P, 'spouse', '[[Z]]').text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ['[[A]]', "[[B]]"]\n  child:\n    - "[[C]]"\n  spouse: "[[Z]]"\n${tail}`);
+    expect(addMapEdge(m(), P, 'child', '[[Z]]').text).toBe(`${head}  reports_to: "[[H]]" # boss\n  manages: ['[[A]]', "[[B]]"]\n  child:\n    - "[[C]]"\n    - "[[Z]]"\n${tail}`);
+    expect(addMapEdge(m(), P, 'reports_to', '[[Z]]').text).toBe(`${head}  reports_to:\n    - "[[H]]" # boss\n    - "[[Z]]"\n  manages: ['[[A]]', "[[B]]"]\n  child:\n    - "[[C]]"\n${tail}`);
+    const empty = openFrontmatter('relationships:\n  parent:\n');
+    expect(addMapEdge(empty, P, 'parent', '[[Z]]').text).toBe('relationships:\n  parent: "[[Z]]"\n');
+  });
+
+  it('picks an unused registry type for a new edge', () => {
+    expect(freshRelationType({ parent: '[[A]]' }, reg)).toBe('child');
+    expect(freshRelationType(null, reg)).toBe('parent');
+  });
+
+  it('rewrites only the value as the list form', () => {
+    const list = relationshipsToList(m(), P);
+    expect(list.text).toBe(
+      `${head}  - type: reports_to\n    to: "[[H]]"\n  - type: manages\n    to: "[[A]]"\n  - type: manages\n    to: "[[B]]"\n  - type: child\n    to: "[[C]]"\n${tail}`,
+    );
+    expect(list.normalized).toBe(false);
+    expect(toValue(list)).toMatchObject({ title: 'Jane', tags: ['a'] });
+    // A list stays as it is.
+    const already = openFrontmatter('relationships:\n  - type: parent\n    to: "[[A]]"\n');
+    expect(relationshipsToList(already, P)).toBe(already);
   });
 });
 

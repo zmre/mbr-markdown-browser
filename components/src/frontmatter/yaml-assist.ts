@@ -15,7 +15,17 @@ import type { Diagnostic } from '@codemirror/lint';
 import type { EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { parseDocument } from 'yaml';
-import { CONTACT_LABELS, addableFields, fieldFor, resolveField, timestampNow, type FieldCatalog, type FieldDef, type Frontmatter } from './fields.js';
+import {
+  CONTACT_LABELS,
+  RELATIONSHIP_MAP_TARGET,
+  addableFields,
+  fieldFor,
+  resolveField,
+  timestampNow,
+  type FieldCatalog,
+  type FieldDef,
+  type Frontmatter,
+} from './fields.js';
 import type { InferredField } from './infer.js';
 import { valueSuggestions, type ComboOption } from './form-logic.js';
 import {
@@ -187,6 +197,11 @@ export function keyOptions(path: FmPath, fm: Frontmatter, k: YamlKnowledge, edit
   const labeled = labeledAt(path, fm, k.catalog);
   const def = fieldFor(path, fm, k.catalog);
   for (const c of childFields(def)) push({ key: c.key, detail: c.label, info: c.help, def: c });
+  // A key typed straight under `relationships:` is the map shorthand's type.
+  if (def?.kind === 'relationships') {
+    const registry = k.catalog.relationshipTypes.length > 0 ? k.catalog.relationshipTypes : DEFAULT_RELATIONSHIP_TYPES;
+    for (const o of relationTypeOptions(registry)) push({ key: o.value, detail: o.detail, info: RELATIONSHIP_MAP_TARGET.help, def: RELATIONSHIP_MAP_TARGET });
+  }
   if (labeled) {
     for (const label of labeled.labels ?? CONTACT_LABELS[labeled.key] ?? []) {
       push({ key: label, detail: `${labeled.label} label`, def: labeled.item });

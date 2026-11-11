@@ -88,7 +88,8 @@ All of these fields are optional.
 ## The `relationships` field
 
 Relationships are a single generic array of edge objects, so the same mechanism
-works for any domain (genealogy is just one). The in-browser editor has a
+works for any domain (genealogy is just one). Simple ones can also be written
+as a map from type to note ([the short form](#the-short-form)). The in-browser editor has a
 relationship builder that picks the type and the note for you and reads each
 edge back as a sentence; see [Editing Properties](editing-properties/#relationships).
 
@@ -150,6 +151,46 @@ had to make that choice — see [Data problems mbr reports](#data-problems-mbr-r
 Body `[[Wikilinks]]` in page text resolve the same global way as relationship
 endpoints: the current folder is preferred, otherwise the first matching note in
 any folder (by title, alias, then filename stem) is used.
+
+### The short form
+
+When a relationship needs nothing but a type and a note, `relationships` can
+be a map from type to note instead of a list:
+
+```yaml
+relationships:
+  reports_to: "[[Hemant Kataria]]"
+  manages:                 # several notes: a list
+    - "[[Anunay Sinha]]"
+    - "[[Priya Rao]]"
+```
+
+Each target means exactly the list form's `type: <key>, to: <note>`: the block
+above is the same as
+
+```yaml
+relationships:
+  - type: reports_to
+    to: "[[Hemant Kataria]]"
+  - type: manages
+    to: "[[Anunay Sinha]]"
+  - type: manages
+    to: "[[Priya Rao]]"
+```
+
+so reverse edges, deduplication, cycles, the contact card and the charts treat
+both alike. A note is any [endpoint value](#endpoint-values) (wikilink, name
+or path); quote wikilinks, since `[[X]]` unquoted is a nested YAML list.
+
+The short form has no room for anything else: no `label`, no `from` (every
+target is "X is my <type>"), no edge attributes. Use the list form for those.
+A note's `relationships` is one form or the other, not both. Targets mbr cannot
+read (an empty value, a number, a nested map) are skipped with a warning, as is
+any `relationships` value that is neither a list nor a map.
+
+The [properties editor](editing-properties/#relationships) edits the short form
+in place, and rewrites it as the list form the moment you give a relationship a
+label, flip its direction or add an attribute.
 
 ### Reserved keys and attributes
 

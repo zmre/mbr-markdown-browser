@@ -72,7 +72,7 @@ is a slide with a heading and a list, never a second metadata block.
 | `type` | The kind of note; also becomes a [body class](../features/page-styles/) |
 | `style` | Display [style(s)](../features/page-styles/) applied as body classes |
 | `order`, `pinned` | Position in listings, see [File Sorting](../customization/sorting/) |
-| `relationships` | Typed links to other notes, see [Relationships](../features/relationships/) |
+| `relationships` | Typed links to other notes: a list of `{type, to}` edges, or the [short form](../features/relationships/#the-short-form) `reports_to: "[[X]]"`; see [Relationships](../features/relationships/) |
 | `slides` | Per-deck settings, see [Deck Settings](../features/slides/#deck-settings) |
 | `author` | Author name, available to templates |
 | Any other field | Searchable, and available to templates via `frontmatter_json` |

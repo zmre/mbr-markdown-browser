@@ -83,6 +83,11 @@ describe('builtinCatalog', () => {
     expect(fieldFor(['relationships', 0, 'married'], {}, catalog)).toBeUndefined();
   });
 
+  it('reads the map shorthand: a type key holds a note, or a list of notes', () => {
+    expect(fieldFor(['relationships', 'reports_to'], {}, catalog)?.kind).toBe('wikilink');
+    expect(fieldFor(['relationships', 'manages', 1], {}, catalog)?.kind).toBe('wikilink');
+  });
+
   it('has the OKF fields for every note', () => {
     expect(fieldFor(['status'], {}, catalog)?.enumValues?.map((e) => e.value)).toEqual(['draft', 'stable', 'deprecated']);
     expect(fieldFor(['sources', 0, 'resource'], {}, catalog)).toMatchObject({ kind: 'text', required: true });
@@ -263,6 +268,11 @@ describe('validate', () => {
     ]);
     // Without a registry there is nothing to compare against.
     expect(validate({ relationships: [{ type: 'mentor', to: '[[B]]' }] }, builtinCatalog())).toEqual([]);
+  });
+
+  it('flags unknown types in the map shorthand too, and nothing else about it', () => {
+    const hints = validate({ relationships: { Parent: '[[A]]', mentor: ['[[B]]', '[[C]]'], spouse: null } }, catalog);
+    expect(hints).toEqual([{ path: ['relationships', 'mentor'], message: expect.stringContaining('mentor') }]);
   });
 });
 
