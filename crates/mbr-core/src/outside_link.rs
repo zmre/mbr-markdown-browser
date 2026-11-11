@@ -351,6 +351,22 @@ fn site_url_of(location: &VaultPath, below: &Path) -> Option<String> {
     Some(format!("/{}", segments.join("/")))
 }
 
+/// An absolute path as a reader would write it: the host's own separators,
+/// without the `\\?\` verbatim prefix Windows' `canonicalize` adds (the
+/// repository root is canonical, so every path built on it carries one).
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\server\share\x` → `\\server\share\x`; any
+/// other path is unchanged.
+pub fn display_path(path: &Path) -> String {
+    let shown = path.to_string_lossy();
+    if let Some(unc) = shown.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    match shown.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => shown.into_owned(),
+    }
+}
+
 /// What the link transform does with an outside link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutsideResolution {
@@ -393,7 +409,7 @@ pub fn resolve(url: &str, config: &LinkTransformConfig) -> Option<OutsideResolut
     }
 
     let shown = match (target.base, context.absolute_paths, absolute) {
-        (OutsideBase::RepositoryRoot, true, Some(path)) => path.to_string_lossy().into_owned(),
+        (OutsideBase::RepositoryRoot, true, Some(path)) => display_path(&path),
         _ => target.display(),
     };
     Some(OutsideResolution::Viewer(viewer_url(&shown)))
@@ -506,6 +522,24 @@ mod tests {
     }
 
     #[test]
+    fn display_path_drops_only_the_verbatim_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\me\x.md")),
+            r"C:\Users\me\x.md"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\x.md")),
+            r"\\server\share\x.md"
+        );
+        assert_eq!(display_path(Path::new("/home/me/x.md")), "/home/me/x.md");
+        // A verbatim path that is not a drive or UNC keeps its prefix.
+        assert_eq!(
+            display_path(Path::new(r"\\?\Volume{1}\x")),
+            r"\\?\Volume{1}\x"
+        );
+    }
+
+    #[test]
     fn viewer_url_encodes_the_query_value() {
         assert_eq!(
             viewer_url("~/src/a b&c#d+e.md"),
@@ -577,7 +611,16 @@ mod tests {
                 "/.mbr/outside/?path=~/src/x.md".to_string()
             ))
         );
-        // Server mode: a `../` escape is named by its absolute path.
+        // Server mode: a `../` escape is named by its absolute path, in the
+        // host's separators (`/home/me\src\x.md` on Windows).
+        let absolute = Path::new("/home/me").join("src").join("x.md");
+        assert_eq!(
+            resolve("../../src/x.md", &cfg),
+            Some(OutsideResolution::Viewer(viewer_url(&display_path(
+                &absolute
+            ))))
+        );
+        #[cfg(unix)]
         assert_eq!(
             resolve("../../src/x.md", &cfg),
             Some(OutsideResolution::Viewer(

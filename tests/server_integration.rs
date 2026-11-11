@@ -2182,10 +2182,15 @@ async fn test_outside_links_point_at_the_viewer_and_are_not_reported() {
         .parent()
         .unwrap()
         .to_path_buf();
+    // Built and encoded the way the server does, so it holds on Windows too
+    // (`C:\…\elsewhere\x.md`, percent-encoded, no `\\?\` prefix).
     let expected_above = format!(
-        "href=\"/.mbr/outside/?path={}\"",
-        parent.join("elsewhere/x.md").display()
+        "href=\"{}\"",
+        mbr::outside_link::viewer_url(&mbr::outside_link::display_path(
+            &parent.join("elsewhere").join("x.md")
+        ))
     );
+    assert_html_not_contains(&html, r"%5C%5C%3F%5C");
     assert_html_contains(&html, &expected_above);
     assert_html_not_contains(&html, "../~/");
 
