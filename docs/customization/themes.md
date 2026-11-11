@@ -191,7 +191,15 @@ Every icon in the interface is an outline drawn in the text colour, and every ic
 }
 ```
 
-The CSS-drawn icons (GitHub alerts, task date chips, the breadcrumb divider) are masks in `--mbr-icon-note`, `--mbr-icon-tip`, `--mbr-icon-important`, `--mbr-icon-warning`, `--mbr-icon-caution`, `--mbr-icon-calendar`, `--mbr-icon-check`, `--mbr-icon-arrow-right` and `--mbr-icon-chevron-right`; override one with any `url("data:image/svg+xml,…")` to change it.
+The CSS-drawn icons (GitHub alerts, task date chips, the breadcrumb divider, link icons) are masks in `--mbr-icon-note`, `--mbr-icon-tip`, `--mbr-icon-important`, `--mbr-icon-warning`, `--mbr-icon-caution`, `--mbr-icon-calendar`, `--mbr-icon-check`, `--mbr-icon-arrow-right`, `--mbr-icon-chevron-right`, `--mbr-icon-globe` and `--mbr-icon-corner-up-right`; override one with any `url("data:image/svg+xml,…")` to change it.
+
+The [link icons](../features/links.md#link-icons) read `--mbr-link-icon-internet` (default `var(--mbr-icon-globe)`) and `--mbr-link-icon-outside` (default `var(--mbr-icon-corner-up-right)`). To turn them off, hide the icon element rather than emptying a variable:
+
+```css
+/* .mbr/user.css */
+.mbr-link-icon { display: none; }                    /* every link icon */
+.mbr-link-internet .mbr-link-icon { display: none; } /* internet links only */
+```
 
 ### Pull Quotes
 

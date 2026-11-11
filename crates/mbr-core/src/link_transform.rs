@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use crate::outside_link::OutsideResolution;
+
 /// Answers "is this absolute site URL served at a directory-style URL?" for an
 /// authored link target that carries no markdown extension.
 ///
@@ -109,6 +111,12 @@ pub struct LinkTransformConfig {
     /// first resolved against [`Self::current_page_url`] — so a probe never
     /// reimplements relative-path arithmetic.
     pub directory_url_probe: Option<DirectoryUrlProbe>,
+    /// How to treat links that leave the repository (`~/…`, or a `../` chain
+    /// climbing above the root): mapped into an accepted symlink mount, else
+    /// pointed at the `/.mbr/outside/` page. `None` — CLI, QuickLook, the link
+    /// tools — leaves a `~` link as authored and a `../` chain as it always
+    /// was. See [`crate::outside_link`].
+    pub outside_links: Option<crate::outside_link::OutsideLinkContext>,
 }
 
 /// Hand-written because [`DirectoryUrlProbe`] is a closure and cannot derive
@@ -122,6 +130,7 @@ impl std::fmt::Debug for LinkTransformConfig {
             .field("url_depth", &self.url_depth)
             .field("current_page_url", &self.current_page_url)
             .field("directory_url_probe", &self.directory_url_probe.is_some())
+            .field("outside_links", &self.outside_links)
             .finish()
     }
 }
@@ -135,6 +144,7 @@ impl Default for LinkTransformConfig {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         }
     }
 }
@@ -159,6 +169,12 @@ impl Default for LinkTransformConfig {
 ///    listing, a tag page)
 /// 6. Relative static files → prepend `../` (if not index file)
 ///
+/// Before rules 4–6, a destination that leaves the repository — `~/…`, or a
+/// `../` chain climbing above the root — is handled by
+/// [`crate::outside_link::resolve`]: mapped into a symlink mount (then treated
+/// as rule 3), else pointed at `/.mbr/outside/?path=…`; without
+/// [`LinkTransformConfig::outside_links`] a `~` link is left as authored.
+///
 /// # Examples
 ///
 /// ```
@@ -171,6 +187,7 @@ impl Default for LinkTransformConfig {
 ///     url_depth: None,
 ///     current_page_url: String::new(),
 ///     directory_url_probe: None,
+///     outside_links: None,
 /// };
 ///
 /// // Regular markdown file: add ../ and trailing slash
@@ -184,6 +201,25 @@ impl Default for LinkTransformConfig {
 /// assert_eq!(transform_link("https://example.com", &config), "https://example.com");
 /// ```
 pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
+    transform(url, config, true)
+}
+
+/// [`transform_link`] for a URL something *loads* — an image or media `src`,
+/// `srcset`, `poster`, a section background — rather than one a reader
+/// follows.
+///
+/// The one difference is a target outside the repository that is not in a
+/// symlink mount: a link to it goes to the `/.mbr/outside/` page, but an
+/// `<img>` pointed at that page would load HTML, so here a `~` source is left
+/// as authored and a `../` chain is transformed as it always was (and loads
+/// nothing). A mounted target maps into the vault exactly as for a link.
+pub fn transform_asset_url(url: &str, config: &LinkTransformConfig) -> String {
+    transform(url, config, false)
+}
+
+/// Shared body of [`transform_link`] and [`transform_asset_url`]; `to_viewer`
+/// says whether an unmapped outside target goes to the `/.mbr/outside/` page.
+fn transform(url: &str, config: &LinkTransformConfig, to_viewer: bool) -> String {
     // Empty or whitespace-only
     if url.is_empty() || url.trim().is_empty() {
         return url.to_string();
@@ -202,6 +238,25 @@ pub fn transform_link(url: &str, config: &LinkTransformConfig) -> String {
     // scheme can no longer be handled here but missed by link tracking.
     if crate::url_path::is_external_url(url) {
         return url.to_string();
+    }
+
+    // Links that leave the repository (`~/…`, a `../` chain above the root):
+    // mapped into a symlink mount, else pointed at the `/.mbr/outside/` page.
+    // Checked before everything relative, which would prefix `../` to them.
+    if !url.starts_with('/') {
+        let relativize = |site_url: String| match config.url_depth {
+            Some(depth) => make_relative_url(&site_url, depth),
+            None => site_url,
+        };
+        match crate::outside_link::resolve(url, config) {
+            Some(OutsideResolution::Unchanged) => return url.to_string(),
+            Some(OutsideResolution::InVault(site_url)) => return relativize(site_url),
+            Some(OutsideResolution::Viewer(viewer)) if to_viewer => return relativize(viewer),
+            // An asset: a home path stays as authored, a `../` chain falls
+            // through to the historical transform below.
+            Some(OutsideResolution::Viewer(_)) if url.starts_with('~') => return url.to_string(),
+            Some(OutsideResolution::Viewer(_)) | None => {}
+        }
     }
 
     // Root-relative URLs: canonicalize against the site root (no `../`
@@ -473,6 +528,7 @@ mod tests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         }
     }
 
@@ -1077,6 +1133,7 @@ mod proptests {
             url_depth: None,
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         }
     }
 
@@ -1400,6 +1457,7 @@ mod browser_resolution_tests {
                 tag_sources,
                 exempt_hidden_dirs: Vec::new(),
             })),
+            outside_links: None,
         }
     }
 
@@ -1605,6 +1663,7 @@ mod browser_resolution_tests {
             url_depth: None,
             current_page_url: "/docs/guide/".to_string(),
             directory_url_probe: None,
+            outside_links: None,
         };
         assert_eq!(
             transform_link("../folder/file", &config),

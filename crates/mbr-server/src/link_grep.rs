@@ -1988,6 +1988,7 @@ mod tests {
                     url_depth: None,
                     current_page_url: (*page_url).to_string(),
                     directory_url_probe: None,
+                    outside_links: None,
                 },
                 None,
                 true,

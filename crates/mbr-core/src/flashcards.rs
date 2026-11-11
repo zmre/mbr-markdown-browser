@@ -1569,6 +1569,7 @@ mod tests {
                 url_depth: None,
                 current_page_url: String::new(),
                 directory_url_probe: None,
+                outside_links: None,
             },
             oembed_cache: None,
             server_mode: true,

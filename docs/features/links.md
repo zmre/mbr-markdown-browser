@@ -115,6 +115,8 @@ Links whose target does not exist are listed in the page-problems panel
 (the ⚠ badge in the header, server and GUI), along with broken images and
 other problems; see
 [Per-Page Error Indicator](../reference/configuration/#per-page-error-indicator--server---gui-only).
+Links to files outside the served folder are not broken links; see
+[Links outside the folder](#links-outside-the-folder).
 
 When a link's target is missing, the panel also offers up to three **Did you
 mean** links: notes elsewhere in the site with the same name (the usual case
@@ -153,3 +155,96 @@ partial.
 ![The Page Problems panel open beside a note, listing one broken internal link](../images/screens/page-errors.png)
 
 *The page-problems panel.*
+
+## Links outside the folder
+
+Notes written in an editor often link to files anywhere on disk:
+
+```markdown
+[Ledgeline TODOs](~/src/sideprojects/ledgeline/TODO.md)
+[Other repo](../../other-repo/README.md)
+```
+
+mbr serves only the folder it was opened on, so it never shows those files.
+It does not treat them as broken links either. A link is **outside** when its
+destination starts with `~` (`~` or `~/…`), or is a relative `../` path that,
+resolved against the note's own location, climbs above the folder's root.
+Deciding this needs only the text of the link: mbr never checks whether the
+target exists, so a note cannot use mbr to find out which files are on your
+disk. A link starting with `/` is not outside (in mbr `/x` means the site
+root), and neither is `file://…`.
+
+An outside link goes one of two ways:
+
+- **Into a mount.** If the target lies inside a folder that a symlink in the
+  repository points to (a read-only [symlink
+  mount](../reference/configuration.md#read-only-symlink-mounts)), the link is rewritten to that file's
+  place in the repository and works like any other link: `~/src/ledgeline/TODO.md`
+  becomes `/ledgeline/TODO/` when `ledgeline` in your notes links to
+  `~/src/ledgeline`. When several mounts contain the target, the most
+  specific one wins.
+- **Everywhere else**, the link opens a small page that names the target
+  ("This note links to `~/src/…`, which is outside the folder this mbr is
+  serving, so it can't be shown here") with a **Copy path** button. Such
+  links carry a small ↱ arrow icon after them (see [Link
+  icons](#link-icons)), and hovering one shows `External: <path>` instead
+  of the page's address. They are not listed in the page-problems
+  panel, are not counted by `--fail-on-broken-links`, and show up as
+  external links in the link explorer and info panel.
+
+In the **GUI**, that page also has an **Open…** button. It shows the usual
+Open dialog in the target's folder (on macOS with the file selected where the
+panel allows it). Whatever you choose there opens in the window **in place of
+the current folder**, exactly like *File → Open…* (`Cmd/Ctrl+O`); cancelling
+leaves everything as it was. mbr never opens the file by itself or hands it to
+another application: the page could have been written by anyone, and handing
+a `.command` or `.app` to the system would run it. The dialog is the step
+where you decide. Server mode and the iOS app show the path and the copy
+button only.
+
+Static builds point these links at the same page (shipped as
+`.mbr/outside/`). There, a `../` link is named relative to the repository's
+root rather than by its full path, so a published site never reveals where it
+was built. Images and other embedded media whose source is outside the folder
+are not rewritten to that page; they simply do not load, unless they are in a
+mount.
+
+## Link icons
+
+A link whose text is not its own address gets a small icon after it, so you
+can tell where it goes before you click:
+
+| Link | Example | Icon |
+|------|---------|------|
+| To another page or file in the folder | `[Setup](setup.md)` | none |
+| To the internet (another site) | `[Docs](https://example.com/docs)` | globe |
+| Out of the folder ([above](#links-outside-the-folder)) | `[TODOs](~/src/x/TODO.md)` | arrow turning right (↱) |
+
+A bare link such as `<https://example.com>`, whose text already is the
+address, gets no icon. Neither do image links, links in code blocks, heading
+permalinks and footnote references. `mailto:` and other application links
+are left as they are. The icons work in the GUI, server mode and static
+builds; they are added shortly after the page loads.
+
+Each link also gets a class you can style: `mbr-link-internal`,
+`mbr-link-internet` or `mbr-link-outside` (`mbr-link-bare` for a bare link),
+and a `data-mbr-link-kind` attribute (`internal`, `internet`, `outside`,
+`other`) on every link. The icon is an empty `<span class="mbr-link-icon">`
+inside the link, drawn by CSS in the link's own colour. mbr's rules have the
+lowest possible specificity, so anything in `.mbr/user.css` wins:
+
+```css
+/* .mbr/user.css */
+
+/* No link icons at all */
+.mbr-link-icon { display: none; }
+
+/* Only hide the globe on internet links */
+.mbr-link-internet .mbr-link-icon { display: none; }
+
+/* Use another icon for links out of the folder */
+:root { --mbr-link-icon-outside: var(--mbr-icon-arrow-right); }
+```
+
+See [Theming](../customization/themes.md#icons-and-icon-buttons) for the
+icon variables.

@@ -462,6 +462,18 @@ impl Templates {
         let tera = self.tera.read();
         Self::render_template_with_tera(&tera, "media_viewer.html", context_data)
     }
+
+    /// Renders `outside.html`, the page `/.mbr/outside/?path=…` links lead to
+    /// (see [`crate::outside_link`]). It takes only the page chrome: the target
+    /// is read from the query by `<mbr-outside-link>`, so the one page serves
+    /// the server and a static build alike.
+    pub fn render_outside_link(
+        &self,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
+        let tera = self.tera.read();
+        Self::render_template_with_tera(&tera, "outside.html", context_data)
+    }
 }
 
 /// Tera `humandate` filter: humanize a date, passing through anything else.
@@ -651,6 +663,8 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         "media_viewer.html",
         include_str!("../templates/media_viewer.html"),
     ),
+    // Where a link out of the repository leads (`/.mbr/outside/`)
+    ("outside.html", include_str!("../templates/outside.html")),
 ];
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ import { fuzzyScore } from './fuzzy.js';
 import { fetchPageLinksResult } from './graph/links-cache.js';
 import type { PageLinks } from './graph/relationship-graph.js';
 import { safeHref } from './safe-href.js';
+import { isOutsideLinkTarget } from './link-kinds.ts';
 import type { MbrOverlay } from './overlay.js';
 import { ICON_BUTTON_CSS } from './controls.ts';
 import { ICON_SM, icon, iconArrowLeft, iconArrowRight, iconArrowUpRight, iconSearch, iconX } from './icons.ts';
@@ -700,8 +701,11 @@ export class MbrFuzzyNavElement extends LitElement implements MbrOverlay {
     // Link items use native <a> for Cmd+Click / middle-click / right-click
     // support. The URL is a raw markdown destination from links.json, so the
     // scheme is filtered before it reaches the href.
-    const href = safeHref(isExternal ? item.url : resolveUrl(item.url));
-    if (isExternal) {
+    // A link out of the vault is external but points at mbr's own
+    // outside-link page, which opens in place like any page of this site.
+    const leavesSite = isExternal && !isOutsideLinkTarget(item.url);
+    const href = safeHref(leavesSite ? item.url : resolveUrl(item.url));
+    if (leavesSite) {
       return html`
         <a
           href=${href}

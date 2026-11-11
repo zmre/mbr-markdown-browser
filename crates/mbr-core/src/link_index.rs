@@ -4,6 +4,7 @@
 //! between markdown pages, enabling wiki-style backlink features.
 
 use crate::link_transform::{LinkTransformConfig, transform_link};
+use crate::outside_link::OutsideResolution;
 use papaya::HashMap as ConcurrentHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -281,6 +282,12 @@ fn resolve_relative_url_parts(
 /// linked as `[x](/note)` showed no backlink, because the index recorded
 /// `/note` and the note's page is `/note/`.
 ///
+/// A destination that leaves the repository (`~/…`, a `../` chain above the
+/// root; see [`crate::outside_link`]) is recorded where the page links: at its
+/// in-vault URL when it lies in a symlink mount, else as an **external** link
+/// to the `/.mbr/outside/` viewer — never as an internal link to a page that
+/// does not exist, which would grow a phantom backlink.
+///
 /// Links with an empty target are dropped. The renderer splits `#anchor` off
 /// the destination before storing it, so an anchor-only link like
 /// `[Top](#top)` arrives as `to: ""` with `anchor: Some("#top")`. Such a link
@@ -301,9 +308,23 @@ pub fn resolve_outbound_links(
             }
             if link.to.starts_with('/') {
                 link.to = crate::link_transform::canonicalize_root_relative(&link.to, page);
-            } else {
-                let href = transform_link(&link.to, page);
-                link.to = resolve_relative_url(base_url, &href, true);
+                return link;
+            }
+            // A link out of the repository: a mounted target is recorded at
+            // its in-vault page URL like any internal link; anything else is
+            // not a link to a page here, so it is recorded as external (at the
+            // viewer route the page links to, when there is one).
+            match crate::outside_link::resolve(&link.to, page) {
+                Some(OutsideResolution::InVault(site_url)) => link.to = site_url,
+                Some(OutsideResolution::Viewer(viewer)) => {
+                    link.to = viewer;
+                    link.internal = false;
+                }
+                Some(OutsideResolution::Unchanged) => link.internal = false,
+                None => {
+                    let href = transform_link(&link.to, page);
+                    link.to = resolve_relative_url(base_url, &href, true);
+                }
             }
             link
         })
@@ -1244,6 +1265,7 @@ mod tests {
             url_depth: None,
             current_page_url: url.to_string(),
             directory_url_probe: None,
+            outside_links: None,
         }
     }
 

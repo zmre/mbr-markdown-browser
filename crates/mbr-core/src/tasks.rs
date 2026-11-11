@@ -3502,6 +3502,39 @@ mod tests {
         assert_eq!(parse("- [ ] x🔺").text, "x🔺");
     }
 
+    /// Regression (proptest shrink `📅 🔺 2026-10-31`): a date emoji and a date
+    /// with another annotation **between** them are not a date annotation —
+    /// the grammar is glyph, optional U+FE0F, blanks, date, and nothing else
+    /// may sit in the gap (Obsidian Tasks does not read it either). The token
+    /// in the gap is still an annotation of its own and is lifted, so what is
+    /// left is the author's prose: it may *look* like `📅 2026-10-31`, but it
+    /// was never one, and removing a later pass's token must not promote it
+    /// into a due date.
+    #[test]
+    fn an_annotation_between_a_date_emoji_and_its_date_does_not_make_a_due() {
+        for (line, priority, tags) in [
+            ("- [ ] 📅 🔺 2026-10-31", TaskPriority::Urgent, &[][..]),
+            ("- [ ] 📅 !! 2026-10-31", TaskPriority::High, &[][..]),
+            (
+                "- [ ] 📅 #work 2026-10-31",
+                TaskPriority::Normal,
+                &["work"][..],
+            ),
+        ] {
+            let task = parse(line);
+            assert_eq!(task.due, None, "{line:?}");
+            assert_eq!(task.priority, priority, "{line:?}");
+            assert_eq!(task.tags, tags, "{line:?}");
+            assert_eq!(task.text, "📅 2026-10-31", "{line:?}");
+        }
+        // The same gap rule in the `@due(...)` notation: the payload as written
+        // is not a datetime, so it stays prose once the tag is lifted from it.
+        let task = parse("- [ ] @due(2026-10-31 #work 09:30)");
+        assert_eq!(task.due, None);
+        assert_eq!(task.tags, ["work"]);
+        assert_eq!(task.text, "@due(2026-10-31 09:30)");
+    }
+
     #[test]
     fn dataview_fields_are_read_and_stripped() {
         let task = parse(
@@ -3880,17 +3913,26 @@ SCHEDULED: <2026-10-29>
         /// the literal `@due(`, because an unparseable payload is deliberately
         /// left verbatim — see [`strip_annotations`]. So the check is: whatever
         /// `@due(...)`-shaped text remains must not parse as a datetime.
+        ///
+        /// It is checked on the date pass's output, not on the final text: a
+        /// date annotation is one *as written*, and a later pass lifting a tag
+        /// or priority out of a non-annotation (`@due(2026-08-05 #a 12:05)`)
+        /// leaves prose that may look like one but never was — see
+        /// `an_annotation_between_a_date_emoji_and_its_date_does_not_make_a_due`.
+        /// The final text only differs from the date pass's by those lifted
+        /// tokens and whitespace.
         #[test]
         fn display_text_keeps_no_recognised_annotation(s in taskish_text()) {
+            let dated = strip_date_annotations(&s, &mut Annotations::default());
+            for caps in INLINE_DATE.captures_iter(&dated) {
+                prop_assert!(
+                    recognise(&caps).is_none(),
+                    "recognised annotation survived the date pass in {:?}",
+                    dated
+                );
+            }
             let line = format!("- [ ] {s}");
             if let Some(task) = parse_task_line(&line, 1) {
-                for caps in INLINE_DATE.captures_iter(&task.text) {
-                    prop_assert!(
-                        recognise(&caps).is_none(),
-                        "recognised annotation survived in {:?}",
-                        task.text
-                    );
-                }
                 prop_assert!(
                     !task.text.split_whitespace().any(|t| t == "!!" || t == "!!!"),
                     "standalone priority marker survived in {:?}",
@@ -4063,10 +4105,9 @@ SCHEDULED: <2026-10-29>
         }
     }
 
-    /// An alphabet that can spell every compatible notation. No `#`: a tag
-    /// stripped from inside an unparseable `@due( #x 2026-…)` payload can turn
-    /// it into a valid one, a known gap of the tag pass that predates these
-    /// notations and is out of scope here.
+    /// An alphabet that can spell every compatible notation, tags included: a
+    /// tag lifted from inside a non-annotation (`📅 #x 2026-…`) leaves prose,
+    /// which is what the display-text property allows for.
     fn compat_taskish_text() -> impl Strategy<Value = String> {
         proptest::collection::vec(
             prop::sample::select(vec![
@@ -4074,6 +4115,7 @@ SCHEDULED: <2026-10-29>
                 " ",
                 "\t",
                 "@",
+                "#",
                 "(",
                 ")",
                 "[",
@@ -4139,19 +4181,25 @@ SCHEDULED: <2026-10-29>
             let _ = scan_source_tasks(&format!("- [ ] x\n{s}"));
         }
 
-        /// No recognised annotation, in any notation, survives into the
-        /// display text, and neither does a standalone priority emoji.
+        /// No recognised annotation, in any notation, survives the date pass,
+        /// and no standalone priority emoji survives into the display text.
+        ///
+        /// Checked on the date pass's output for the reason given at
+        /// `display_text_keeps_no_recognised_annotation`: `📅 🔺 2026-10-31`
+        /// holds one annotation, the `🔺`, and the `📅 2026-10-31` left once it
+        /// is lifted is prose, not a due date that survived.
         #[test]
         fn display_text_keeps_no_recognised_compat_annotation(s in compat_taskish_text()) {
+            let dated = strip_date_annotations(&s, &mut Annotations::default());
+            for caps in INLINE_DATE.captures_iter(&dated) {
+                prop_assert!(
+                    recognise(&caps).is_none(),
+                    "recognised annotation survived the date pass in {:?}",
+                    dated
+                );
+            }
             let line = format!("- [ ] {s}");
             if let Some(task) = parse_task_line(&line, 1) {
-                for caps in INLINE_DATE.captures_iter(&task.text) {
-                    prop_assert!(
-                        recognise(&caps).is_none(),
-                        "recognised annotation survived in {:?}",
-                        task.text
-                    );
-                }
                 prop_assert!(
                     !task.text.split_whitespace().any(|t| emoji_priority(t).is_some()),
                     "standalone priority emoji survived in {:?}",

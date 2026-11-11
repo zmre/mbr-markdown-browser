@@ -367,6 +367,18 @@ describe('mount gating outside GUI mode', () => {
     expect(anchor.hasAttribute('data-tooltip')).toBe(false)
   })
 
+  it('names the target of an outside link in the GUI tooltip', () => {
+    const outside = main.appendChild(document.createElement('a'))
+    outside.setAttribute('href', '../../.mbr/outside/?path=~/src/my%20repo/TODO.md')
+    const page = main.appendChild(document.createElement('a'))
+    page.setAttribute('href', '/docs/other/')
+
+    mount(true)
+
+    expect(outside.getAttribute('data-tooltip')).toBe('External: ~/src/my repo/TODO.md')
+    expect(page.getAttribute('data-tooltip')).toBe('/docs/other/')
+  })
+
   // The positive control. Without it the tests above would still pass if the
   // element stopped working entirely.
   it('does hand off the click in GUI mode', () => {

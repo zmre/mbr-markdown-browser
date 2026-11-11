@@ -2111,12 +2111,13 @@ async fn test_errors_json_reports_non_canonical_and_escaping_links() {
     // Raw HTML hrefs go through the link transform like markdown links (a
     // root-relative page link gains its trailing slash), but an *unquoted*
     // value is left as written, which is how a hand-authored non-canonical URL
-    // still reaches the page. The relative escape gains the page's
-    // trailing-slash `../`, and is reported as emitted.
+    // or a `../` chain above the root still reaches the page (a quoted one is
+    // an outside link, pointed at `/.mbr/outside/`), and is reported as
+    // emitted.
     repo.create_markdown(
         "docs/guide.md",
         "# Guide\n\n<a href=/folder/file>no trailing slash</a>\n\n\
-         <a href=\"../../../escape/target/\">above root</a>\n\n\
+         <a href=../../../escape/target/>above root</a>\n\n\
          <a href=\"/folder/file/\">canonical</a>\n",
     );
     repo.create_markdown("folder/file.md", "# File");
@@ -2142,13 +2143,173 @@ async fn test_errors_json_reports_non_canonical_and_escaping_links() {
         "a page link with no trailing slash must be reported: {errors:?}"
     );
     assert!(
-        targets.contains(&"../../../../escape/target/"),
+        targets.contains(&"../../../escape/target/"),
         "a link escaping the repository root must be reported: {errors:?}"
     );
     assert!(
         !targets.contains(&"/folder/file/"),
         "the canonical spelling must not be reported: {errors:?}"
     );
+}
+
+/// Links out of the repository — `~/…` and a `../` chain above the root — are
+/// not broken links: they point at `/.mbr/outside/`, which serves, and
+/// `errors.json` reports none of them. A target under a symlink mount becomes
+/// the mount's in-vault page instead.
+#[tokio::test]
+async fn test_outside_links_point_at_the_viewer_and_are_not_reported() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/projects.md",
+        "# Projects\n\n[todo](~/src/ledgeline/TODO.md#next)\n\n\
+         [above](../../elsewhere/x.md)\n\n\
+         <a href=\"../../raw.md\">raw</a>\n",
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/notes/projects/").await;
+    assert_html_contains(
+        &html,
+        "href=\"/.mbr/outside/?path=~/src/ledgeline/TODO.md\"",
+    );
+    // The local server names a `../` escape by the absolute path it resolves to.
+    let parent = repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    // Built and encoded the way the server does, so it holds on Windows too
+    // (`C:\…\elsewhere\x.md`, percent-encoded, no `\\?\` prefix).
+    let expected_above = format!(
+        "href=\"{}\"",
+        mbr::outside_link::viewer_url(&mbr::outside_link::display_path(
+            &parent.join("elsewhere").join("x.md")
+        ))
+    );
+    assert_html_not_contains(&html, r"%5C%5C%3F%5C");
+    assert_html_contains(&html, &expected_above);
+    assert_html_not_contains(&html, "../~/");
+
+    let viewer = server.get_no_redirect("/.mbr/outside/?path=~/x.md").await;
+    assert_eq!(viewer.status(), 200);
+    let body = viewer.text().await.unwrap();
+    assert_html_contains(&body, "<mbr-outside-link>");
+    assert_html_not_contains(&body, "~/x.md");
+
+    let json: serde_json::Value = server
+        .get("/notes/projects/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let broken: Vec<&serde_json::Value> = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "broken_internal_link")
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "outside links are not broken: {broken:?}"
+    );
+
+    // links.json records them as external links to the viewer, never as
+    // internal links to pages that do not exist.
+    let links: serde_json::Value = server
+        .get("/notes/projects/links.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let outbound = links["outbound"].as_array().unwrap();
+    assert!(
+        outbound.iter().all(|l| l["internal"] == false),
+        "no outside link is internal: {outbound:?}"
+    );
+}
+
+/// An outside link whose target lies under a symlink mount is the mount's
+/// in-vault page, in the HTML and in `links.json`.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_outside_link_into_a_mount_becomes_the_in_vault_page() {
+    let outside = tempfile::Builder::new()
+        .prefix("mbr-outside-mount-")
+        .tempdir()
+        .unwrap();
+    let project = outside.path().join("ledgeline");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("TODO.md"), "# Todo\n").unwrap();
+
+    let repo = TestRepo::new();
+    std::os::unix::fs::symlink(&project, repo.path().join("ledgeline")).unwrap();
+    let canonical = project.canonicalize().unwrap();
+    // An absolute target is written relative to the root's parent, as a note
+    // beside both folders would link it.
+    let root_parent = repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let relative = pathdiff_like(&canonical.join("TODO.md"), &root_parent);
+    repo.create_markdown(
+        "projects.md",
+        &format!("# Projects\n\n[todo](../{relative}#next)\n"),
+    );
+
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let html = server.get_text("/projects/").await;
+    assert_html_contains(&html, "href=\"/ledgeline/TODO/#next\"");
+    assert_eq!(
+        server.get_no_redirect("/ledgeline/TODO/").await.status(),
+        200
+    );
+
+    let json: serde_json::Value = server
+        .get("/projects/errors.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "broken_internal_link"),
+        "{json}"
+    );
+    let links: serde_json::Value = server
+        .get("/projects/links.json")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        links["outbound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["to"] == "/ledgeline/TODO/" && l["internal"] == true),
+        "{links}"
+    );
+}
+
+/// `path` relative to `base` when `base` is one of its ancestors.
+#[cfg(unix)]
+fn pathdiff_like(path: &std::path::Path, base: &std::path::Path) -> String {
+    path.strip_prefix(base)
+        .expect("base is an ancestor")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The complement: a page whose links are all canonical reports nothing, so the
