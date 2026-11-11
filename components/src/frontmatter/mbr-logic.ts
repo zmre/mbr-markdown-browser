@@ -168,6 +168,127 @@ export function newEdge(): FmValue {
   return { type: null, to: null };
 }
 
+// ----------------------------------------------------------------------------
+// The map shorthand (relationships.rs `parse_relationship_map`)
+// ----------------------------------------------------------------------------
+
+/**
+ * How `relationships` is written: the list of `{type, to, …}` edges, the map
+ * shorthand (`reports_to: "[[X]]"`, `manages: ["[[A]]", "[[B]]"]`), or
+ * nothing yet (a new value is a list).
+ */
+export function relationshipsShape(value: FmValue | undefined): 'list' | 'map' | 'empty' {
+  if (Array.isArray(value)) return 'list';
+  return isObj(value) ? 'map' : 'empty';
+}
+
+/**
+ * One edge of the map shorthand: its key is the type, the value at
+ * `valuePath` the note (a string, or empty). `index` is set for an item of
+ * a key holding a list. A value the shorthand does not read (a nested map,
+ * a number) is `raw`: relationships.rs skips it, the form shows it as is.
+ */
+export interface MapEdgeRow {
+  readonly type: string;
+  readonly value: FmValue;
+  readonly valuePath: FmPath;
+  readonly index?: number;
+  readonly raw: boolean;
+}
+
+const isNoteValue = (v: FmValue | undefined): boolean => v === null || v === undefined || typeof v === 'string';
+
+/** The edges of a map-form value in authored order, one per target (see {@link mapEdgesAsList}). */
+export function mapEdgeRows(value: FmValue | undefined, fieldPath: FmPath): MapEdgeRow[] {
+  if (!isObj(value)) return [];
+  return Object.entries(value).flatMap(([type, v]): MapEdgeRow[] =>
+    Array.isArray(v)
+      ? v.map((item, index) => ({ type, value: item, valuePath: [...fieldPath, type, index], index, raw: !isNoteValue(item) }))
+      : [{ type, value: v, valuePath: [...fieldPath, type], raw: !isNoteValue(v) }],
+  );
+}
+
+/** A map-form row as the edge row reads it (`to` only: the shorthand has no label, `from` or attributes). */
+export function mapEdgeView(row: MapEdgeRow): EdgeView {
+  return { type: row.type, to: scalarText(row.value), from: '', label: '', hasTo: true, hasFrom: false, attributes: [] };
+}
+
+/**
+ * The list form of a map-form value, one item per {@link mapEdgeRows} row in
+ * the same order (so a row's index is its edge's index after conversion):
+ * `{type, to}`, or for a raw map value `{type, …map}`, nothing dropped.
+ */
+export function mapEdgesAsList(value: FmValue | undefined): FmValue[] {
+  return mapEdgeRows(value, []).map((row): FmValue => (isObj(row.value) ? { type: row.type, ...row.value } : { type: row.type, to: row.value ?? null }));
+}
+
+/**
+ * Rewrites a map-form `relationships` as the list form, for an edit the
+ * shorthand cannot hold (a label, `from`, an attribute). Only the value is
+ * rewritten (`setValue`): bytes outside it stay, so the model is not
+ * `normalized`; comments inside the old map do not survive.
+ */
+export function relationshipsToList(model: FrontmatterModel, fieldPath: FmPath): FrontmatterModel {
+  const current = getIn(model, fieldPath);
+  return relationshipsShape(current) === 'map' ? setValue(model, fieldPath, mapEdgesAsList(current)) : model;
+}
+
+/** Sets row `i`'s note (an empty note leaves the key or item, empty). */
+export function setMapEdgeNote(model: FrontmatterModel, fieldPath: FmPath, i: number, note: string): FrontmatterModel {
+  const row = mapEdgeRows(getIn(model, fieldPath), fieldPath)[i];
+  return row ? setScalar(model, row.valuePath, note.trim() === '' ? null : note) : model;
+}
+
+/** Removes row `i`: its list item, or its key when it was the key's only target. */
+export function removeMapEdge(model: FrontmatterModel, fieldPath: FmPath, i: number): FrontmatterModel {
+  const row = mapEdgeRows(getIn(model, fieldPath), fieldPath)[i];
+  if (!row) return model;
+  const keyPath = [...fieldPath, row.type];
+  const siblings = getIn(model, keyPath);
+  if (row.index !== undefined && Array.isArray(siblings) && siblings.length > 1) return removeItem(model, keyPath, row.index);
+  return removeKey(model, keyPath);
+}
+
+/**
+ * Files `note` under `type` in a map-form value: a new key, a key with no
+ * note yet takes it, a key with one note becomes a list of both (the old
+ * one keeps its own bytes), a list gains an item.
+ */
+export function addMapEdge(model: FrontmatterModel, fieldPath: FmPath, type: string, note: FmValue): FrontmatterModel {
+  const keyPath = [...fieldPath, type];
+  const current = getIn(model, keyPath);
+  if (current === undefined) return addKey(model, fieldPath, type, note);
+  if (current === null) return setValue(model, keyPath, note);
+  return addToSingleOrList(model, keyPath, note);
+}
+
+/**
+ * Changes row `i`'s type, keeping the shape: a key's only note renames the
+ * key (it keeps its place); otherwise the note moves to `type` (see
+ * {@link addMapEdge}), its old key losing it (and going when emptied). A
+ * map key cannot be empty, so an empty type changes nothing.
+ */
+export function setMapEdgeType(model: FrontmatterModel, fieldPath: FmPath, i: number, type: string): FrontmatterModel {
+  const next = type.trim();
+  const row = mapEdgeRows(getIn(model, fieldPath), fieldPath)[i];
+  if (!row || !next || next === row.type) return model;
+  const map = getIn(model, fieldPath) as Obj;
+  if (row.index === undefined && !(next in map)) return renameKey(model, [...fieldPath, row.type], next);
+  return addMapEdge(removeMapEdge(model, fieldPath, i), fieldPath, next, row.value);
+}
+
+/**
+ * A type for a new map-form edge: the first registry type no key uses yet
+ * (the reader then picks the right one, as with a labeled value's label).
+ */
+export function freshRelationType(value: FmValue | undefined, registry: readonly RelationTypeConfig[]): string {
+  const used = isObj(value) ? Object.keys(value) : [];
+  return freshLabel(
+    used,
+    registry.map((t) => t.name),
+  );
+}
+
 // ============================================================================
 // Labeled values (contact.rs `labeled_values`, `labeled_item`)
 // ============================================================================

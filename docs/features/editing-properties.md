@@ -158,6 +158,17 @@ relationship (`married:`, `place:`) is kept and shown as an ordinary row under
 it. A type that is not in the registry is allowed, with a warning that no
 reverse relationship will be derived.
 
+Relationships written in the [short form](relationships/#the-short-form)
+(`reports_to: "[[Hemant Kataria]]"`) show as the same rows and are edited in
+that form: changing a type renames its key (or moves the note under the key
+that type already has, making a list when it holds two), changing a note edits
+just that value, removing a row removes the value (and its key once empty), and
+**Add relationship** adds a key with the first type not used yet. A label, a
+flipped direction or an attribute cannot be written in the short form, so the
+first one rewrites the whole `relationships` value as a list (the rest of your
+frontmatter is untouched) and the form says so. A new `relationships` is
+always a list.
+
 ### Contact fields
 
 When `type` is `person` or `organization`, the form offers the

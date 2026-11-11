@@ -829,13 +829,19 @@ fn company_employer_relationship(hash: &yaml_rust2::yaml::Hash) -> Option<RawRel
     })
 }
 
-/// Parses the explicit `relationships:` array. See [`parse_relationships`].
+/// Parses the explicit `relationships:` value. See [`parse_relationships`].
+///
+/// Two shapes are accepted: the list form (an array of
+/// `{type, to|from, label, …attrs}` mappings) and the map shorthand
+/// (`reports_to: "[[X]]"` / `manages: ["[[A]]", "[[B]]"]`, see
+/// [`parse_relationship_map`]).
 fn parse_declared_relationships(hash: &yaml_rust2::yaml::Hash) -> Vec<RawRelationship> {
     let rel_key = Yaml::String("relationships".to_string());
     let items = match hash.get(&rel_key) {
         Some(Yaml::Array(items)) => items,
+        Some(Yaml::Hash(map)) => return parse_relationship_map(map),
         Some(_) => {
-            tracing::warn!("`relationships` frontmatter is not an array; ignoring");
+            tracing::warn!("`relationships` frontmatter is neither a list nor a map; ignoring");
             return Vec::new();
         }
         None => return Vec::new(),
@@ -888,6 +894,49 @@ fn parse_declared_relationships(hash: &yaml_rust2::yaml::Hash) -> Vec<RawRelatio
         });
     }
     out
+}
+
+/// Parses the map shorthand of `relationships:`: each key is a relation type
+/// and its value one target (a string) or several (a list of strings).
+///
+/// Every target becomes exactly the edge the list form's
+/// `- type: <key>\n  to: <target>` would, so resolution, inverses, dedup and
+/// cycles need no second path. The shorthand cannot carry a `label`, a `from`
+/// endpoint or edge attributes; those need the list form. Empty keys, empty or
+/// non-string targets and nested mappings are skipped with a warning, in YAML
+/// mapping order otherwise.
+fn parse_relationship_map(map: &yaml_rust2::yaml::Hash) -> Vec<RawRelationship> {
+    let edge = |rel_type: &str, target: &Yaml| -> Option<RawRelationship> {
+        let Some(to) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            tracing::warn!(
+                "skipping `relationships.{rel_type}` target that is not a non-empty string"
+            );
+            return None;
+        };
+        Some(RawRelationship {
+            rel_type: rel_type.to_string(),
+            to: Some(to.to_string()),
+            from: None,
+            label: None,
+            attributes: BTreeMap::new(),
+            implicit: false,
+        })
+    };
+    map.iter()
+        .flat_map(|(key, value)| {
+            let Some(rel_type) = key.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                tracing::warn!("skipping `relationships` map entry with a missing/empty type");
+                return Vec::new();
+            };
+            match value {
+                Yaml::Array(targets) => targets
+                    .iter()
+                    .filter_map(|target| edge(rel_type, target))
+                    .collect(),
+                other => edge(rel_type, other).into_iter().collect(),
+            }
+        })
+        .collect()
 }
 
 /// Converts a `yaml_rust2::Yaml` value to a `serde_json::Value`, preserving
@@ -2018,6 +2067,93 @@ mod tests {
     fn parse_non_array_relationships_ignored() {
         let yaml = parse_yaml("relationships: not-an-array\n");
         assert!(parse_relationships(&yaml).is_empty());
+    }
+
+    #[test]
+    fn parse_map_form_single_target() {
+        let yaml = parse_yaml("relationships:\n  reports_to: \"[[Hemant Kataria]]\"\n");
+        assert_eq!(
+            parse_relationships(&yaml),
+            vec![rel_to("reports_to", "[[Hemant Kataria]]")]
+        );
+    }
+
+    #[test]
+    fn parse_map_form_equals_list_form() {
+        let map = parse_yaml("relationships:\n  manages: \"[[A]]\"\n  spouse: notes/b.md\n");
+        let list = parse_yaml(
+            "relationships:\n  - type: manages\n    to: \"[[A]]\"\n  - type: spouse\n    to: notes/b.md\n",
+        );
+        assert_eq!(parse_relationships(&map), parse_relationships(&list));
+    }
+
+    #[test]
+    fn parse_map_form_list_of_targets_in_order() {
+        let yaml = parse_yaml(
+            "relationships:\n  manages: [\"[[A]]\", \"[[B]]\"]\n  child:\n    - \"[[C]]\"\n",
+        );
+        assert_eq!(
+            parse_relationships(&yaml),
+            vec![
+                rel_to("manages", "[[A]]"),
+                rel_to("manages", "[[B]]"),
+                rel_to("child", "[[C]]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_map_form_keeps_company_implicit_edge() {
+        let yaml = parse_yaml(
+            "type: person\ncompany: \"[[Zendesk]]\"\nrelationships:\n  reports_to: \"[[H]]\"\n",
+        );
+        let rels = parse_relationships(&yaml);
+        assert_eq!(rels.len(), 2);
+        assert_eq!(rels[0], rel_to("reports_to", "[[H]]"));
+        assert_eq!(rels[1].rel_type, COMPANY_RELATION_TYPE);
+        assert!(rels[1].implicit);
+    }
+
+    #[test]
+    fn parse_map_form_skips_malformed_values() {
+        let yaml = parse_yaml(
+            "relationships:\n  \"\": \"[[Empty Key]]\"\n  \"  \": \"[[Blank Key]]\"\n  empty: \"\"\n  null_target:\n  number: 42\n  nested:\n    to: \"[[X]]\"\n  mixed: [\"[[Ok]]\", 7, \"\", {to: y}, \"  \"]\n  \" spaced \": \" [[Trim]] \"\n",
+        );
+        assert_eq!(
+            parse_relationships(&yaml),
+            vec![rel_to("mixed", "[[Ok]]"), rel_to("spaced", "[[Trim]]")]
+        );
+    }
+
+    #[test]
+    fn map_form_repro_links_manager_and_report_once() {
+        // The issue's vault: one side writes `reports_to`, the other `manages`,
+        // both in the map shorthand.
+        let reg = RelationTypeRegistry::from_types(&crate::config::default_relationship_types());
+        let anunay = parse_relationships(&parse_yaml(
+            "type: person\nrelationships:\n  reports_to: \"[[Hemant Kataria]]\"\n",
+        ));
+        let hemant = parse_relationships(&parse_yaml(
+            "type: person\nrelationships:\n  manages: \"[[Anunay Sinha]]\"\n",
+        ));
+        let notes = vec![
+            note("/anunay-sinha/", "Anunay Sinha", "anunay-sinha", anunay),
+            note(
+                "/hemant-kataria/",
+                "Hemant Kataria",
+                "hemant-kataria",
+                hemant,
+            ),
+        ];
+        let map = build_relationship_map(&notes, &reg, &["md".to_string()]);
+        let a = &map["/anunay-sinha/"];
+        let h = &map["/hemant-kataria/"];
+        assert_eq!(a.len(), 1, "one deduped edge on Anunay: {a:?}");
+        assert_eq!(h.len(), 1, "one deduped edge on Hemant: {h:?}");
+        assert_eq!(a[0].predicate, "reports_to");
+        assert_eq!(a[0].neighbor, "/hemant-kataria/");
+        assert_eq!(h[0].predicate, "manages");
+        assert_eq!(h[0].neighbor, "/anunay-sinha/");
     }
 
     // ----- registry -----

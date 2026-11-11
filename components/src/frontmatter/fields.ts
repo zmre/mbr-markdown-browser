@@ -237,7 +237,7 @@ function relationshipsField(types: readonly RelationTypeConfig[]): FieldDef {
     kind: 'relationships',
     label: 'Relationships',
     group: 'mbr',
-    help: '`type` plus `to: [[Note]]` reads "Note is my <type>"; `from` reads "I am Note’s <type>". Other keys are edge attributes.',
+    help: '`type` plus `to: [[Note]]` reads "Note is my <type>"; `from` reads "I am Note’s <type>". Other keys are edge attributes. The short form `<type>: "[[Note]]"` means the same as `type` + `to`.',
     item: {
       key: '',
       kind: 'map',
@@ -485,7 +485,22 @@ function applies(def: FieldDef, fm: Frontmatter): boolean {
 }
 
 /** The definition for one step below `def` (not for labeled fields: see {@link fieldFor}). */
+/**
+ * A note under a type in the map shorthand of `relationships`
+ * (`reports_to: "[[X]]"`, or one item of `manages: [...]`).
+ */
+export const RELATIONSHIP_MAP_TARGET: FieldDef = {
+  key: '',
+  kind: 'wikilink',
+  label: 'Note',
+  group: 'mbr',
+  help: 'The object: "Note is my <type>". A label, `from` or attributes need the list form.',
+  item: { key: '', kind: 'wikilink', label: 'Note', group: 'mbr' },
+};
+
 function childDef(def: FieldDef, seg: string | number): FieldDef | undefined {
+  // The map shorthand: `relationships.<type>` is a note (or a list of them).
+  if (def.kind === 'relationships' && typeof seg === 'string') return RELATIONSHIP_MAP_TARGET;
   if (typeof seg === 'number') return def.item;
   // `verified: {by, at}` written as a single map reads as its item.
   if (def.singleOrList && def.item?.children) return def.item.children.find((c) => c.key === seg);
@@ -675,13 +690,18 @@ export function validate(frontmatter: Frontmatter, catalog: FieldCatalog): Field
     if (def.kind === 'datetime' && typeof value === 'string' && value.trim() !== '' && !hasUtcOffset(value)) {
       hints.push({ path, message: 'Timestamps should carry a UTC offset (Z or ±HH:MM).' });
     }
-    if (def.kind === 'relationships' && Array.isArray(value)) {
-      value.forEach((edge, i) => {
-        const type = edge && typeof edge === 'object' ? (edge as Record<string, unknown>).type : undefined;
-        if (typeof type === 'string' && type.trim() && registry.size > 0 && !registry.has(type.trim().toLowerCase())) {
-          hints.push({ path: [...path, i, 'type'], message: `“${type}” is not in relationship_types; no inverse edge is derived.` });
-        }
-      });
+    if (def.kind === 'relationships' && value && typeof value === 'object') {
+      const unknownType = (type: unknown): boolean => typeof type === 'string' && type.trim() !== '' && registry.size > 0 && !registry.has(type.trim().toLowerCase());
+      const message = (type: string) => `“${type}” is not in relationship_types; no inverse edge is derived.`;
+      if (Array.isArray(value)) {
+        value.forEach((edge, i) => {
+          const type = edge && typeof edge === 'object' ? (edge as Record<string, unknown>).type : undefined;
+          if (unknownType(type)) hints.push({ path: [...path, i, 'type'], message: message(type as string) });
+        });
+      } else {
+        // The map shorthand: each key is a type.
+        for (const type of Object.keys(value)) if (unknownType(type)) hints.push({ path: [...path, type], message: message(type) });
+      }
     }
     const items = Array.isArray(value) ? value.map((v, i) => [i, v] as const) : def.singleOrList && value && typeof value === 'object' ? [[null, value] as const] : [];
     if (def.item && (def.kind === 'list' || def.kind === 'relationships')) {

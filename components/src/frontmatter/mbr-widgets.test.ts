@@ -206,6 +206,113 @@ describe('relationships', () => {
   });
 });
 
+describe('relationships map shorthand', () => {
+  const head = 'title: Anunay\nrelationships:\n';
+  const text = `${head}  reports_to: "[[Hemant Kataria]]" # boss\n  manages: ["[[A]]", "[[B]]"]\ntags: [x]\n`;
+  const notes = (el: MbrFmEditor) => [...value(el, ['relationships']).querySelectorAll<MbrFmCombobox>('.fm-wikilink')].map((c) => c.value);
+  const types = (el: MbrFmEditor) => [...value(el, ['relationships']).querySelectorAll<MbrFmCombobox>('.fm-edge-type')].map((c) => c.value);
+
+  it('draws one row per target, with its sentence', async () => {
+    const { el } = await mountMbr(text);
+    expect(types(el)).toEqual(['reports_to', 'manages', 'manages']);
+    expect(notes(el)).toEqual(['[[Hemant Kataria]]', '[[A]]', '[[B]]']);
+    expect(edge(el, 0).querySelector('.fm-edge-sentence')!.textContent).toBe('Anunay reports to Hemant Kataria · Hemant Kataria manages Anunay');
+    expect(edge(el, 0).querySelector<HTMLInputElement>('.fm-edge-invert input')!.checked).toBe(false);
+  });
+
+  it('edits a note in place', async () => {
+    const { el } = await mountMbr(text);
+    commit(combo(edge(el, 2), '.fm-wikilink'), '[[C]]', 'pick');
+    await settle(el);
+    expect(el.text).toBe(text.replace('"[[B]]"', '"[[C]]"'));
+  });
+
+  it('renames the key on a committed type, never while typing', async () => {
+    const { el } = await mountMbr(text);
+    const typeCombo = combo(edge(el, 0), '.fm-edge-type');
+    typeCombo.dispatchEvent(new CustomEvent('fm-combo-input', { detail: { value: 'ma' }, bubbles: true }));
+    await settle(el);
+    expect(el.text).toBe(text);
+    commit(typeCombo, 'assists', 'pick');
+    await settle(el);
+    expect(el.text).toBe(text.replace('reports_to:', 'assists:'));
+  });
+
+  it('moves a note to a type that is already there', async () => {
+    const { el } = await mountMbr(text);
+    commit(combo(edge(el, 0), '.fm-edge-type'), 'manages', 'pick');
+    await settle(el);
+    expect(el.text).toBe(`${head}  manages: ["[[A]]", "[[B]]", "[[Hemant Kataria]]"]\ntags: [x]\n`);
+  });
+
+  it('removes a row: a list item, then the key with its last note', async () => {
+    const { el } = await mountMbr(text);
+    edge(el, 1).querySelector<HTMLButtonElement>('[aria-label="Remove relationship 2"]')!.click();
+    await settle(el);
+    expect(el.text).toBe(text.replace('["[[A]]", "[[B]]"]', '["[[B]]"]'));
+    edge(el, 0).querySelector<HTMLButtonElement>('[aria-label="Remove relationship 1"]')!.click();
+    await settle(el);
+    expect(el.text).toBe(`${head}  manages: ["[[B]]"]\ntags: [x]\n`);
+  });
+
+  it('adds a row as a key, in the shorthand', async () => {
+    const { el } = await mountMbr(text, (e) => {
+      e.siteFiles = [{ url_path: '/people/sam/', frontmatter: { title: 'Sam' } }];
+    });
+    button(value(el, ['relationships']), 'Add relationship').click();
+    await settle(el);
+    expect(el.text).toBe(`${head}  reports_to: "[[Hemant Kataria]]" # boss\n  manages: ["[[A]]", "[[B]]"]\n  parent:\ntags: [x]\n`);
+    commit(combo(edge(el, 3), '.fm-wikilink'), '[[Sam]]', 'pick');
+    await settle(el);
+    commit(combo(edge(el, 3), '.fm-edge-type'), 'colleague', 'pick');
+    await settle(el);
+    expect(el.text).toBe(`${head}  reports_to: "[[Hemant Kataria]]" # boss\n  manages: ["[[A]]", "[[B]]"]\n  colleague: "[[Sam]]"\ntags: [x]\n`);
+  });
+
+  it('turns into the list form for a label, keeping the row, and says so', async () => {
+    const { el } = await mountMbr(text);
+    const label = edge(el, 1).querySelector<HTMLInputElement>('input.fm-edge-label')!;
+    type(label, 'W');
+    await settle(el);
+    expect(el.text).toBe(
+      `${head}  - type: reports_to\n    to: "[[Hemant Kataria]]"\n  - type: manages\n    to: "[[A]]"\n    label: W\n  - type: manages\n    to: "[[B]]"\ntags: [x]\n`,
+    );
+    expect(el.model.normalized).toBe(false);
+    // The same input stays, and typing on edits the list form.
+    expect(edge(el, 1).querySelector('input.fm-edge-label')).toBe(label);
+    type(label, 'Wo');
+    await settle(el);
+    expect(el.text).toContain('    label: Wo\n');
+    expect(row(el, ['relationships']).textContent).toContain('Rewritten as a list of relationships');
+  });
+
+  it('turns into the list form for a flip or an attribute', async () => {
+    const { el } = await mountMbr(text);
+    const box = edge(el, 0).querySelector<HTMLInputElement>('.fm-edge-invert input')!;
+    box.checked = true;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle(el);
+    expect(el.text).toContain('  - type: reports_to\n    from: "[[Hemant Kataria]]"\n');
+    const other = await mountMbr(text);
+    commit(combo(edge(other.el, 2), '.fm-edge-add mbr-fm-combobox'), 'since');
+    await settle(other.el);
+    expect(other.el.text).toContain('  - type: manages\n    to: "[[B]]"\n    since:\n');
+  });
+
+  it('shows a value the shorthand cannot read as it is', async () => {
+    const { el } = await mountMbr('relationships:\n  parent: "[[A]]"\n  odd:\n    to: "[[X]]"\n');
+    expect(types(el)).toEqual(['parent']);
+    expect(row(el, ['relationships', 'odd'])).toBeTruthy();
+  });
+
+  it('hints at a type the vault’s registry does not know', async () => {
+    const { el } = await mountMbr('relationships:\n  mentor: "[[Yoda]]"\n', (e) => {
+      e.catalog = builtinCatalog({ relationshipTypes: DEFAULT_RELATIONSHIP_TYPES });
+    });
+    expect(edge(el, 0).querySelector('.fm-hint')!.textContent).toContain('not in relationship_types');
+  });
+});
+
 describe('labeled contact fields', () => {
   const labeledList = (el: MbrFmEditor, key: string) => value(el, [key]).querySelector('ol.fm-labeled')!;
 

@@ -6,7 +6,9 @@
  *   direction" checkbox (checked = `from`; none for a symmetric type) and the
  *   edge read back as a sentence, which says what the direction means. An edge naming two
  *   other notes shows both endpoints, labelled from/to. Other keys on an
- *   edge (`married:`, `place:`) stay generic rows under it.
+ *   edge (`married:`, `place:`) stay generic rows under it. The map
+ *   shorthand (`reports_to: "[[X]]"`) draws the same rows and is edited in
+ *   its own shape until a label, a flip or an attribute needs the list form.
  * - `labeled`: contact values with a label (`emails`, `phones`, `dates`,
  *   `addresses`, `aliases`, …) in whichever of contact.rs's three shapes the
  *   note uses; new entries follow that shape.
@@ -21,7 +23,7 @@
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { live } from 'lit/directives/live.js';
-import { addItem, addKey, getIn, nodeInfo, setScalar, type FmPath, type FmValue } from './model.js';
+import { addItem, addKey, getIn, nodeInfo, setScalar, type FmPath, type FmValue, type FrontmatterModel } from './model.js';
 import { CONTACT_LABELS, type FieldDef } from './fields.js';
 import { widgetKindFor } from './form-logic.js';
 import {
@@ -30,19 +32,28 @@ import {
   FLIP_DIRECTION_LABEL,
   RESERVED_EDGE_KEYS,
   addLabeledEntry,
+  addMapEdge,
   canFlipDirection,
   edgeDirection,
   edgeOf,
   freshLabel,
+  freshRelationType,
   humanActorId,
   labeledEntries,
+  mapEdgeRows,
+  mapEdgeView,
   newEdge,
   relationTypeOptions,
   relationType,
   relationshipSentence,
+  relationshipsShape,
+  relationshipsToList,
   removeEntry,
+  removeMapEdge,
   setEdgeField,
   setEntryLabel,
+  setMapEdgeNote,
+  setMapEdgeType,
   toggleEdgeDirection,
   type EdgeView,
   type LabeledEntry,
@@ -157,7 +168,23 @@ interface Registry {
   readonly authored: boolean;
 }
 
-function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry: Registry, me: string): TemplateResult {
+/**
+ * What an edge row's controls do. The list form edits its item's keys; the
+ * map shorthand edits its key and target, and turns the whole value into the
+ * list form for what it cannot hold (a label, a flip, an attribute). Both
+ * draw the same template, so the row's DOM (and focus) survives that switch.
+ */
+interface EdgeOps {
+  /** `via`: a keystroke, a commit (Enter, a pick), or focus leaving the field. */
+  setType(value: string, via: 'input' | 'commit' | 'blur'): void;
+  setEndpoint(key: 'to' | 'from', value: string): void;
+  setLabel(value: string): void;
+  flip(): void;
+  addAttribute(key: string): void;
+  remove(): void;
+}
+
+function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry: Registry, me: string, ops: EdgeOps): TemplateResult {
   const host = ctx.host;
   const edgePath = [...ctx.path, index];
   const dir = edgeDirection(edge);
@@ -173,8 +200,8 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
       .value=${key === 'to' ? edge.to : edge.from}
       .options=${host.suggestions([...edgePath, key], { key, kind: 'wikilink', label, group: 'mbr' }, 'wikilink')}
       label=${`Relationship ${n}, ${label}`}
-      @fm-combo-input=${(e: CustomEvent<{ value: string }>) => host.apply((m) => setEdgeField(m, edgePath, key, e.detail.value))}
-      @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => host.apply((m) => setEdgeField(m, edgePath, key, e.detail.value))}
+      @fm-combo-input=${(e: CustomEvent<{ value: string }>) => ops.setEndpoint(key, e.detail.value)}
+      @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => ops.setEndpoint(key, e.detail.value)}
     ></mbr-fm-combobox>`;
   return html`<li class="fm-edge" data-index=${index}>
     <div class=${dir === 'both' ? 'fm-edge-main fm-edge-both' : 'fm-edge-main'}>
@@ -185,8 +212,11 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
         .value=${edge.type}
         .options=${relationTypeOptions(registry.types)}
         label=${`Relationship ${n}, type`}
-        @fm-combo-input=${(e: CustomEvent<{ value: string }>) => host.apply((m) => setEdgeField(m, edgePath, 'type', e.detail.value))}
-        @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => host.apply((m) => setEdgeField(m, edgePath, 'type', e.detail.value))}
+        @fm-combo-input=${(e: CustomEvent<{ value: string }>) => ops.setType(e.detail.value, 'input')}
+        @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => ops.setType(e.detail.value, 'commit')}
+        @focusout=${(e: FocusEvent) => {
+          if (leftFor(e)) ops.setType(comboText(e), 'blur');
+        }}
       ></mbr-fm-combobox>
       ${dir === 'both'
         ? html`<span class="fm-edge-dir-text fm-edge-from-text">from</span>${endpoint('from', 'from', ' fm-edge-from')}<span
@@ -200,9 +230,9 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
         placeholder="label"
         aria-label=${`Relationship ${n}, label (optional)`}
         .value=${live(edge.label)}
-        @input=${(e: Event) => host.apply((m) => setEdgeField(m, edgePath, 'label', (e.target as HTMLInputElement).value))}
+        @input=${(e: Event) => ops.setLabel((e.target as HTMLInputElement).value)}
       />
-      ${removeButton(`Remove relationship ${n}`, () => host.removeListItem(ctx.path, index))}
+      ${removeButton(`Remove relationship ${n}`, () => ops.remove())}
     </div>
     ${flippable
       ? html`<label class="fm-edge-invert">
@@ -211,7 +241,7 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
             aria-label=${`Relationship ${n}: flip relationship direction`}
             .checked=${live(dir === 'from')}
             @change=${(e: Event) => {
-              if ((e.target as HTMLInputElement).checked !== (dir === 'from')) host.apply((m) => toggleEdgeDirection(m, edgePath, edge));
+              if ((e.target as HTMLInputElement).checked !== (dir === 'from')) ops.flip();
             }}
           />${FLIP_DIRECTION_LABEL}
         </label>`
@@ -231,11 +261,57 @@ function renderEdge(ctx: WidgetContext, edge: EdgeView, index: number, registry:
         label=${`Relationship ${n}, add attribute`}
         @fm-combo-commit=${(e: CustomEvent<ComboCommitDetail>) => {
           const key = e.detail.value.trim();
-          if (key && !RESERVED_EDGE_KEYS.includes(key)) host.apply((m) => addKey(m, edgePath, key, null));
+          if (key && !RESERVED_EDGE_KEYS.includes(key)) ops.addAttribute(key);
         }}
       ></mbr-fm-combobox>
     </div>
   </li>`;
+}
+
+/** The list form: each control edits its own key of item `index`. */
+function listEdgeOps(ctx: WidgetContext, edge: EdgeView, index: number): EdgeOps {
+  const host = ctx.host;
+  const edgePath = [...ctx.path, index];
+  const set = (key: string, value: string) => host.apply((m) => setEdgeField(m, edgePath, key, value));
+  return {
+    // Typing writes as it goes; leaving the field has nothing left to write.
+    setType: (value, via) => {
+      if (via !== 'blur') set('type', value);
+    },
+    setEndpoint: set,
+    setLabel: (value) => set('label', value),
+    flip: () => host.apply((m) => toggleEdgeDirection(m, edgePath, edge)),
+    addAttribute: (key) => host.apply((m) => addKey(m, edgePath, key, null)),
+    remove: () => host.removeListItem(ctx.path, index),
+  };
+}
+
+/** Said once the shorthand had to become the list form. */
+const TO_LIST_HINT = 'Rewritten as a list of relationships: the short `type: "[[Note]]"` form cannot hold a label, a flipped direction or attributes.';
+
+/**
+ * The map shorthand: the type is the key (renamed, or the note moved to
+ * another key, on a commit only, so typing a type never merges keys
+ * mid-word), the note is the key's value or list item. A label, a flip or an
+ * attribute first turns the value into the list form, then applies there.
+ */
+function mapEdgeOps(ctx: WidgetContext, edge: EdgeView, index: number): EdgeOps {
+  const host = ctx.host;
+  const asList = (op: (m: FrontmatterModel, edgePath: FmPath) => FrontmatterModel) => {
+    if (host.apply((m) => op(relationshipsToList(m, ctx.path), [...ctx.path, index]))) host.setLocalHint(ctx.path, TO_LIST_HINT);
+  };
+  return {
+    setType: (value, via) => {
+      if (via !== 'input') host.apply((m) => setMapEdgeType(m, ctx.path, index, value));
+    },
+    setEndpoint: (_key, value) => host.apply((m) => setMapEdgeNote(m, ctx.path, index, value)),
+    setLabel: (value) => {
+      if (value.trim() !== '') asList((m, p) => setEdgeField(m, p, 'label', value));
+    },
+    flip: () => asList((m, p) => toggleEdgeDirection(m, p, edge)),
+    addAttribute: (key) => asList((m, p) => addKey(m, p, key, null)),
+    remove: () => host.apply((m) => removeMapEdge(m, ctx.path, index)),
+  };
 }
 
 /** The registry to offer: the vault's, else mbr's defaults (`authored` says which). */
@@ -244,24 +320,47 @@ function registryOf(ctx: WidgetContext): Registry {
   return { types: own.length > 0 ? own : DEFAULT_RELATIONSHIP_TYPES, authored: own.length > 0 };
 }
 
+/** An entry neither form can draw as a row (a list item that is not a map, a nested map under a type): shown as is. */
+const rawEdge = (ctx: WidgetContext, index: number, parent: FmPath, key: string | number): TemplateResult =>
+  html`<li class="fm-edge" data-index=${index}>
+    <div class="fm-children" role="list">${ctx.host.renderChildRows(parent, (k) => k === key)}</div>
+  </li>`;
+
 const relationshipsWidget: WidgetRenderer = (ctx) => {
-  const items = Array.isArray(ctx.value) ? ctx.value : [];
   const registry = registryOf(ctx);
   const title = ctx.host.frontmatter.title;
   const me = typeof title === 'string' && title.trim() ? title.trim() : 'this note';
-  const add = () => {
-    if (ctx.host.apply((m) => addItem(m, ctx.path, newEdge()))) ctx.host.focusAfterUpdate(ctx.path, items.length);
-  };
+  // One template for both shapes, so a switch to the list form keeps each row's DOM (and focus).
+  let rows: TemplateResult[];
+  let add: (m: FrontmatterModel) => FrontmatterModel;
+  if (relationshipsShape(ctx.value) === 'map') {
+    rows = mapEdgeRows(ctx.value, ctx.path).map((row, i) => {
+      if (row.raw) return rawEdge(ctx, i, row.valuePath.slice(0, -1), row.valuePath[row.valuePath.length - 1]);
+      const edge = mapEdgeView(row);
+      return renderEdge(ctx, edge, i, registry, me, mapEdgeOps(ctx, edge, i));
+    });
+    add = (m) => addMapEdge(m, ctx.path, freshRelationType(getIn(m, ctx.path), registry.types), null);
+  } else {
+    const items = Array.isArray(ctx.value) ? ctx.value : [];
+    rows = items.map((item, i) => {
+      const edge = edgeOf(item);
+      return edge ? renderEdge(ctx, edge, i, registry, me, listEdgeOps(ctx, edge, i)) : rawEdge(ctx, i, ctx.path, i);
+    });
+    add = (m) => addItem(m, ctx.path, newEdge());
+  }
+  const count = rows.length;
   return html`<ol class="fm-edges" aria-label=${ctx.label}>
-      ${items.map((item, i) => {
-        const edge = edgeOf(item);
-        if (edge) return renderEdge(ctx, edge, i, registry, me);
-        return html`<li class="fm-edge" data-index=${i}>
-          <div class="fm-children" role="list">${ctx.host.renderChildRows(ctx.path, (k) => k === i)}</div>
-        </li>`;
-      })}
+      ${rows}
     </ol>
-    <button type="button" class="fm-link" @click=${add}>${icon(iconPlus, { size: ICON_SM })}Add relationship</button>`;
+    <button
+      type="button"
+      class="fm-link"
+      @click=${() => {
+        if (ctx.host.apply(add)) ctx.host.focusAfterUpdate(ctx.path, count);
+      }}
+    >
+      ${icon(iconPlus, { size: ICON_SM })}Add relationship
+    </button>`;
 };
 
 // ============================================================================
