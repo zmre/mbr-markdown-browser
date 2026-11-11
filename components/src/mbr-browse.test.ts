@@ -908,3 +908,52 @@ describe('MbrBrowseElement current file card', () => {
     expect(body).toMatch(/color-mix\(\s*in srgb,\s*var\(--pico-muted-color[^)]*\)\s*70%,\s*var\(--pico-color/)
   })
 })
+
+/**
+ * `_browse_footer.html` arrives as light-DOM children (see `_nav.html`) and is
+ * shown through a slot at the bottom of the left pane. The compiled-in partial
+ * is only a comment, which must not draw an empty bordered strip.
+ */
+describe('MbrBrowseElement sidebar footer', () => {
+  let element: MbrBrowseElement
+
+  async function openWith(markup: string): Promise<HTMLElement | null> {
+    element = document.createElement('mbr-browse') as MbrBrowseElement
+    element.innerHTML = markup
+    document.body.appendChild(element)
+    element.open()
+    await element.updateComplete
+    return element.shadowRoot?.querySelector('.left-pane .sidebar-footer') ?? null
+  }
+
+  afterEach(() => {
+    element.remove()
+  })
+
+  it('shows the slotted links at the bottom of the left pane', async () => {
+    const footer = await openWith('<!-- c --><a href="https://example.com" aria-label="Example">E</a>')
+    expect(footer).not.toBeNull()
+    expect(footer!.hidden).toBe(false)
+    expect(footer!.querySelector('slot')).not.toBeNull()
+    // Last child of the pane, after the scrolling content.
+    expect(footer!.previousElementSibling?.classList.contains('pane-content')).toBe(true)
+    const assigned = footer!.querySelector('slot')!.assignedElements()
+    expect(assigned.map((el) => el.tagName.toLowerCase())).toEqual(['a'])
+  })
+
+  it('hides the footer when the partial holds only its comment', async () => {
+    const footer = await openWith('\n<!-- here just for user overrides -->\n')
+    expect(footer).not.toBeNull()
+    expect(footer!.hidden).toBe(true)
+  })
+
+  it('hides the footer when there are no children at all', async () => {
+    const footer = await openWith('')
+    expect(footer!.hidden).toBe(true)
+  })
+
+  it('collapses a hidden footer to nothing (no border or padding)', () => {
+    const css = [(customElements.get('mbr-browse') as unknown as { styles: { cssText: string } | { cssText: string }[] }).styles].flat().map((s) => s.cssText).join('\n')
+    expect(css).toMatch(/\.sidebar-footer\[hidden\]\s*\{\s*display:\s*none;?\s*\}/)
+  })
+})
