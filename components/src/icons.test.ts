@@ -83,7 +83,7 @@ describe('icon (Lit)', () => {
 
 /**
  * theme.css draws a few icons as masks (alerts, task chips, the breadcrumb
- * divider). Each `--mbr-icon-<prop>` must carry exactly the shapes of the file
+ * divider, link kinds). Each `--mbr-icon-<prop>` must carry exactly the shapes of the file
  * it is mapped to here, so swapping an `.svg` cannot leave CSS drawing the old
  * artwork.
  */
@@ -99,6 +99,8 @@ const MASKS: Record<string, string> = {
   x: 'x',
   'arrow-right': 'arrow-right',
   'chevron-right': 'chevron-right',
+  globe: 'globe',
+  'corner-up-right': 'corner-up-right',
 }
 
 describe('theme.css icon masks', () => {

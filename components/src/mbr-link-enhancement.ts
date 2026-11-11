@@ -1,5 +1,6 @@
 import { LitElement } from 'lit'
 import { customElement } from 'lit/decorators.js'
+import { linkHoverText } from './link-kinds.ts'
 import { isGuiMode } from './shared.ts'
 
 /** CSS class added to links enhanced by this component */
@@ -129,12 +130,14 @@ export function handleExternalLinkClick(event: MouseEvent): void {
  * to all links in the main content area, showing the destination URL.
  *
  * - For same-origin links: shows just the path (e.g., "/docs/guide/")
+ * - For links out of the vault: `External: <path>` (see `link-kinds.ts`)
  * - For external links: shows the full URL (e.g., "https://example.com/page")
  *
  * Links get the 'mbr-link-enhanced' class for styling (see theme.css).
  *
  * This component does nothing in server mode or static builds where
- * users have access to the browser URL bar.
+ * users have access to the browser URL bar. The link-kind classes and icons
+ * (every mode) are `link-kinds.ts`, which needs no element.
  */
 @customElement('mbr-link-enhancement')
 export class MbrLinkEnhancementElement extends LitElement {
@@ -219,6 +222,11 @@ export class MbrLinkEnhancementElement extends LitElement {
    * Returns just the path for same-origin links, full URL for external.
    */
   private _getTooltipText(anchor: HTMLAnchorElement, currentOrigin: string): string | null {
+    // A link out of the vault points at the /.mbr/outside/ page; name its
+    // target instead (`External: ~/src/x.md`), as `link-kinds.ts` does with
+    // `title` in a browser.
+    const hover = linkHoverText(anchor, currentOrigin)
+    if (hover) return hover
     try {
       // Use the anchor's resolved href (handles relative URLs)
       const url = new URL(anchor.href)

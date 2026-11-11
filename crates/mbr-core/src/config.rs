@@ -960,7 +960,7 @@ impl Default for Config {
 /// the guards below never fire there, so a stray `C:\Users\you\.git` or
 /// `.obsidian` would silently make the entire home directory the repo root and
 /// trigger a scan of everything the user owns.
-pub(crate) fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(home_var).map(PathBuf::from)
 }

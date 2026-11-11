@@ -22,6 +22,7 @@ server-only.
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/tasks` | POST | Task query for the task browser and the calendar's task marks (`404` with `--no-tasks`) |
 | `/.mbr/ws/changes` | WS | WebSocket for live reload |
+| `/.mbr/outside/?path=…` | GET | Where a link out of the repository leads; see [Outside links](#outside-links) |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
 
 ## Task Queries
@@ -195,3 +196,22 @@ with in-browser editing: see
 
 `/.mbr/videos/`, `/.mbr/pdfs/`, `/.mbr/audio/` and `/.mbr/images/` take a
 `?path=` query; see [Media Viewer Endpoints](cli.md#media-viewer-endpoints).
+
+## Outside links
+
+`/.mbr/outside/?path=<target>` is the page a link to a file outside the
+served folder points at (`[x](~/src/app/TODO.md)`, or a `../` chain that
+climbs above the root); see
+[Links outside the folder](../features/links.md#links-outside-the-folder).
+`path` is the target, percent-encoded:
+
+- a `~` link is written as authored: `?path=~/src/app/TODO.md`;
+- a `../` chain is written, by the server and GUI, as the absolute path it
+  resolves to (`?path=/Users/me/src/app/TODO.md`), and by a static build
+  relative to the repository root (`?path=../src/app/TODO.md`), so a
+  published site never names a local path.
+
+The link's own `#fragment` and `?query` are not carried. The server answers
+with the same page for any `path` and never looks at it: nothing about the
+target (whether it exists, what it is) is checked or reported. Static builds
+ship it as `.mbr/outside/index.html`, which reads `path` in the browser.

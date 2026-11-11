@@ -78,6 +78,10 @@ pub const ICONS: &[(&str, &str)] = &[
         include_str!("../templates/icons/circle-help.svg"),
     ),
     ("code", include_str!("../templates/icons/code.svg")),
+    (
+        "corner-up-right",
+        include_str!("../templates/icons/corner-up-right.svg"),
+    ),
     ("ellipsis", include_str!("../templates/icons/ellipsis.svg")),
     ("expand", include_str!("../templates/icons/expand.svg")),
     (
@@ -104,6 +108,7 @@ pub const ICONS: &[(&str, &str)] = &[
         "gallery-vertical-end",
         include_str!("../templates/icons/gallery-vertical-end.svg"),
     ),
+    ("globe", include_str!("../templates/icons/globe.svg")),
     ("hash", include_str!("../templates/icons/hash.svg")),
     ("house", include_str!("../templates/icons/house.svg")),
     ("image", include_str!("../templates/icons/image.svg")),

@@ -13,6 +13,11 @@ export * from './mbr-live-reload.ts';
 export * from './mbr-video-extras.ts';
 export * from './mbr-media-viewer.ts';
 export * from './mbr-link-enhancement.ts';
+// Link kinds (internal / internet / outside classes + icon hook) on every
+// note, every mode; no custom element, it enhances the rendered body at idle.
+export * from './link-kinds.ts';
+// The /.mbr/outside/ page: where a link out of the repository goes.
+export * from './mbr-outside-link.ts';
 export * from './mbr-heading-enhancer.ts';
 // Ellipsis + tooltip for the header title (no custom element; it enhances
 // server-rendered markup in place).

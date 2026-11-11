@@ -68,6 +68,7 @@ pub mod markdown;
 pub mod media;
 pub mod oembed;
 pub mod oembed_cache;
+pub mod outside_link;
 pub mod page_context;
 pub mod page_errors;
 pub mod path_resolver;

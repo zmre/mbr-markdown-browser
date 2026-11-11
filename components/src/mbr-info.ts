@@ -22,6 +22,7 @@ import {
 import { fetchPageLinks } from './graph/links-cache.js';
 import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
+import { isOutsideLinkTarget } from './link-kinds.ts';
 import { isCardKey } from './contact-meta.js';
 import { isMacPlatform, isPresentationPlaying } from './mbr-keys.js';
 import { ICON_BUTTON_CSS } from './controls.ts';
@@ -679,10 +680,16 @@ export class MbrInfoElement extends LitElement {
               <ul class="links-list">
                 ${externalLinks.map(link => html`
                   <li class="link-item">
-                    <a href="${safeHref(link.to)}" class="link-url external" target="_blank" rel="noopener">
-                      ${link.text || link.to}
-                      <span class="external-icon" role="img" aria-label="Opens in new tab">${icon(iconArrowUpRight, { size: 14 })}</span>
-                    </a>
+                    ${isOutsideLinkTarget(link.to) ? html`
+                      <a href="${safeHref(resolveUrl(link.to))}" class="link-url external" @click=${() => this._close()}>
+                        ${link.text || link.to}
+                      </a>
+                    ` : html`
+                      <a href="${safeHref(link.to)}" class="link-url external" target="_blank" rel="noopener">
+                        ${link.text || link.to}
+                        <span class="external-icon" role="img" aria-label="Opens in new tab">${icon(iconArrowUpRight, { size: 14 })}</span>
+                      </a>
+                    `}
                   </li>
                 `)}
               </ul>

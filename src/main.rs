@@ -407,6 +407,7 @@ async fn run() -> Result<(), MbrError> {
             // body wikilinks never resolve globally; the page URL is unused.
             current_page_url: String::new(),
             directory_url_probe: None,
+            outside_links: None,
         };
 
         // CLI mode: server_mode=false, transcode disabled (transcode is server-only).

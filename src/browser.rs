@@ -3,8 +3,8 @@ use crate::Config;
 use crate::config::MenuBarVisibility;
 use crate::errors::BrowserError;
 use crate::external_open::{
-    SiteOrigin, apply_decision, decide_without_frame_info, mark_gui_active, open_external,
-    parse_ipc_open_request,
+    OutsideOpenRequest, SiteOrigin, apply_decision, decide_without_frame_info, gui_active,
+    mark_gui_active, open_external, parse_ipc_open_outside_request, parse_ipc_open_request,
 };
 use crate::live::LiveServer;
 use muda::{
@@ -509,6 +509,42 @@ fn spawn_open_picker(proxy: EventLoopProxy<UserEvent>) {
             "Open a Markdown Folder or File",
             &markdown_extensions,
         ) {
+            let _ = proxy.send_event(UserEvent::PathSelected(path));
+        }
+    });
+}
+
+/// Whether an outside link's Open… panel is up. A page can post the request
+/// as often as it likes; this keeps it to one panel at a time.
+static OUTSIDE_PICKER_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Shows the Open… panel for an outside link (`/.mbr/outside/`), starting where
+/// the link points, and opens whatever the user picks exactly as Open…/Cmd+O
+/// does — replacing the current folder. Cancelling does nothing.
+///
+/// The request only positions the panel (see
+/// [`crate::external_open::parse_ipc_open_outside_request`]); a second request
+/// while one panel is up is dropped.
+fn spawn_outside_open_picker(proxy: EventLoopProxy<UserEvent>, request: OutsideOpenRequest) {
+    use std::sync::atomic::Ordering;
+    if OUTSIDE_PICKER_OPEN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::debug!("Ignoring an outside-link Open… while its panel is up");
+        return;
+    }
+    std::thread::spawn(move || {
+        let markdown_extensions = Config::default().markdown_extensions;
+        let picked = crate::open_picker::pick_file_or_folder_from(
+            "Open a Markdown Folder or File",
+            &markdown_extensions,
+            Some(&request.directory),
+            request.file_name.as_deref(),
+        );
+        OUTSIDE_PICKER_OPEN.store(false, Ordering::Release);
+        if let Some(path) = picked {
             let _ = proxy.send_event(UserEvent::PathSelected(path));
         }
     });
@@ -1044,6 +1080,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
     let site_origin = Arc::new(RwLock::new(SiteOrigin::new(&initial_url)));
     let new_window_origin = Arc::clone(&site_origin);
     let ipc_origin = Arc::clone(&site_origin);
+    let ipc_proxy = event_loop.create_proxy();
 
     let builder = WebViewBuilder::new()
         .with_devtools(true)
@@ -1096,9 +1133,17 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         // policy instead of trusting it.
         .with_ipc_handler(move |request| {
             let origin = ipc_origin.read().clone();
-            match parse_ipc_open_request(&origin, request.body()) {
-                Some(url) => open_with_system_handler(url),
-                None => tracing::debug!("Ignoring unrecognized IPC message from the page"),
+            if let Some(url) = parse_ipc_open_request(&origin, request.body()) {
+                open_with_system_handler(url);
+            } else if let Some(outside) = parse_ipc_open_outside_request(
+                gui_active(),
+                request.body(),
+                crate::config::home_dir().as_deref(),
+            ) {
+                // Only positions a native panel; see `spawn_outside_open_picker`.
+                spawn_outside_open_picker(ipc_proxy.clone(), outside);
+            } else {
+                tracing::debug!("Ignoring unrecognized IPC message from the page");
             }
         });
 
