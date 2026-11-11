@@ -102,6 +102,7 @@ jobs:
           test -f crates/mbr-core/templates/components-js/mbr-flashcards.min.js || { echo "FATAL: mbr-flashcards.min.js not created!"; exit 1; }
           test -f crates/mbr-core/templates/components-js/mbr-flashcards-reading.min.js || { echo "FATAL: mbr-flashcards-reading.min.js not created!"; exit 1; }
           test -f crates/mbr-core/templates/components-js/mbr-calendar.min.js || { echo "FATAL: mbr-calendar.min.js not created!"; exit 1; }
+          test -f crates/mbr-core/templates/components-js/mbr-not-found.min.js || { echo "FATAL: mbr-not-found.min.js not created!"; exit 1; }
           test -f crates/mbr-core/templates/components-js/mbr-quicklook-calendar.min.js || { echo "FATAL: mbr-quicklook-calendar.min.js not created!"; exit 1; }
 
       - name: Upload components

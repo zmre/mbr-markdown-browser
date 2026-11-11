@@ -3697,6 +3697,7 @@ async fn test_graph_chunks_served() {
         "/.mbr/components/mbr-search-extras.min.js",
         "/.mbr/components/mbr-flashcards.min.js",
         "/.mbr/components/mbr-flashcards-reading.min.js",
+        "/.mbr/components/mbr-not-found.min.js",
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "Chunk should be served at {path}");
@@ -3767,6 +3768,7 @@ async fn test_components_js_bundle_no_missing_imports() {
         "mbr-search-extras.min.js",
         "mbr-flashcards.min.js",
         "mbr-flashcards-reading.min.js",
+        "mbr-not-found.min.js",
     ] {
         if js_content.contains(chunk) {
             let path = format!("/.mbr/components/{chunk}");
@@ -3871,6 +3873,26 @@ async fn test_404_error_page_includes_navigation() {
         html.contains("mbr-search") || html.contains("search"),
         "Error page should suggest using search"
     );
+}
+
+/// The 404 page carries the element that suggests where a missing page went
+/// (matched in the browser from site.json), and the chunk it loads is served.
+#[tokio::test]
+async fn test_404_error_page_carries_not_found_suggestions() {
+    let repo = TestRepo::new();
+    repo.create_markdown("archive/moved.md", "# Moved");
+
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/notes/moved/").await;
+    assert_eq!(response.status(), 404);
+    let html = response.text().await.unwrap();
+    assert!(
+        html.contains("<mbr-not-found-suggestions"),
+        "404 page should carry the suggestions element"
+    );
+
+    let chunk = server.get("/.mbr/components/mbr-not-found.min.js").await;
+    assert_eq!(chunk.status(), 200);
 }
 
 #[tokio::test]

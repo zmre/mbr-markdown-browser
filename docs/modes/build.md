@@ -155,6 +155,18 @@ Quick setup:
 2. Enable GitHub Pages in repository settings
 3. Select `/docs` folder as source
 
+A project site is served under the repository's name (`https://user.github.io/my-repo/`).
+Every page works there as built, but `404.html` — which GitHub serves at the
+missing URL — needs to know that path to find its styles and the site index. Set
+it with [`base_url`](../reference/configuration.md#deployment-path):
+
+```toml
+# .mbr/config.toml
+base_url = "/my-repo/"
+```
+
+The 404 page then [suggests where a missing page went](../features/links.md#when-a-page-is-not-found).
+
 ### Netlify
 
 ```toml
@@ -173,6 +185,10 @@ The `build/` folder contains plain HTML/CSS/JS that works anywhere:
 - Vercel
 - Firebase Hosting
 - Any web server (nginx, Apache)
+
+To show mbr's `404.html` for missing pages, point the host's not-found page at
+it (nginx: `error_page 404 /404.html;`), and set `base_url` if the site is not at
+the host's root.
 
 ## Search Configuration
 

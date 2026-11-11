@@ -115,6 +115,47 @@ fn default_sidebar_max_items() -> usize {
     DEFAULT_SIDEBAR_MAX_ITEMS
 }
 
+fn default_base_url() -> String {
+    "/".to_string()
+}
+
+/// Normalizes [`Config::base_url`] to a root-anchored URL path with a trailing
+/// slash: `my-repo` → `/my-repo/`, `""` → `/`, `/a//b` → `/a/b/`.
+///
+/// It is a path, not a URL: a scheme or host (`https://…`, `//host/`) is
+/// refused, as are `?`, `#`, `.`/`..` segments, whitespace, control
+/// characters, backslashes, quotes and angle brackets. The last few are not
+/// style: the value is written verbatim into `404.html`'s `href`/`src`
+/// attributes and into an inline script's string literal.
+pub fn normalize_base_url(raw: &str) -> Result<String, ConfigError> {
+    let invalid = |reason: &str| ConfigError::InvalidBaseUrl {
+        value: raw.to_string(),
+        reason: reason.to_string(),
+    };
+    let trimmed = raw.trim();
+    if trimmed.contains("://") || trimmed.starts_with("//") {
+        return Err(invalid(
+            "it must be a URL path such as /my-repo/, not a full URL",
+        ));
+    }
+    if let Some(c) = trimmed.chars().find(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(c, '"' | '\'' | '`' | '<' | '>' | '\\' | '?' | '#')
+    }) {
+        return Err(invalid(&format!("it may not contain {c:?}")));
+    }
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.iter().any(|s| *s == "." || *s == "..") {
+        return Err(invalid("it may not contain . or .. segments"));
+    }
+    if segments.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}/", segments.join("/")))
+    }
+}
+
 fn default_graph_depth() -> usize {
     2
 }
@@ -708,6 +749,16 @@ pub struct Config {
     /// Default: empty string (no suffix).
     #[serde(default)]
     pub title_suffix: String,
+    /// The URL path a static build is deployed under: `/` at a host's root,
+    /// `/my-repo/` for a GitHub project page. Default: `"/"`.
+    ///
+    /// Read only by the static build's `404.html`. Every other page links
+    /// relatively and works under any prefix, but a host serves `404.html` at
+    /// whatever URL was missing (`/a/b/c/`), so its asset and home links must be
+    /// anchored at the site root. Normalized by [`normalize_base_url`] (leading
+    /// and trailing `/`) when the configuration is read.
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
     /// Markers that flag work as incomplete, matched anywhere in a line and
     /// wrapped in `<span class="mbr-incomplete">…</span>`. A paragraph,
     /// heading, list item, or table cell whose *first* text starts with one is
@@ -937,6 +988,7 @@ impl Default for Config {
             gui_menu_bar: default_gui_menu_bar(),
             title_prefix: String::new(),
             title_suffix: String::new(),
+            base_url: default_base_url(),
             incomplete_markers: default_incomplete_markers(),
             mark_incomplete: None,
             tasks_enabled: true, // Task browser enabled by default (server/GUI only)
@@ -1263,6 +1315,7 @@ impl Config {
         if EDITING_DISABLED_FOR_PROCESS.load(Ordering::Relaxed) {
             config.edit_enabled = false;
         }
+        config.base_url = normalize_base_url(&config.base_url)?;
         config.root_dir = root_dir;
         // Assigned here, beside `root_dir`, because this is the only place that
         // holds both halves of the derivation at once: the discovered root and
@@ -1365,6 +1418,7 @@ impl Config {
     /// Note: `oembed_cache_size` of 0 is valid (disables caching).
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_static_folder()?;
+        normalize_base_url(&self.base_url)?;
 
         // Port 0 means "let OS pick a port" which isn't useful for a server URL
         if self.port == 0 {
@@ -2350,6 +2404,66 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_base_url_defaults_to_root() {
+        let config = Config::default();
+        assert_eq!(config.base_url, "/");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_normalize_base_url_anchors_both_ends() {
+        for (raw, expected) in [
+            ("", "/"),
+            ("/", "/"),
+            ("  /  ", "/"),
+            ("my-repo", "/my-repo/"),
+            ("/my-repo", "/my-repo/"),
+            ("my-repo/", "/my-repo/"),
+            ("/my-repo/", "/my-repo/"),
+            ("/a//b///", "/a/b/"),
+            ("/docs/v2/", "/docs/v2/"),
+            ("/my%20site/", "/my%20site/"),
+        ] {
+            assert_eq!(normalize_base_url(raw).unwrap(), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_base_url_refuses_non_paths() {
+        for raw in [
+            "https://example.com/my-repo/",
+            "//cdn.example.com/",
+            "/a/../b/",
+            "/./",
+            "/my repo/",
+            "/a?b",
+            "/a#b",
+            "/a\\b",
+            "/a\"b",
+            "/a'b",
+            "/a<b",
+            "/a>b",
+            "/a`b",
+            "/a\nb",
+        ] {
+            let err = normalize_base_url(raw).expect_err(raw);
+            assert!(err.to_string().contains("base_url"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_base_url() {
+        let config = Config {
+            base_url: "https://example.com/".to_string(),
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidBaseUrl { .. })
+        ));
     }
 
     #[test]

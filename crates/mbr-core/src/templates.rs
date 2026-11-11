@@ -626,6 +626,10 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         "_calendar_nav.html",
         include_str!("../templates/_calendar_nav.html"),
     ),
+    (
+        "_not_found_suggestions.html",
+        include_str!("../templates/_not_found_suggestions.html"),
+    ),
     // Compat shim for customized `index.html` files written before the card.
     (
         "_person_infobox.html",
@@ -707,6 +711,64 @@ mod tests {
         assert!(
             tera.get_template_names().any(|n| n == "index.html"),
             "built-in defaults should still be registered"
+        );
+    }
+
+    /// Renders the default `error.html` for `code`, optionally as the
+    /// "Downloading" page.
+    fn render_default_error(code: u16, downloading: bool) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None).expect("templates should build");
+        let mut ctx = HashMap::new();
+        crate::page_context::insert_error_keys(&mut ctx, code, "Title", None);
+        ctx.insert("sidebar_style".to_string(), serde_json::json!("panel"));
+        if downloading {
+            ctx.insert("downloading".to_string(), serde_json::json!(true));
+            ctx.insert("note_name".to_string(), serde_json::json!("note"));
+        }
+        templates.render_error(ctx).expect("error page renders")
+    }
+
+    /// The 404 page's "where did it go" suggestions are for a missing page
+    /// only: a refused (403), failed (500) or downloading (503) page has a
+    /// target that exists.
+    #[test]
+    fn test_error_page_carries_not_found_suggestions_for_404_only() {
+        assert!(render_default_error(404, false).contains("<mbr-not-found-suggestions"));
+        for code in [403, 500, 503] {
+            assert!(
+                !render_default_error(code, false).contains("<mbr-not-found-suggestions"),
+                "{code}"
+            );
+        }
+        assert!(!render_default_error(503, true).contains("<mbr-not-found-suggestions"));
+    }
+
+    /// A custom `.mbr/error.html` keeps working untouched (no suggestions),
+    /// and can opt in by including the partial.
+    #[test]
+    fn test_custom_error_page_opts_in_to_suggestions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr_dir = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr_dir).unwrap();
+        std::fs::write(mbr_dir.join("error.html"), "<p>custom {{ error_code }}</p>").unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let mut ctx = HashMap::new();
+        crate::page_context::insert_error_keys(&mut ctx, 404, "Not Found", None);
+        let html = templates.render_error(ctx.clone()).unwrap();
+        assert_eq!(html.trim(), "<p>custom 404</p>");
+
+        std::fs::write(
+            mbr_dir.join("error.html"),
+            "<p>custom</p>{% if error_code == 404 %}{% include \"_not_found_suggestions.html\" %}{% endif %}",
+        )
+        .unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        assert!(
+            templates
+                .render_error(ctx)
+                .unwrap()
+                .contains("<mbr-not-found-suggestions")
         );
     }
 

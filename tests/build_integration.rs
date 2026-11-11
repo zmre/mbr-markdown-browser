@@ -754,25 +754,122 @@ async fn test_build_404_html_contains_error_structure() {
     );
 }
 
+/// Reads a built page with Tera's `&#x2F;` attribute escaping undone, as a
+/// browser reads it.
+fn read_page(path: &std::path::Path) -> String {
+    fs::read_to_string(path).unwrap().replace("&#x2F;", "/")
+}
+
+/// Builds `repo` with `base_url` set (`None` keeps the default).
+async fn build_site_with_base_url(repo: &TestRepo, base_url: Option<&str>) -> std::path::PathBuf {
+    let mut config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    if let Some(base_url) = base_url {
+        config.base_url = base_url.to_string();
+    }
+    let output_dir = repo.path().join("build");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    builder.build().await.expect("Build failed");
+    output_dir
+}
+
+/// A host serves 404.html at the missing URL (`/a/b/c/`), so a depth-relative
+/// `.mbr/` would name `/a/b/c/.mbr/` and the page would load nothing. Its
+/// assets, site root and home link are anchored at `base_url` instead.
 #[tokio::test]
-async fn test_build_404_html_uses_relative_paths() {
+async fn test_build_404_html_anchors_assets_at_the_site_root() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    let output = build_site(&repo).await;
+    let html = read_page(&output.join("404.html"));
+
+    assert!(
+        html.contains(r#"href="/.mbr/theme.css""#),
+        "404.html should load theme.css from /.mbr/. Got: {html}"
+    );
+    assert!(
+        html.contains(r#"src="/.mbr/components/mbr-components.min.js""#),
+        "404.html should load the components from /.mbr/"
+    );
+    assert!(
+        html.contains(r#"basePath: "/","#),
+        "404.html's basePath should be the site root"
+    );
+    assert!(
+        !html.contains(r#""./.mbr/"#)
+            && !html.contains(r#""../.mbr/"#)
+            && !html.contains(r#"".mbr/"#),
+        "404.html should carry no depth-relative asset URL"
+    );
+    assert!(
+        html.contains(r#"<a href="/" role="button" class="outline">Home</a>"#),
+        "404.html's Home link should be the site root"
+    );
+    assert!(
+        html.contains("serverMode: false"),
+        "404.html should have serverMode: false for static builds"
+    );
+}
+
+#[tokio::test]
+async fn test_build_404_html_honours_base_url() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+
+    // Normalized: no leading or trailing slash is needed.
+    let output = build_site_with_base_url(&repo, Some("my-repo")).await;
+    let html = read_page(&output.join("404.html"));
+
+    assert!(html.contains(r#"href="/my-repo/.mbr/theme.css""#));
+    assert!(html.contains(r#"src="/my-repo/.mbr/components/mbr-components.min.js""#));
+    assert!(html.contains(r#"basePath: "/my-repo/","#));
+    assert!(html.contains(r#"<a href="/my-repo/" role="button" class="outline">Home</a>"#));
+    assert!(
+        !html.contains(r#""/.mbr/"#),
+        "no asset URL should escape the deployment prefix"
+    );
+
+    // Every other page stays depth-relative, so it works under any prefix.
+    let readme = read_page(&output.join("readme").join("index.html"));
+    assert!(readme.contains(r#"href="../.mbr/theme.css""#));
+    assert!(!readme.contains("/my-repo/"));
+}
+
+#[tokio::test]
+async fn test_build_refuses_an_invalid_base_url() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello World");
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        base_url: "https://example.com/my-repo/".to_string(),
+        ..Default::default()
+    };
+    let builder = mbr::build::Builder::new(config, repo.path().join("build"))
+        .expect("Failed to create builder");
+    let err = builder
+        .build()
+        .await
+        .expect_err("an invalid base_url must fail the build");
+    assert!(format!("{err:?}").contains("InvalidBaseUrl"), "{err:?}");
+}
+
+#[tokio::test]
+async fn test_build_404_html_has_not_found_suggestions() {
     let repo = TestRepo::new();
     repo.create_markdown("readme.md", "# Hello World");
 
     let output = build_site(&repo).await;
     let html = fs::read_to_string(output.join("404.html")).unwrap();
-
-    // Should use relative paths to .mbr/ assets (not absolute /.mbr/)
     assert!(
-        html.contains(".mbr/") && !html.contains("\"/.mbr/"),
-        "404.html should use relative paths to .mbr/ folder"
+        html.contains("<mbr-not-found-suggestions"),
+        "404.html should carry the suggestions element"
     );
-
-    // Should have serverMode: false for static build
-    assert!(
-        html.contains("serverMode: false") || html.contains("serverMode:false"),
-        "404.html should have serverMode: false for static builds"
-    );
+    // Its chunk ships with the site.
+    assert!(output.join(".mbr/components/mbr-not-found.min.js").exists());
 }
 
 #[tokio::test]
@@ -2334,6 +2431,7 @@ async fn test_build_writes_graph_chunks() {
         "mbr-flashcards.min.js",
         "mbr-flashcards-reading.min.js",
         "mbr-calendar.min.js",
+        "mbr-not-found.min.js",
     ] {
         let path = output.join(".mbr").join("components").join(chunk);
         assert!(path.exists(), "Expected chunk at {}", path.display());
