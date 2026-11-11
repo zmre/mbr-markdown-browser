@@ -69,12 +69,20 @@ the bottom-right corner that starts the slides. While the slides play, the iOS a
 bar and the status bar so the deck gets the whole screen, and turns off its
 back/forward edge swipes so a swipe changes slides instead of leaving the page.
 
+The slides open on the slide you were reading: whichever section is at the top
+of the screen (below the header) when you press Play. At the top of the page,
+that is the first slide.
+
 ### Leaving the slides
 
 Press `q`, or click the ✕ in the bottom-left corner, to leave the presentation
 and get the page back. The ✕ is almost invisible while you present, and shows
 up when you point at it or tab to it; on a touch screen, which cannot hover, it
 stays visible. In the iOS app the ✕ also brings the navigation bar back.
+
+The page comes back scrolled to the section of the slide you left, so you can
+edit it and press `p` to see it as a slide again. For a moment the address bar
+carries `?mbr-slide=3`, which mbr removes as soon as the page has scrolled.
 
 ### Reloading keeps you in the slides
 

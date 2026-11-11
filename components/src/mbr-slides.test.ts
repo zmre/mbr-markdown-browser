@@ -34,7 +34,17 @@ vi.mock('./mbr-katex.ts', () => ({
 }))
 
 import type { MbrSlidesElement } from './mbr-slides.ts'
-import { SLIDES_STATE_EVENT, groupKanbanColumns, isSlideHash } from './mbr-slides.ts'
+import {
+  RESUME_SLIDE_PARAM,
+  SLIDES_STATE_EVENT,
+  deckSections,
+  exitUrl,
+  groupKanbanColumns,
+  isSlideHash,
+  resumeSlideIndex,
+  topmostVisibleIndex,
+  withoutResumeSlide,
+} from './mbr-slides.ts'
 
 interface RevealStub {
   initialize: ReturnType<typeof vi.fn>
@@ -1083,5 +1093,239 @@ describe('UNIT reveal-slides.css review notes while playing', () => {
     // bottom edge at any width. The button sits at 1rem + the offset.
     const offset = /--mbr-fab-stack-offset:\s*([\d.]+)rem/.exec(slidesRule('body.slides-container'))?.[1]
     expect(16 + Number(offset) * 16).toBeGreaterThanOrEqual(117 + 12)
+  })
+})
+
+describe('UNIT deckSections', () => {
+  function main(html: string): Element {
+    const el = document.createElement('main')
+    el.innerHTML = html
+    return el
+  }
+  const ids = (sections: Element[]): string[] => sections.map((s) => s.id)
+
+  it('takes top-level sections only, nested ones travel with their parent', () => {
+    expect(
+      ids(deckSections(main('<section id="a"><blockquote><section id="n"></section></blockquote></section><section id="b"></section>')))
+    ).toEqual(['a', 'b'])
+  })
+
+  it('drops the empty leading section, and only that one', () => {
+    expect(ids(deckSections(main('<section> </section><section id="a"><p>A</p></section><section id="e"></section>')))).toEqual([
+      'a',
+      'e',
+    ])
+  })
+
+  it('keeps a lone empty section and an attributed one', () => {
+    expect(ids(deckSections(main('<section id="only"></section>')))).toEqual(['only'])
+    expect(ids(deckSections(main('<section id="t"></section><section id="a"></section>')))).toEqual(['t', 'a'])
+  })
+})
+
+describe('UNIT topmostVisibleIndex', () => {
+  // Three 500px sections laid out from `offset` (viewport coordinates).
+  const laidOut = (offset: number) =>
+    [0, 1, 2].map((i) => ({ top: offset + i * 500, bottom: offset + (i + 1) * 500 }))
+
+  it('is 0 at the top of the page', () => {
+    expect(topmostVisibleIndex(laidOut(100), 48)).toBe(0)
+  })
+
+  it('is the section under the header in the middle of the page', () => {
+    // Scrolled 700px: section 1 spans -100..400 under a 48px header.
+    expect(topmostVisibleIndex(laidOut(-600), 48)).toBe(1)
+  })
+
+  it('skips a sliver of the previous section left below the header', () => {
+    // Section 0 ends 20px below the header line: section 1 is what is read.
+    expect(topmostVisibleIndex(laidOut(-432), 48)).toBe(1)
+    // 100px of it left is still the slide on screen.
+    expect(topmostVisibleIndex(laidOut(-352), 48)).toBe(0)
+  })
+
+  it('is the last slide past the end, and 0 for no slides', () => {
+    expect(topmostVisibleIndex(laidOut(-5000), 48)).toBe(2)
+    expect(topmostVisibleIndex([], 48)).toBe(0)
+  })
+})
+
+describe('UNIT resume slide parameter', () => {
+  it('is named mbr-slide', () => {
+    expect(RESUME_SLIDE_PARAM).toBe('mbr-slide')
+  })
+
+  it('parses a plain non-negative integer', () => {
+    expect(resumeSlideIndex('?mbr-slide=3')).toBe(3)
+    expect(resumeSlideIndex('?a=1&mbr-slide=0')).toBe(0)
+  })
+
+  it('rejects anything else', () => {
+    for (const search of ['', '?a=1', '?mbr-slide=', '?mbr-slide=-1', '?mbr-slide=1.5', '?mbr-slide=x', '?mbr-slide=1e3', '?mbr-slide=99999999']) {
+      expect(resumeSlideIndex(search), search).toBeNull()
+    }
+  })
+
+  it('strips only itself', () => {
+    expect(withoutResumeSlide('?mbr-slide=3')).toBe('')
+    expect(withoutResumeSlide('?a=1&mbr-slide=3&b=2')).toBe('?a=1&b=2')
+    expect(withoutResumeSlide('?a=b%20c')).toBe('?a=b%20c')
+    expect(withoutResumeSlide('')).toBe('')
+  })
+
+  it('builds the exit URL', () => {
+    expect(exitUrl('/deck/', '', 3)).toBe('/deck/?mbr-slide=3')
+    expect(exitUrl('/deck/', '?a=1', 2)).toBe('/deck/?a=1&mbr-slide=2')
+    expect(exitUrl('/deck/', '?mbr-slide=1', 4)).toBe('/deck/?mbr-slide=4')
+    expect(exitUrl('/deck/', '?a=b%20c', 0)).toBe('/deck/?a=b%20c')
+    expect(exitUrl('/deck/', '', undefined)).toBe('/deck/')
+    expect(exitUrl('/deck/', '?mbr-slide=1', null)).toBe('/deck/')
+  })
+})
+
+describe('UNIT MbrSlidesElement keeps your place', () => {
+  let element: MbrSlidesElement | null = null
+  const deck = '<section id="s0"><p>0</p></section><hr /><section id="s1"><p>1</p></section><hr /><section id="s2"><p>2</p></section>'
+
+  afterEach(() => {
+    element?.remove()
+    element = null
+    document.body.className = ''
+    document.body.innerHTML = ''
+    history.replaceState(null, '', location.pathname)
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    vi.clearAllMocks()
+  })
+
+  /** Lay the deck's sections out 500px apart, scrolled by `scrollY`. */
+  function layOut(scrollY: number): void {
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(scrollY)
+    document.querySelectorAll<HTMLElement>('#wrapper section').forEach((section) => {
+      const index = Number(section.id.slice(1))
+      const top = index * 500 - scrollY
+      vi.spyOn(section, 'getBoundingClientRect').mockReturnValue({ top, bottom: top + 500 } as DOMRect)
+    })
+  }
+
+  describe('starting', () => {
+    it('opens on the slide at the top of the screen', async () => {
+      setupPage(deck)
+      const reveal = stubReveal()
+      let hashAtInit = ''
+      reveal.initialize.mockImplementation(() => {
+        hashAtInit = location.hash
+        return Promise.resolve()
+      })
+      element = await mount()
+      layOut(1100)
+      element.open()
+      await flush(element)
+      expect(hashAtInit).toBe('#/2')
+    })
+
+    it('opens on the first slide at the top of the page', async () => {
+      setupPage(deck)
+      const reveal = stubReveal()
+      let hashAtInit: string | null = null
+      reveal.initialize.mockImplementation(() => {
+        hashAtInit = location.hash
+        return Promise.resolve()
+      })
+      element = await mount()
+      layOut(0)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'p' }))
+      await flush(element)
+      expect(hashAtInit).toBe('')
+    })
+
+    it('leaves an auto-start on the slide its hash names', async () => {
+      setHash('#/1')
+      setupPage(deck)
+      const reveal = stubReveal()
+      let hashAtInit = ''
+      reveal.initialize.mockImplementation(() => {
+        hashAtInit = location.hash
+        return Promise.resolve()
+      })
+      // Scrolled to the third section, but the hash wins.
+      vi.spyOn(window, 'scrollY', 'get').mockReturnValue(1100)
+      element = await mount()
+      await flush(element)
+      expect(hashAtInit).toBe('#/1')
+    })
+  })
+
+  describe('leaving', () => {
+    it('carries the slide being left in the exit URL', async () => {
+      const replace = vi.spyOn(window.location, 'replace').mockImplementation(() => {})
+      setupPage(deck)
+      const reveal = stubReveal()
+      element = await mount()
+      element.open()
+      await flush(element)
+      reveal.getIndices.mockReturnValue({ h: 2, v: 0 })
+      document.querySelector<HTMLButtonElement>('button.mbr-slides-exit')!.click()
+      expect(replace).toHaveBeenCalledWith(`${location.pathname}?mbr-slide=2`)
+    })
+  })
+
+  describe('returning', () => {
+    it('strips the parameter and scrolls its section into view', async () => {
+      history.replaceState(null, '', `${location.pathname}?a=1&mbr-slide=1#keep`)
+      setupPage(deck)
+      const scrolled: string[] = []
+      vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) {
+        scrolled.push(this.id)
+      })
+      element = await mount()
+      expect(location.search).toBe('?a=1')
+      expect(location.hash).toBe('#keep')
+      expect(scrolled).toEqual(['s1'])
+      expect(document.querySelector('#wrapper .reveal')).toBeNull()
+    })
+
+    it('counts slides as the deck does, past a skipped leading section', async () => {
+      history.replaceState(null, '', `${location.pathname}?mbr-slide=0`)
+      setupPage(`<section></section><hr />${deck}`)
+      const scrolled: string[] = []
+      vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) {
+        scrolled.push(this.id)
+      })
+      element = await mount()
+      expect(scrolled).toEqual(['s0'])
+    })
+
+    it('ignores an index past the deck, and still strips it', async () => {
+      history.replaceState(null, '', `${location.pathname}?mbr-slide=9`)
+      setupPage(deck)
+      const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+      element = await mount()
+      expect(location.search).toBe('')
+      expect(scroll).not.toHaveBeenCalled()
+    })
+
+    it('scrolls again at load unless the reader moved first', async () => {
+      vi.spyOn(document, 'readyState', 'get').mockReturnValue('interactive')
+      const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+
+      history.replaceState(null, '', `${location.pathname}?mbr-slide=2`)
+      setupPage(deck)
+      element = await mount()
+      expect(scroll).toHaveBeenCalledTimes(1)
+      window.dispatchEvent(new Event('load'))
+      expect(scroll).toHaveBeenCalledTimes(2)
+      window.dispatchEvent(new Event('load'))
+      expect(scroll).toHaveBeenCalledTimes(2)
+
+      element.remove()
+      scroll.mockClear()
+      history.replaceState(null, '', `${location.pathname}?mbr-slide=2`)
+      setupPage(deck)
+      element = await mount()
+      window.dispatchEvent(new Event('wheel'))
+      window.dispatchEvent(new Event('load'))
+      expect(scroll).toHaveBeenCalledTimes(1)
+    })
   })
 })
