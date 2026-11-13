@@ -1406,9 +1406,13 @@ impl DestinationStyle {
                     (_, Some(path)) => relative_path(target.source_path, path),
                     (_, None) => target.url.to_string(),
                 };
-                let text = text
-                    .as_deref()
-                    .map_or_else(String::new, |text| format!("|{text}"));
+                // A label that repeats the link exactly is what `[[name]]`
+                // already displays, so it is dropped. With a `#fragment`
+                // the default display differs, so the label stays.
+                let text = match text.as_deref() {
+                    Some(text) if !(suffix.is_empty() && text == name) => format!("|{text}"),
+                    _ => String::new(),
+                };
                 format!("[[{name}{suffix}{text}]]")
             }
             Self::RootRelative { extension, suffix } => {
@@ -1623,6 +1627,50 @@ mod tests {
             )
         };
         assert_eq!(style.write(&shared), "[[../people/a/John Doe#part|shown]]");
+    }
+
+    #[test]
+    fn style_drops_a_wikilink_label_only_when_it_repeats_the_name() {
+        let labelled = |text: &str, suffix: &str| DestinationStyle::Wikilink {
+            text: Some(text.to_string()),
+            suffix: suffix.to_string(),
+        };
+        let unique = target(
+            "nclh/NCLH Architecture Notes.md",
+            "/nclh/NCLH Architecture Notes/",
+            "todo.md",
+        );
+        assert_eq!(
+            labelled("NCLH Architecture Notes", "").write(&unique),
+            "[[NCLH Architecture Notes]]"
+        );
+        // A different label, even only in case, is kept.
+        assert_eq!(
+            labelled("Notes", "").write(&unique),
+            "[[NCLH Architecture Notes|Notes]]"
+        );
+        assert_eq!(
+            labelled("nclh architecture notes", "").write(&unique),
+            "[[NCLH Architecture Notes|nclh architecture notes]]"
+        );
+        // With a fragment the default display differs, so the label stays.
+        assert_eq!(
+            labelled("NCLH Architecture Notes", "#part").write(&unique),
+            "[[NCLH Architecture Notes#part|NCLH Architecture Notes]]"
+        );
+        // Written by path, the stem as label is not the name.
+        let shared = Target {
+            unique_name: false,
+            ..target(
+                "people/a/John Doe.md",
+                "/people/a/John Doe/",
+                "notes/todo.md",
+            )
+        };
+        assert_eq!(
+            labelled("John Doe", "").write(&shared),
+            "[[../people/a/John Doe|John Doe]]"
+        );
     }
 
     #[test]

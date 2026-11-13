@@ -222,7 +222,8 @@ that were extended or shortened. Each is written as a ready-to-paste
 replacement in the style of the broken one: a relative `.md` path stays a path
 relative to the note's folder (`../install/setup.md`), a root-relative URL stays
 root-relative (`/install/setup/`), a wikilink stays a wikilink (`[[New Name]]`,
-or a path such as `[[../people/a/John Doe]]` when the name is shared), media
+or a path such as `[[../people/a/John Doe]]` when the name is shared; its
+`|label` is kept unless it only repeats the name), media
 gets a relative file path, and a `#fragment` is kept. When nothing matches but
 the missing target's folder still exists, the report says so instead.
 
