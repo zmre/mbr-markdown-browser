@@ -1980,7 +1980,7 @@ pub(crate) fn is_reveal_background_url(value: &str) -> bool {
 /// so `data-src=`, `data-srcset=` and `xlink:href=` do not match. Group 1 is
 /// everything up to the opening quote, group 2 the attribute name, group 3 a
 /// double-quoted value, group 4 a single-quoted one.
-static HTML_URL_ATTR: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static HTML_URL_ATTR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)((?:^|\s)(srcset|src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#)
         .expect("HTML_URL_ATTR is a valid regex")
 });
@@ -2097,7 +2097,10 @@ struct FirstPass<'a> {
 
 /// Strips a leading BOM and substitutes `[[Source:value]]` tag wikilinks with
 /// standard markdown links, which must happen before the parser sees the text.
-fn prepare_source<'s>(source: &'s str, valid_tag_sources: &HashSet<String>) -> Cow<'s, str> {
+pub(crate) fn prepare_source<'s>(
+    source: &'s str,
+    valid_tag_sources: &HashSet<String>,
+) -> Cow<'s, str> {
     let source = strip_bom(source);
     if valid_tag_sources.is_empty() {
         Cow::Borrowed(source)
@@ -3610,6 +3613,58 @@ fn generate_anchor_id(text: &str, anchor_ids: &mut HashMap<String, usize>) -> St
     candidate
 }
 
+/// The href pass 2 writes for a markdown link, and the absolute URL a bare
+/// `[[Name]]` resolved to through the global wikilink index (when it did).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkHref {
+    /// What goes into `<a href>` (before HTML escaping).
+    pub href: String,
+    /// `Some(absolute URL)` when a bare body wikilink resolved globally.
+    pub global: Option<String>,
+}
+
+/// The href a markdown link's destination becomes: a tag link
+/// (`Tags:rust`) its tag page, a bare body wikilink (`[[Name]]`, no `/`)
+/// Obsidian-style — current folder first, else the first matching note
+/// anywhere ([`WikilinkIndex::resolve_wikilink`], which answers only for the
+/// global fallback, so same-folder links keep the default transform
+/// byte-for-byte) — and anything else [`transform_link`].
+///
+/// The one implementation pass 2 and the link checker
+/// (`crate::link_check`, which maps a broken emitted href back to its source
+/// line) share, so the two cannot disagree. Email autolinks never reach it.
+pub fn link_href(
+    dest_url: &str,
+    is_wikilink: bool,
+    config: &LinkTransformConfig,
+    valid_tag_sources: &HashSet<String>,
+    wikilink_index: Option<&WikilinkIndex>,
+) -> LinkHref {
+    if let Some(wikilink) = parse_tag_link(dest_url, valid_tag_sources) {
+        return LinkHref {
+            href: transform_link(&wikilink.url_path(), config),
+            global: None,
+        };
+    }
+    let global = (is_wikilink && !dest_url.contains('/'))
+        .then(|| {
+            wikilink_index.and_then(|idx| {
+                idx.resolve_wikilink(dest_url, &config.current_page_url, config.is_index_file)
+            })
+        })
+        .flatten();
+    match global {
+        Some(abs) => LinkHref {
+            href: transform_link(&abs, config),
+            global: Some(abs),
+        },
+        None => LinkHref {
+            href: transform_link(dest_url, config),
+            global: None,
+        },
+    }
+}
+
 /// Processes a single markdown event, transforming it as needed.
 ///
 /// This function is now synchronous because all async work (oembed fetching)
@@ -3703,63 +3758,46 @@ fn process_event(
             state.current_link_dest = Some(dest_url.to_string());
             state.current_link_text.clear();
 
-            // First check if this is a tag link (e.g., Tags:rust, performers:Joshua Jay)
-            // If so, transform to the tag URL path (/tags/rust/, /performers/joshua_jay/)
-            let transformed_url =
-                if let Some(wikilink) = parse_tag_link(dest_url, &state.valid_tag_sources) {
-                    transform_link(&wikilink.url_path(), &state.link_transform_config)
-                } else {
-                    // Not a tag link. For bare-name body wikilinks (`[[Name]]`),
-                    // apply Obsidian-style global resolution: current folder first,
-                    // else the first matching file anywhere. `resolve_wikilink`
-                    // returns Some only for the global-fallback case, so same-folder
-                    // links keep the default relative transform byte-for-byte.
-                    let is_bare_wikilink =
-                        matches!(link_type, LinkType::WikiLink { .. }) && !dest_url.contains('/');
-                    let global = if is_bare_wikilink {
-                        state.wikilink_index.as_ref().and_then(|idx| {
-                            idx.resolve_wikilink(
-                                dest_url,
-                                &state.link_transform_config.current_page_url,
-                                state.link_transform_config.is_index_file,
-                            )
-                        })
-                    } else {
-                        None
-                    };
-                    // Record namesake ambiguity separately from `global`: a
-                    // same-folder link needs no rewrite (`global` is None) yet can
-                    // still have resolved arbitrarily between two case-variant
-                    // files, and a global-fallback link that *did* rewrite may have
-                    // had several candidates to choose from.
-                    let ambiguous = if is_bare_wikilink {
-                        state.wikilink_index.as_ref().and_then(|idx| {
-                            idx.ambiguity_for(
-                                dest_url,
-                                &state.link_transform_config.current_page_url,
-                                state.link_transform_config.is_index_file,
-                            )
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(found) = ambiguous
-                        && !state.ambiguous_wikilinks.contains(&found)
-                    {
-                        state.ambiguous_wikilinks.push(found);
-                    }
-                    match global {
-                        Some(abs) => {
-                            // Override the recorded outbound target with the absolute
-                            // URL so link validation and backlinks resolve correctly
-                            // (its leading `/` makes `resolve_outbound_links` leave it
-                            // untouched, and the path resolver then finds it).
-                            state.current_link_dest = Some(abs.clone());
-                            transform_link(&abs, &state.link_transform_config)
-                        }
-                        None => transform_link(dest_url, &state.link_transform_config),
-                    }
-                };
+            let is_wikilink = matches!(link_type, LinkType::WikiLink { .. });
+            // Record namesake ambiguity separately from the resolution: a
+            // same-folder link needs no rewrite yet can still have resolved
+            // arbitrarily between two case-variant files, and a global-fallback
+            // link that *did* rewrite may have had several candidates to
+            // choose from.
+            let ambiguous = if is_wikilink
+                && !dest_url.contains('/')
+                && parse_tag_link(dest_url, &state.valid_tag_sources).is_none()
+            {
+                state.wikilink_index.as_ref().and_then(|idx| {
+                    idx.ambiguity_for(
+                        dest_url,
+                        &state.link_transform_config.current_page_url,
+                        state.link_transform_config.is_index_file,
+                    )
+                })
+            } else {
+                None
+            };
+            if let Some(found) = ambiguous
+                && !state.ambiguous_wikilinks.contains(&found)
+            {
+                state.ambiguous_wikilinks.push(found);
+            }
+            let LinkHref { href, global } = link_href(
+                dest_url,
+                is_wikilink,
+                &state.link_transform_config,
+                &state.valid_tag_sources,
+                state.wikilink_index.as_deref(),
+            );
+            if let Some(abs) = global {
+                // Override the recorded outbound target with the absolute
+                // URL so link validation and backlinks resolve correctly
+                // (its leading `/` makes `resolve_outbound_links` leave it
+                // untouched, and the path resolver then finds it).
+                state.current_link_dest = Some(abs);
+            }
+            let transformed_url = href;
 
             let new_event = Event::Start(Tag::Link {
                 link_type: *link_type,

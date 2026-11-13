@@ -641,3 +641,146 @@ fn test_edit_and_no_edit_are_mutually_exclusive() {
         stderr_of(&output)
     );
 }
+
+// ---- --check-links-only ----------------------------------------------------
+
+/// A repository where `setup.md` moved to `install/` and an image to `assets/`.
+fn repo_with_moved_files() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "docs/guide.md",
+        "# Guide\n\nSee [Setup](../setup.md).\n\n![flow](img/flow.png)\n",
+    );
+    repo.create_markdown("install/setup.md", "# Setup\n");
+    repo.create_static_file("assets/flow.png", b"png");
+    repo
+}
+
+/// Runs `mbr --check-links-only` with `extra_args`, from inside a scratch
+/// directory so a stray output folder would be noticed.
+fn run_check(repo: &TestRepo, cwd: &Path, extra_args: &[&str]) -> Output {
+    mbr_command()
+        .current_dir(cwd)
+        .arg("--check-links-only")
+        .args(extra_args)
+        .arg(repo.path())
+        .output()
+        .expect("failed to run the mbr binary")
+}
+
+#[test]
+fn test_check_links_only_reports_moved_files_as_a_markdown_todo_list() {
+    let repo = repo_with_moved_files();
+    let cwd = TempDir::new().expect("cwd");
+    let output = run_check(&repo, cwd.path(), &[]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr_of(&output));
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.starts_with("# Broken links: 2 in 1 file\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("## docs/guide.md\n"), "{stdout}");
+    assert!(
+        stdout.contains("- [ ] L3 `[Setup](../setup.md)` — no such page or file\n  - did you mean: `../install/setup.md` (Setup)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("- [ ] L5 `![flow](img/flow.png)` — no such file\n  - did you mean: `../assets/flow.png`\n"),
+        "{stdout}"
+    );
+    // Progress goes to stderr, never into the report.
+    assert!(!stdout.contains("Checking links"), "{stdout}");
+    assert!(stderr_of(&output).contains("Checking links in 2 notes"));
+}
+
+#[test]
+fn test_check_links_only_json_report() {
+    let repo = repo_with_moved_files();
+    let cwd = TempDir::new().expect("cwd");
+    let output = run_check(&repo, cwd.path(), &["--format", "json", "-q"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr_of(&output));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["summary"]["problems"], 2);
+    assert_eq!(report["summary"]["files_checked"], 2);
+    let problem = &report["files"][0]["problems"][0];
+    assert_eq!(report["files"][0]["path"], "docs/guide.md");
+    assert_eq!(problem["line"], 3);
+    assert_eq!(problem["kind"], "broken_link");
+    assert_eq!(problem["reason"], "missing");
+    assert_eq!(problem["syntax"], "link");
+    assert_eq!(problem["authored"], "[Setup](../setup.md)");
+    assert_eq!(problem["destination"], "../setup.md");
+    assert_eq!(
+        problem["suggestions"][0]["replacement"],
+        "../install/setup.md"
+    );
+    assert_eq!(problem["suggestions"][0]["url"], "/install/setup/");
+    assert_eq!(problem["suggestions"][0]["path"], "install/setup.md");
+    assert!(stderr_of(&output).is_empty(), "-q: {}", stderr_of(&output));
+}
+
+#[test]
+fn test_check_links_only_exits_zero_on_a_clean_repo_and_writes_nothing() {
+    let repo = repo_without_broken_links();
+    let cwd = TempDir::new().expect("cwd");
+    let before: Vec<_> = std::fs::read_dir(repo.path())
+        .expect("list repo")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    let output = run_check(&repo, cwd.path(), &["-q"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(stdout_of(&output), "No broken links in 2 files.\n");
+    assert!(
+        std::fs::read_dir(cwd.path())
+            .expect("list cwd")
+            .next()
+            .is_none(),
+        "no build/ output folder"
+    );
+    let after: Vec<_> = std::fs::read_dir(repo.path())
+        .expect("list repo")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "nothing written into the repository"
+    );
+}
+
+#[test]
+fn test_check_links_only_exits_two_when_the_check_cannot_run() {
+    let cwd = TempDir::new().expect("cwd");
+    let output = mbr_command()
+        .current_dir(cwd.path())
+        .args(["--check-links-only", "-q"])
+        .arg(cwd.path().join("does-not-exist"))
+        .output()
+        .expect("failed to run the mbr binary");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert!(stdout_of(&output).is_empty());
+}
+
+#[test]
+fn test_check_links_only_conflicts_with_build_and_format_needs_it() {
+    let repo = repo_without_broken_links();
+    let with_build = mbr_command()
+        .args(["--check-links-only", "-b"])
+        .arg(repo.path())
+        .output()
+        .expect("run");
+    assert!(!with_build.status.success());
+    assert!(stderr_of(&with_build).contains("cannot be used with"));
+
+    let format_alone = mbr_command()
+        .args(["--format", "json", "-b"])
+        .arg(repo.path())
+        .output()
+        .expect("run");
+    assert!(!format_alone.status.success());
+}

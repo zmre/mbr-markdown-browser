@@ -125,6 +125,12 @@ shortened (`meeting` ↔ `meeting-notes`). Fix the link by hand, or follow one t
 check it is the right note. Nothing is offered for a link that only lacks its
 trailing slash: its target exists.
 
+To list every broken link in the repository at once — with the same checks,
+the source line of each, and the same suggestions written as ready-to-paste
+replacements — run [`mbr --check-links-only`](../reference/cli.md#checking-links).
+It builds nothing, prints a markdown todo list (or JSON with `--format json`),
+and exits `1` when something is broken, so it also works as a CI check.
+
 ### When a page is not found
 
 Following a link to a page that is gone shows mbr's 404 page, which suggests

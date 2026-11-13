@@ -208,7 +208,7 @@ pub struct PageErrors {
 /// nothing — an error that "exists" but is invisible is worse than no error.
 /// Every one of these does break a reader's navigation, so the label is honest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinkDefect {
+pub enum LinkDefect {
     /// The target does not resolve to anything the server would serve.
     Missing,
     /// A `..` climbed above the repository root. Browsers clamp this (RFC 3986
@@ -375,6 +375,40 @@ pub fn validate_rendered_links(
     resolver_config: &PathResolverConfig,
     page_url: &str,
 ) -> Vec<PageError> {
+    rendered_link_defects(html, resolver_config, page_url)
+        .into_iter()
+        .map(|broken| {
+            let (_, anchor) = crate::link_index::split_url_anchor(&broken.href);
+            PageError::BrokenInternalLink {
+                target: broken.href,
+                text: broken.text,
+                anchor,
+            }
+        })
+        .collect()
+}
+
+/// One `<a href>` [`rendered_link_defects`] found broken, with what is wrong
+/// with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokenRenderedLink {
+    /// The href as emitted (attribute value, entities decoded).
+    pub href: String,
+    /// The link's text, trimmed.
+    pub text: String,
+    pub defect: LinkDefect,
+}
+
+/// The judgement behind [`validate_rendered_links`], keeping the defect each
+/// broken href has: the link checker (`mbr --check-links-only`) words its
+/// report and its suggestion by it, while the wire format folds all three into
+/// [`PageError::BrokenInternalLink`]. Each distinct href once, in document
+/// order.
+pub fn rendered_link_defects(
+    html: &str,
+    resolver_config: &PathResolverConfig,
+    page_url: &str,
+) -> Vec<BrokenRenderedLink> {
     let Ok(selector) = Selector::parse("a[href]") else {
         return Vec::new();
     };
@@ -387,13 +421,11 @@ pub fn validate_rendered_links(
             if !seen.insert(href.to_string()) {
                 return None;
             }
-            classify_emitted_href(href, resolver_config, page_url)?;
-            let text = element.text().collect::<String>().trim().to_string();
-            let (_, anchor) = crate::link_index::split_url_anchor(href);
-            Some(PageError::BrokenInternalLink {
-                target: href.to_string(),
-                text,
-                anchor,
+            let defect = classify_emitted_href(href, resolver_config, page_url)?;
+            Some(BrokenRenderedLink {
+                href: href.to_string(),
+                text: element.text().collect::<String>().trim().to_string(),
+                defect,
             })
         })
         .collect()
