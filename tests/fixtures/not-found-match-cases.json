@@ -101,6 +101,12 @@
         },
         {
           "url_path": "/docs/img/flow.png"
+        },
+        {
+          "url_path": "/b/2016-12-13--ee.x-m4a"
+        },
+        {
+          "url_path": "/backups/archive.tar.gz"
         }
       ]
     },
@@ -434,6 +440,53 @@
         "/posts/hello-world/"
       ],
       "folder": null
+    },
+    {
+      "name": "file with a dash in its extension moved",
+      "site": "basic",
+      "path": "/a/2016-12-13--ee.x-m4a",
+      "matches": [
+        "/b/2016-12-13--ee.x-m4a"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/a/",
+        "a"
+      ]
+    },
+    {
+      "name": "file with a double extension moved",
+      "site": "basic",
+      "path": "/old/archive.tar.gz",
+      "matches": [
+        "/backups/archive.tar.gz"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/old/",
+        "old"
+      ]
+    },
+    {
+      "name": "extensionless renamed note still matches partially",
+      "site": "basic",
+      "path": "/work/meeting/",
+      "matches": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/",
+        "/a/meeting-notes/",
+        "/a/weekly meetings/"
+      ],
+      "did_you_mean": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/"
+      ],
+      "folder": [
+        "/work/",
+        "work"
+      ]
     }
   ]
 }

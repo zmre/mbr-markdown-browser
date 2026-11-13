@@ -100,6 +100,15 @@ function stripExtension(name: string): string {
   return name.replace(/\.[A-Za-z0-9]{1,10}$/, '')
 }
 
+/**
+ * A `.` past the first character: `2016-12-13--ee.x-m4a` names a file
+ * even where `extensionOf` reads no extension (it allows only alphanumerics).
+ * A leading dot alone (`.env`) does not count.
+ */
+function hasInnerDot(name: string): boolean {
+  return name.lastIndexOf('.') > 0
+}
+
 function fileNameOf(path: string): string {
   const segs = segmentsOf(path)
   return segs.length === 0 ? '' : segs[segs.length - 1]
@@ -148,7 +157,8 @@ function targetOf(path: string, site: SiteIndex, markdownExts: Set<string>): Tar
   }
   const name = normalizeName(stem)
   if (!name) return null
-  return { name, folder: segs.slice(0, -1), fileName: !isMarkdown && ext ? last : null }
+  const isFile = !isMarkdown && (ext !== null || hasInnerDot(last))
+  return { name, folder: segs.slice(0, -1), fileName: isFile ? last : null }
 }
 
 function titleOf(file: SiteMarkdownFile): string {

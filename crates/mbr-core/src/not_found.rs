@@ -136,6 +136,13 @@ fn strip_extension(name: &str) -> &str {
     EXTENSION.find(name).map_or(name, |m| &name[..m.start()])
 }
 
+/// A `.` past the first character: `2016-12-13--ee.x-m4a` names a file
+/// even where [`EXTENSION`] reads no extension (it allows only alphanumerics).
+/// A leading dot alone (`.env`) does not count.
+fn has_inner_dot(name: &str) -> bool {
+    name.rfind('.').is_some_and(|i| i > 0)
+}
+
 fn file_name_of(path: &str) -> &str {
     segments_of(path).last().copied().unwrap_or("")
 }
@@ -391,7 +398,8 @@ impl NotFoundIndex {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            file_name: (!is_markdown && ext.is_some()).then(|| last.to_string()),
+            file_name: (!is_markdown && (ext.is_some() || has_inner_dot(last)))
+                .then(|| last.to_string()),
         })
     }
 

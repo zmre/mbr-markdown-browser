@@ -1848,6 +1848,24 @@ mod tests {
         assert_eq!(found[1].line, Some(5));
     }
 
+    /// Regression: an extension the matcher's extension rule does not read
+    /// (`x-m4a`, a dash) still names a file, so a moved one is found.
+    #[test]
+    fn moved_file_with_a_dash_in_its_extension_is_suggested() {
+        let dir = repo(&[
+            (
+                "a/note.md",
+                "# Note\n\n![][ref]\n\n[ref]: 2016-12-13--ee.x-m4a\n",
+            ),
+            ("a/other.md", "# Other\n"),
+            ("b/2016-12-13--ee.x-m4a", "audio"),
+        ]);
+        let report = check(&dir);
+        let found = problems(&report, "a/note.md");
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(replacements(&found[0]), ["../b/2016-12-13--ee.x-m4a"]);
+    }
+
     #[test]
     fn root_relative_link_gets_a_root_relative_suggestion() {
         let dir = repo(&[
