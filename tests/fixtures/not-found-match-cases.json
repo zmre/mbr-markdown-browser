@@ -1,0 +1,492 @@
+{
+  "sites": {
+    "basic": {
+      "index_file": "index.md",
+      "markdown_files": [
+        {
+          "url_path": "/",
+          "raw_path": "index.md"
+        },
+        {
+          "url_path": "/archive/2024/project-plan/",
+          "raw_path": "archive/2024/project-plan.md"
+        },
+        {
+          "url_path": "/archive/Project_Plan_Old/",
+          "raw_path": "archive/Project_Plan_Old.md"
+        },
+        {
+          "url_path": "/work/other/",
+          "raw_path": "work/other.md",
+          "frontmatter": {
+            "title": "  Other Things  "
+          }
+        },
+        {
+          "url_path": "/work/meeting-agenda/",
+          "raw_path": "work/meeting-agenda.md"
+        },
+        {
+          "url_path": "/work/x/meeting/",
+          "raw_path": "work/x/meeting.md"
+        },
+        {
+          "url_path": "/b/meeting/",
+          "raw_path": "b/meeting.md"
+        },
+        {
+          "url_path": "/a/meeting-notes/",
+          "raw_path": "a/meeting-notes.md"
+        },
+        {
+          "url_path": "/a/weekly meetings/",
+          "raw_path": "a/weekly meetings.md"
+        },
+        {
+          "url_path": "/archive/clients/acme/",
+          "raw_path": "archive/clients/acme/index.md",
+          "frontmatter": {
+            "title": "Acme Corp"
+          }
+        },
+        {
+          "url_path": "/archive/clients/acme/notes/",
+          "raw_path": "archive/clients/acme/notes.md"
+        },
+        {
+          "url_path": "/docs/",
+          "raw_path": "docs/index.md",
+          "frontmatter": {
+            "title": "Documentation"
+          }
+        },
+        {
+          "url_path": "/docs/guide/",
+          "raw_path": "docs/guide.md"
+        },
+        {
+          "url_path": "/docs/setup/",
+          "raw_path": "docs/setup.markdown"
+        },
+        {
+          "url_path": "/docs/faq/",
+          "raw_path": "docs/faq.md"
+        },
+        {
+          "url_path": "/docs/faq-billing/",
+          "raw_path": "docs/faq-billing.md"
+        },
+        {
+          "url_path": "/roadmap/",
+          "raw_path": "roadmap.md"
+        },
+        {
+          "url_path": "/Café Notes/",
+          "raw_path": "Café Notes.md"
+        },
+        {
+          "url_path": "/old/guide/",
+          "raw_path": "old/guide.md"
+        }
+      ],
+      "other_files": [
+        {
+          "url_path": "/assets/report.pdf"
+        },
+        {
+          "url_path": "/files/Report.PDF"
+        },
+        {
+          "url_path": "/images/flow.png"
+        },
+        {
+          "url_path": "/docs/img/flow.png"
+        },
+        {
+          "url_path": "/b/2016-12-13--ee.x-m4a"
+        },
+        {
+          "url_path": "/backups/archive.tar.gz"
+        }
+      ]
+    },
+    "custom-index": {
+      "index_file": "_index.md",
+      "markdown_files": [
+        {
+          "url_path": "/",
+          "raw_path": "_index.md"
+        },
+        {
+          "url_path": "/posts/hello-world/",
+          "raw_path": "posts/hello-world.mdx"
+        },
+        {
+          "url_path": "/section/",
+          "raw_path": "section/_index.md"
+        },
+        {
+          "url_path": "/section/page/",
+          "raw_path": "section/page.md"
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "moved to another folder",
+      "site": "basic",
+      "path": "/work/project-plan/",
+      "matches": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "did_you_mean": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "folder": [
+        "/work/",
+        "work"
+      ]
+    },
+    {
+      "name": "case, spaces, dashes and underscores",
+      "site": "basic",
+      "path": "/work/project plan/",
+      "matches": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "did_you_mean": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "folder": [
+        "/work/",
+        "work"
+      ]
+    },
+    {
+      "name": "markdown extension stripped",
+      "site": "basic",
+      "path": "/work/project-plan.md",
+      "matches": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "did_you_mean": [
+        "/archive/2024/project-plan/",
+        "/archive/Project_Plan_Old/"
+      ],
+      "folder": [
+        "/work/",
+        "work"
+      ]
+    },
+    {
+      "name": "configured extension from raw paths",
+      "site": "basic",
+      "path": "/old/setup.markdown",
+      "matches": [
+        "/docs/setup/"
+      ],
+      "did_you_mean": [
+        "/docs/setup/"
+      ],
+      "folder": [
+        "/old/",
+        "old"
+      ]
+    },
+    {
+      "name": "index note read as its folder",
+      "site": "basic",
+      "path": "/clients/acme/index.md",
+      "matches": [
+        "/archive/clients/acme/"
+      ],
+      "did_you_mean": [
+        "/archive/clients/acme/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "tiers then shared folders then url",
+      "site": "basic",
+      "path": "/work/x/old/meeting/",
+      "matches": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/",
+        "/a/meeting-notes/",
+        "/a/weekly meetings/"
+      ],
+      "did_you_mean": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "target starts a word of a name",
+      "site": "basic",
+      "path": "/x/meetings/",
+      "matches": [
+        "/a/weekly meetings/",
+        "/b/meeting/",
+        "/work/x/meeting/"
+      ],
+      "did_you_mean": [
+        "/a/weekly meetings/",
+        "/b/meeting/",
+        "/work/x/meeting/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "a name starts a word of the target",
+      "site": "basic",
+      "path": "/x/roadmap-2025/",
+      "matches": [
+        "/roadmap/"
+      ],
+      "did_you_mean": [
+        "/roadmap/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "too short for a partial match",
+      "site": "basic",
+      "path": "/x/faq/",
+      "matches": [
+        "/docs/faq/"
+      ],
+      "did_you_mean": [
+        "/docs/faq/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "file by exact name",
+      "site": "basic",
+      "path": "/docs/report.pdf",
+      "matches": [
+        "/assets/report.pdf",
+        "/files/Report.PDF"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/docs/",
+        "Documentation"
+      ]
+    },
+    {
+      "name": "file name case-insensitive",
+      "site": "basic",
+      "path": "/report.pdf",
+      "matches": [
+        "/assets/report.pdf",
+        "/files/Report.PDF"
+      ],
+      "did_you_mean": [],
+      "folder": null
+    },
+    {
+      "name": "image moved",
+      "site": "basic",
+      "path": "/docs/flow.png",
+      "matches": [
+        "/docs/img/flow.png",
+        "/images/flow.png"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/docs/",
+        "Documentation"
+      ]
+    },
+    {
+      "name": "file never matches a note partially",
+      "site": "basic",
+      "path": "/docs/guide.txt",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": [
+        "/docs/",
+        "Documentation"
+      ]
+    },
+    {
+      "name": "existing page gets no did-you-mean",
+      "site": "basic",
+      "path": "/docs/guide",
+      "matches": [
+        "/old/guide/"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/docs/",
+        "Documentation"
+      ]
+    },
+    {
+      "name": "self never suggested",
+      "site": "basic",
+      "path": "/old/guide/",
+      "matches": [
+        "/docs/guide/"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/old/",
+        "old"
+      ]
+    },
+    {
+      "name": "folder fallback with index title",
+      "site": "basic",
+      "path": "/docs/nothing-like-it/",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": [
+        "/docs/",
+        "Documentation"
+      ]
+    },
+    {
+      "name": "folder fallback without index",
+      "site": "basic",
+      "path": "/work/zzzz-unmatched/",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": [
+        "/work/",
+        "work"
+      ]
+    },
+    {
+      "name": "no folder fallback at the root",
+      "site": "basic",
+      "path": "/zzzz-unmatched/",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": null
+    },
+    {
+      "name": "no folder fallback for a vanished folder",
+      "site": "basic",
+      "path": "/gone/zzzz-unmatched/",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": null
+    },
+    {
+      "name": "non-ascii names",
+      "site": "basic",
+      "path": "/elsewhere/café-notes/",
+      "matches": [
+        "/Café Notes/",
+        "/archive/clients/acme/notes/"
+      ],
+      "did_you_mean": [
+        "/Café Notes/",
+        "/archive/clients/acme/notes/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "root path",
+      "site": "basic",
+      "path": "/",
+      "matches": [],
+      "did_you_mean": [],
+      "folder": null
+    },
+    {
+      "name": "custom index file",
+      "site": "custom-index",
+      "path": "/old/section/_index.md",
+      "matches": [
+        "/section/"
+      ],
+      "did_you_mean": [
+        "/section/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "mdx extension from raw paths",
+      "site": "custom-index",
+      "path": "/blog/hello-world.mdx",
+      "matches": [
+        "/posts/hello-world/"
+      ],
+      "did_you_mean": [
+        "/posts/hello-world/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "partial from custom index site",
+      "site": "custom-index",
+      "path": "/blog/hello/",
+      "matches": [
+        "/posts/hello-world/"
+      ],
+      "did_you_mean": [
+        "/posts/hello-world/"
+      ],
+      "folder": null
+    },
+    {
+      "name": "file with a dash in its extension moved",
+      "site": "basic",
+      "path": "/a/2016-12-13--ee.x-m4a",
+      "matches": [
+        "/b/2016-12-13--ee.x-m4a"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/a/",
+        "a"
+      ]
+    },
+    {
+      "name": "file with a double extension moved",
+      "site": "basic",
+      "path": "/old/archive.tar.gz",
+      "matches": [
+        "/backups/archive.tar.gz"
+      ],
+      "did_you_mean": [],
+      "folder": [
+        "/old/",
+        "old"
+      ]
+    },
+    {
+      "name": "extensionless renamed note still matches partially",
+      "site": "basic",
+      "path": "/work/meeting/",
+      "matches": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/",
+        "/a/meeting-notes/",
+        "/a/weekly meetings/"
+      ],
+      "did_you_mean": [
+        "/work/x/meeting/",
+        "/b/meeting/",
+        "/work/meeting-agenda/"
+      ],
+      "folder": [
+        "/work/",
+        "work"
+      ]
+    }
+  ]
+}

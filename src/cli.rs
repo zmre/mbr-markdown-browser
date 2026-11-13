@@ -52,6 +52,19 @@ pub struct Args {
     #[arg(long, group = "mode")]
     pub extract_pdf_cover: bool,
 
+    /// Check the repository's links and print a report of the broken ones
+    /// (markdown todo list, or `--format json`), with suggested fixes. Builds
+    /// nothing and writes no files. Exit code: 0 nothing broken, 1 broken
+    /// links found, 2 the check itself failed
+    #[arg(long, group = "mode")]
+    pub check_links_only: bool,
+
+    /// Report format for --check-links-only (default: markdown)
+    // Checked in `Args::parse_checked`, not with `requires`: a `bool` flag
+    // has a default value (`false`), which satisfies clap's `requires`.
+    #[arg(long, value_enum)]
+    pub format: Option<ReportFormat>,
+
     /// Output directory for static site build (default: "build")
     #[arg(long, default_value = "build")]
     pub output: PathBuf,
@@ -199,7 +212,38 @@ pub struct Args {
     pub generate_edit_token: bool,
 }
 
+/// How `--check-links-only` prints its report.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReportFormat {
+    /// A markdown todo list, grouped by file.
+    #[default]
+    Markdown,
+    /// The report as JSON (schema in docs/reference/cli.md).
+    Json,
+}
+
 impl Args {
+    /// Parses the command line, exiting with clap's usage error (status 2)
+    /// for a combination clap's declarations cannot express.
+    pub fn parse_checked() -> Self {
+        let args = Self::parse();
+        if let Err(message) = args.check_combinations() {
+            use clap::CommandFactory;
+            Self::command()
+                .error(clap::error::ErrorKind::MissingRequiredArgument, message)
+                .exit();
+        }
+        args
+    }
+
+    /// The flag combinations clap does not enforce by itself.
+    pub fn check_combinations(&self) -> Result<(), &'static str> {
+        if self.format.is_some() && !self.check_links_only {
+            return Err("--format applies only to --check-links-only");
+        }
+        Ok(())
+    }
+
     /// Get the log level filter string based on verbosity flags.
     /// Returns a filter suitable for tracing_subscriber::EnvFilter.
     pub fn log_level_filter(&self) -> String {
@@ -394,6 +438,8 @@ mod tests {
             extract_video_metadata: false,
             #[cfg(feature = "media-metadata")]
             extract_pdf_cover: false,
+            check_links_only: false,
+            format: None,
             output: PathBuf::from("build"),
             path: PathBuf::from("."),
             oembed_timeout_ms: None,
@@ -546,6 +592,34 @@ mod tests {
     fn test_parse_quiet_flag() {
         let args = Args::parse_from(["mbr", "-q"]);
         assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_parse_check_links_only_and_format() {
+        let args = Args::parse_from(["mbr", "--check-links-only", "docs"]);
+        assert!(args.check_links_only);
+        assert_eq!(args.format, None);
+        assert_eq!(args.check_combinations(), Ok(()));
+
+        let args = Args::parse_from(["mbr", "--check-links-only", "--format", "json"]);
+        assert_eq!(args.format, Some(ReportFormat::Json));
+        assert!(Args::try_parse_from(["mbr", "--check-links-only", "--format", "xml"]).is_err());
+    }
+
+    #[test]
+    fn test_check_links_only_is_a_mode() {
+        for other in ["-s", "-g", "-b", "-o"] {
+            assert!(
+                Args::try_parse_from(["mbr", "--check-links-only", other]).is_err(),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_without_check_links_only_is_refused() {
+        let args = Args::parse_from(["mbr", "-b", "--format", "json"]);
+        assert!(args.check_combinations().is_err());
     }
 
     #[test]

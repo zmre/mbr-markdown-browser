@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use clap::Parser;
 #[cfg(feature = "gui")]
 use mbr::browser::{self, BrowserContext};
 use mbr::{
@@ -40,14 +39,27 @@ fn needs_folder_picker(path: &Path) -> bool {
 /// an enum variant instead of telling the user what to do.
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
+    let args = cli::Args::parse_checked();
+    // `--check-links-only` reserves 1 for "broken links found", so a check
+    // that could not run (bad configuration, unreadable root) is 2.
+    let failure = if args.check_links_only {
+        ExitCode::from(LINK_CHECK_FAILED)
+    } else {
+        ExitCode::FAILURE
+    };
+    match run(args).await {
+        Ok(code) => code,
         Err(e) => {
             eprintln!("{}", error_report(&e));
-            ExitCode::FAILURE
+            failure
         }
     }
 }
+
+/// `--check-links-only`: broken links were found.
+const LINK_CHECK_FOUND_PROBLEMS: u8 = 1;
+/// `--check-links-only`: the check itself failed.
+const LINK_CHECK_FAILED: u8 = 2;
 
 /// Formats an error and its `source()` chain for the terminal:
 /// `Error: <message>` followed by one `  caused by: <message>` line per source.
@@ -72,13 +84,12 @@ fn error_report(error: &dyn std::error::Error) -> String {
     report
 }
 
-async fn run() -> Result<(), MbrError> {
+async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
     // Suppress ffmpeg warnings/info messages from the metadata crate
     // These would otherwise clutter stdout/stderr when processing video files
     #[cfg(feature = "media-metadata")]
     ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Fatal);
 
-    let args = cli::Args::parse();
     // Before any `Config::read`: the GUI reads configuration again for every
     // folder it opens, and none of those reads sees the command line.
     if args.no_symlink_mounts {
@@ -91,12 +102,18 @@ async fn run() -> Result<(), MbrError> {
     // Initialize tracing/logging based on verbosity flags
     // Use try_init to allow server to re-configure if needed (it uses tower_http logging)
     let log_filter = args.log_level_filter();
+    // The link report is stdout; every log line goes to stderr there.
+    let log_writer = if args.check_links_only {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
+    } else {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
+    };
     let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| log_filter.into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(log_writer))
         .try_init();
 
     // Generate-edit-token mode: prompt for a password (or auto-generate a
@@ -138,10 +155,11 @@ async fn run() -> Result<(), MbrError> {
     let is_gui_mode = !args.server
         && !args.stdout
         && !args.build
+        && !args.check_links_only
         && !args.extract_video_metadata
         && !args.extract_pdf_cover;
     #[cfg(all(feature = "gui", not(feature = "media-metadata")))]
-    let is_gui_mode = !args.server && !args.stdout && !args.build;
+    let is_gui_mode = !args.server && !args.stdout && !args.build && !args.check_links_only;
     #[cfg(not(feature = "gui"))]
     let _is_gui_mode = false;
 
@@ -167,6 +185,7 @@ async fn run() -> Result<(), MbrError> {
         return browser::launch_browser(browser::InitialLaunch::Deferred {
             tokio_runtime: tokio::runtime::Handle::current(),
         })
+        .map(|()| ExitCode::SUCCESS)
         .map_err(MbrError::from);
     }
 
@@ -241,7 +260,7 @@ async fn run() -> Result<(), MbrError> {
         }
 
         mbr::video_metadata::extract_and_save(&absolute_path)?;
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Extract PDF cover mode - extract cover images from PDFs
@@ -320,6 +339,10 @@ async fn run() -> Result<(), MbrError> {
         }
     }
 
+    if args.check_links_only {
+        return check_links(&config, &args);
+    }
+
     if args.build {
         // Build mode - generate static site
         // Default oembed timeout to 0 (disabled) for fastest builds unless explicitly set via CLI.
@@ -380,7 +403,7 @@ async fn run() -> Result<(), MbrError> {
             );
             std::process::exit(1);
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     } else if args.stdout {
         // CLI mode - render markdown to stdout (explicit -o/--stdout flag)
         if is_directory {
@@ -534,7 +557,7 @@ async fn run() -> Result<(), MbrError> {
                     tracing::error!(
                         "Couldn't initialize the server: {e}. Try with -s for more info"
                     );
-                    return Ok(());
+                    return Ok(ExitCode::SUCCESS);
                 }
             };
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
@@ -551,7 +574,7 @@ async fn run() -> Result<(), MbrError> {
                 Ok(port) => port,
                 Err(_) => {
                     tracing::error!("Server failed to start");
-                    return Ok(());
+                    return Ok(ExitCode::SUCCESS);
                 }
             };
 
@@ -590,7 +613,46 @@ async fn run() -> Result<(), MbrError> {
             std::process::exit(1);
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `--check-links-only`: scans the repository, checks every note's links as
+/// the server's errors panel would, and prints the report on stdout (progress
+/// on stderr). Writes nothing; oembed is never fetched.
+fn check_links(config: &mbr::Config, args: &cli::Args) -> Result<ExitCode, MbrError> {
+    let started = std::time::Instant::now();
+    let checker = mbr::link_check::LinkChecker::scan(config).map_err(MbrError::Repo)?;
+    if !args.quiet {
+        eprintln!(
+            "Checking links in {} notes under {}…",
+            checker.note_count(),
+            config.root_dir.display()
+        );
+    }
+    let report = checker.check_all(config.build_concurrency);
+    match args.format.unwrap_or_default() {
+        cli::ReportFormat::Markdown => print!("{}", report.to_markdown()),
+        cli::ReportFormat::Json => println!("{}", report.to_json()),
+    }
+    if !args.quiet {
+        eprintln!(
+            "Checked {} notes in {:.2?}: {} broken in {} files{}",
+            report.summary.files_checked,
+            started.elapsed(),
+            report.summary.problems,
+            report.summary.files_with_problems,
+            if report.summary.unreadable > 0 {
+                format!(", {} could not be read", report.summary.unreadable)
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(if report.has_problems() {
+        ExitCode::from(LINK_CHECK_FOUND_PROBLEMS)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// Returns true if the given IPv4 octets represent a loopback address (127.0.0.0/8).

@@ -42,6 +42,7 @@ These flags are mutually exclusive:
 | `-s, --server` | Start web server only (no GUI) |
 | `-g, --gui` | Launch native GUI window (explicit) |
 | `-b, --build` | Generate static site |
+| `--check-links-only` | Report broken links (and suggested fixes) without building anything; see [Checking links](#checking-links) |
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 | `--extract-pdf-cover` | Extract cover images from PDF files (requires `media-metadata` feature) |
 
@@ -67,7 +68,8 @@ Supported media types are detected by file extension:
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable). Affects link-preview metadata only — the video/PDF metadata cache is sized by the `media_cache_size` config option / `MBR_MEDIA_CACHE_SIZE`, which has no CLI flag. | `2097152` (2MB) |
-| `--build-concurrency <N>` | Files to process in parallel during build | auto (2x cores, max 32) |
+| `--build-concurrency <N>` | Files to process in parallel during build (and `--check-links-only`) | auto (2x cores, max 32) |
+| `--format <FORMAT>` | Report format for `--check-links-only`: `markdown` or `json`. Refused without `--check-links-only` | `markdown` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--fail-on-broken-links` | Exit with a non-zero status if the static build (`-b`) finds broken internal links. For CI. No effect with `--skip-link-checks` (the build warns on stderr when both are set, since the combination disables the gate). | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
@@ -140,6 +142,12 @@ mbr -g docs/paper.pdf        # Opens PDF viewer
 # Build static site
 mbr -b ~/notes
 
+# List broken links with suggested fixes (no build)
+mbr --check-links-only ~/notes
+
+# The same report as JSON, for tooling or an LLM
+mbr --check-links-only --format json ~/notes > broken-links.json
+
 # Build to custom directory
 mbr -b --output ./public ~/notes
 
@@ -171,6 +179,135 @@ to stderr, followed by one `caused by:` line per underlying cause, and exits
 with status 1.
 
 ---
+
+## Checking links
+
+```bash
+mbr --check-links-only [--format markdown|json] [PATH]
+```
+
+Scans the repository `PATH` belongs to and reports every broken reference,
+without building a site: nothing is written, nothing is fetched from the
+network (oembed is off) and no search index is made. Configuration is read as
+for any other mode (`.mbr/config.toml`, `MBR_*`, flags), so ignore globs, the
+`static_folder` overlay, symlink mounts (`--no-symlink-mounts`), hidden-file
+rules, markdown extensions, `index_file` and tag sources all apply. The whole
+repository is checked, whatever page `PATH` names.
+
+Each note is rendered exactly as the server renders it, and judged by the same
+checks as the [page-problems panel](../features/links.md#broken-links), so the
+report and the panel agree. It lists:
+
+- **broken links** — a markdown link, wikilink or raw HTML `href` whose target
+  is not served (`missing`), that climbs above the repository root
+  (`escapes_root`), or that names a markdown page without its trailing slash
+  (`missing_trailing_slash`, in practice only an unquoted raw HTML `href`);
+- **broken media** — `![]()`, `<img>`, `<video>`, `<audio>` and `<source>`
+  `src`s, slide `data-background-*` URLs and a deck's `slides.background_image`
+  (`srcset` candidates are not checked);
+- **unresolved wikilinks** — a literal `[[…]]` left in the page;
+- **ambiguous wikilinks** — a `[[Name]]` several notes answer to, with every
+  candidate.
+
+Each problem carries the 1-based **line** it is on (frontmatter included) and
+the construct **as written**. A broken target used on several lines is reported
+once per line. A reference that can only be found by its target's file name
+(a link inside a chat bubble, a section's `--- {data-background-image=…}`) is
+reported on the lines naming that file, else without a line.
+
+**Suggestions** come from the matcher behind the
+[404 page](../features/links.md#when-a-page-is-not-found): up to three notes or
+files with the same name elsewhere (the usual result of a move), then names
+that were extended or shortened. Each is written as a ready-to-paste
+replacement in the style of the broken one: a relative `.md` path stays a path
+relative to the note's folder (`../install/setup.md`), a root-relative URL stays
+root-relative (`/install/setup/`), a wikilink stays a wikilink (`[[New Name]]`,
+or a path such as `[[../people/a/John Doe]]` when the name is shared; its
+`|label` is kept unless it only repeats the name), media
+gets a relative file path, and a `#fragment` is kept. When nothing matches but
+the missing target's folder still exists, the report says so instead.
+
+**Output.** The report goes to stdout; progress and log lines go to stderr
+(`-q` silences them). The default is a markdown todo list, grouped by file in
+path order, problems in line order:
+
+```markdown
+# Broken links: 3 in 2 files
+
+## docs/guide.md
+
+- [ ] L6 `[Setup](../setup.md)` — no such page or file
+  - did you mean: `../install/setup.md` (Setup)
+- [ ] L8 `![diagram](img/flow.png)` — no such file
+  - did you mean: `../assets/flow.png`
+
+## notes/todo.md
+
+- [ ] L4 `[[New Nam|the new one]]` — no note by that name
+  - did you mean: `[[New Name|the new one]]` (New Name)
+```
+
+A clean repository prints `No broken links in N files.` Notes that could not be
+read (a cloud file not downloaded yet, a permission error) are listed in a
+final `## Could not be checked` section.
+
+**Exit status:** `0` nothing broken (unreadable notes alone do not fail the
+run), `1` at least one problem, `2` the check could not run (bad configuration,
+missing path, or a usage error).
+
+### JSON report
+
+`--format json` prints one JSON document (`schema_version` changes only with
+an incompatible change):
+
+```json
+{
+  "schema_version": 1,
+  "summary": { "files_checked": 56, "files_with_problems": 2, "problems": 3, "unreadable": 0 },
+  "files": [
+    {
+      "path": "docs/guide.md",
+      "url": "/docs/guide/",
+      "problems": [
+        {
+          "line": 6,
+          "kind": "broken_link",
+          "reason": "missing",
+          "syntax": "link",
+          "authored": "[Setup](../setup.md)",
+          "destination": "../setup.md",
+          "text": "Setup",
+          "href": "../../setup/",
+          "target": "/setup/",
+          "suggestions": [
+            { "replacement": "../install/setup.md", "url": "/install/setup/",
+              "path": "install/setup.md", "title": "Setup" }
+          ]
+        }
+      ]
+    }
+  ],
+  "unreadable": [ { "path": "notes/remote.md", "error": "…" } ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `files[].path` | Source path, relative to the repository root, `/`-separated |
+| `files[].url` | The note's site URL |
+| `line` | 1-based line in the file, frontmatter included; `null` when it could not be located |
+| `kind` | `broken_link`, `broken_media`, `unresolved_wikilink`, `ambiguous_wikilink` |
+| `reason` | `missing`, `escapes_root`, `missing_trailing_slash`, `unresolved`, `ambiguous` |
+| `syntax` | `link`, `wikilink`, `image` or `html` (a raw HTML attribute); `null` when located only by file name |
+| `media` | For `broken_media`: `image`, `video`, `audio` or `source` (omitted otherwise) |
+| `authored` | The construct as written (`[Setup](../setup.md)`, `[[Old Name]]`, `<img src="x.png">`), whitespace collapsed; the whole line when located only by file name |
+| `destination` | The destination as written (`../setup.md`, `Old Name`) |
+| `text` | The link's text (links only, omitted when empty) |
+| `href` | What the renderer emitted (what a browser follows) |
+| `target` | The site URL it resolves to, decoded; `null` when it escapes the root |
+| `suggestions[]` | Up to three, best first: `replacement` (paste in place of the destination; the whole `[[…]]` for a wikilink), `url`, `path` (`null` outside the repository), `title` (`null` for a file) |
+| `folder` | When nothing matched and the target's folder still exists: `{ "url", "title" }` (omitted otherwise) |
+| `resolved_to`, `candidates[]` | For `ambiguous_wikilink`: the note it opens, and every note answering to the name as a `suggestions`-shaped entry whose `replacement` names exactly that note |
 
 # Media Viewer Endpoints
 
