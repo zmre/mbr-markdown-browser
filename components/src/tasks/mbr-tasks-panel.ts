@@ -2377,6 +2377,12 @@ export class MbrTasksPanelElement extends LitElement {
       border-radius: 2px;
     }
 
+    /* A wikilink's name (task-text.ts): plain text inside the card's own
+     * link, set apart only by weight. */
+    .task-wikilink {
+      font-weight: 600;
+    }
+
     .task-chips {
       display: inline-flex;
       flex-wrap: wrap;

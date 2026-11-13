@@ -131,6 +131,18 @@ describe('MbrMediaBrowserElement', () => {
     })
   })
 
+  describe('card type label', () => {
+    it("is drawn on the card's sectioning band, never Pico's slate button fill", () => {
+      const ctor = customElements.get('mbr-media-browser') as unknown as {
+        styles: { cssText: string }
+      }
+      const rule = /\.card-header\s*\{([^}]*)\}/.exec(ctor.styles.cssText)?.[1] ?? ''
+      const declarations = rule.replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(declarations).toMatch(/background:\s*var\(--pico-card-sectioning-background-color/)
+      expect(declarations).not.toMatch(/--pico-secondary-background/)
+    })
+  })
+
   describe('memoized filtering (perf)', () => {
     it('does not recompute the filtered list when _selectedIndex changes', async () => {
       el = await mount(library())

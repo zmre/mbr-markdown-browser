@@ -60,7 +60,14 @@
  * of a task's markup a status change alters beyond the box itself.
  */
 import { editAuthHeaders, noteEditTokenRequired } from './edit-token.js'
-import { NOTE_CHANGED_MESSAGE, staleKindForRead, staleKindForWrite, staleNoteMessage } from './stale-note.js'
+import {
+  isLineEndingRefusal,
+  LINE_ENDINGS_MESSAGE,
+  NOTE_CHANGED_MESSAGE,
+  staleKindForRead,
+  staleKindForWrite,
+  staleNoteMessage,
+} from './stale-note.js'
 import { syncDoneChip } from './task-chips.js'
 import type { TaskStatus, TaskToggleFailure, TaskToggleOutcome, TaskToggleTarget } from './tasks/types.js'
 
@@ -501,6 +508,10 @@ async function writeTask(target: TaskToggleTarget): Promise<TaskToggleOutcome> {
   }
 
   if (!response.ok) {
+    if (await isLineEndingRefusal(response)) {
+      // A property of the note, not of our copy: no retry or reload helps.
+      return { ok: false, kind: 'other', message: LINE_ENDINGS_MESSAGE }
+    }
     const failure = describeFailure(response.status)
     // Our copy of the line is what the server just disagreed with; drop it so
     // the retry re-reads rather than repeating the same rejected request. A

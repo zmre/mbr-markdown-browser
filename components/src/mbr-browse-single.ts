@@ -9,6 +9,7 @@ import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { ICON_BUTTON_CSS } from './controls.ts'
 import { SIDEBAR_FOOTER_CSS, hasMeaningfulContent, renderSidebarFooter, slotHasMeaningfulContent } from './slot-content.ts'
+import { DEFAULT_SIDEBAR_MAX_ITEMS, sidebarMaxItems } from './sidebar-max-items.ts'
 import { ICON_SM, icon, iconChevronRight, iconX } from './icons.ts'
 import {
   type MarkdownFile,
@@ -30,11 +31,6 @@ interface TagGroup {
   urlSource: string;
   tags: Map<string, number>;  // tag value -> count
 }
-
-/**
- * Default sidebar items limit per section.
- */
-const DEFAULT_MAX_ITEMS = 100;
 
 /**
  * Single-column sidebar navigation component for MBR.
@@ -104,7 +100,7 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
 
   // === Config ===
   private _breakpoint = 1024;
-  private _maxItems = DEFAULT_MAX_ITEMS;
+  private _maxItems = DEFAULT_SIDEBAR_MAX_ITEMS;
   private _indexFile = 'index.md';
   private _sortConfig: SortField[] = DEFAULT_SORT_CONFIG;
   private _tagSources: TagSourceConfig[] = [];
@@ -132,14 +128,8 @@ export class MbrBrowseSingleElement extends LitElement implements MbrOverlay {
     // Read CSS variable for breakpoint
     this._readBreakpointFromCSS();
 
-    // Read max items from data attribute
-    const maxItemsAttr = this.getAttribute('max-items');
-    if (maxItemsAttr) {
-      const parsed = parseInt(maxItemsAttr, 10);
-      if (!isNaN(parsed) && parsed > 0) {
-        this._maxItems = parsed;
-      }
-    }
+    // `sidebar_max_items`, written by the page template.
+    this._maxItems = sidebarMaxItems(this.getAttribute('max-items'));
 
     // Subscribe to site navigation data
     this._unsubscribeSiteNav = subscribeSiteNav((state) => {

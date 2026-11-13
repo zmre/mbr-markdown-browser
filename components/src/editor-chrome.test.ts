@@ -39,6 +39,13 @@ describe('editor chrome', () => {
     expect(modal).toMatch(/@media \(min-width: 601px\) \{\s*\.mbr-editor-modal \.milkdown \.ProseMirror \{[^}]*calc\(\(100% - 48em\) \/ 2\)/)
   })
 
+  it("starts the document close under the properties bar, not after Crepe's 60px and a heading margin", () => {
+    const modal = cssBlock('MODAL_CSS')
+    expect(modal).toMatch(/@media \(min-width: 601px\) \{\s*\.mbr-editor-modal \.milkdown \.ProseMirror \{\s*padding-top: 24px;/)
+    // The first block: ProseMirror's cursor widget can be the first child.
+    expect(modal).toContain('.mbr-editor-modal .milkdown .ProseMirror > :nth-child(1 of :not(.ProseMirror-widget)) { margin-top: 0; }')
+  })
+
   it('drops the old × close button and the bordered file-action row', () => {
     expect(editorSource).not.toContain('mbr-editor-close')
     expect(editorSource).not.toContain('mbr-editor-fileactions')

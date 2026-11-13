@@ -63,8 +63,9 @@ function setPage(opts: { editEnabled: boolean; source?: string }) {
     : { title: 'Listing' }
 }
 
-function mount(): MbrEditorElement {
+function mount(attrs: { newNote?: boolean } = {}): MbrEditorElement {
   const el = document.createElement('mbr-editor')
+  if (attrs.newNote) el.setAttribute('new-note', '')
   document.body.appendChild(el)
   return el
 }
@@ -118,6 +119,30 @@ describe('MbrEditorElement keyboard shortcut', () => {
     expect(chunk.opened[0].tagSources).toEqual([
       { field: 'taxonomy.performers', label: 'Performer', label_plural: 'Performers' },
     ])
+  })
+
+  it("hands the chunk the page's media catalog for the media picker", async () => {
+    const files = [{ url_path: '/img/a.png', metadata: { kind: { type: 'image' } } }]
+    const fetchMock = vi.fn((url: string) =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(url.includes('media.json') ? { other_files: files, populated: true } : {}),
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      dispatchE(document.body)
+      await flush()
+      const subscribe = chunk.opened[0].subscribeMedia
+      expect(subscribe).toBeTypeOf('function')
+      const updates: unknown[] = []
+      const unsubscribe = subscribe!((update) => updates.push(update))
+      await flush()
+      expect(updates[updates.length - 1]).toEqual({ files, error: null })
+      unsubscribe()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('leaves "e" alone on a page with no source file (a folder listing)', async () => {
@@ -313,6 +338,60 @@ describe('MbrEditorElement app-side contract', () => {
     const note = mount()
     await note.updateComplete
     expect(note.shadowRoot?.querySelector('.edit-trigger')).not.toBeNull()
+  })
+
+  it('offers a + for New note on a listing (no pencil), and not on a note', async () => {
+    setPage({ editEnabled: true })
+    const listing = mount({ newNote: true })
+    await listing.updateComplete
+    const plus = listing.shadowRoot?.querySelector<HTMLButtonElement>('.new-trigger')
+    expect(plus).not.toBeNull()
+    expect(plus!.getAttribute('aria-label')).toBe('New note in this folder')
+    expect(plus!.querySelector('svg')).not.toBeNull()
+    listing.remove()
+
+    setPage({ editEnabled: true, source: 'a.md' })
+    const note = mount({ newNote: true })
+    await note.updateComplete
+    expect(note.shadowRoot?.querySelector('.new-trigger')).toBeNull()
+    note.remove()
+
+    setPage({ editEnabled: false })
+    const readOnly = mount({ newNote: true })
+    await readOnly.updateComplete
+    expect(readOnly.shadowRoot?.querySelector('.new-trigger')).toBeNull()
+    readOnly.remove()
+
+    // A page without a source that is not a listing (a tag page, an error
+    // page): its URL is no folder to create in, so no +.
+    setPage({ editEnabled: true })
+    const tagPage = mount()
+    await tagPage.updateComplete
+    expect(tagPage.shadowRoot?.querySelector('.new-trigger')).toBeNull()
+    expect(tagPage.canCreate).toBe(true)
+  })
+
+  it('leaves New note to the native + inside the iOS app', async () => {
+    setPage({ editEnabled: true })
+    document.documentElement.classList.add('mbr-embedded')
+    try {
+      const listing = mount({ newNote: true })
+      await listing.updateComplete
+      expect(listing.shadowRoot?.querySelector('.new-trigger')).toBeNull()
+      expect(listing.canCreate).toBe(true)
+    } finally {
+      document.documentElement.classList.remove('mbr-embedded')
+    }
+  })
+
+  it('starts New note from the + button', async () => {
+    const chunk = stubChunk()
+    setPage({ editEnabled: true })
+    const listing = mount({ newNote: true })
+    await listing.updateComplete
+    listing.shadowRoot!.querySelector<HTMLButtonElement>('.new-trigger')!.click()
+    await flush()
+    expect(chunk.created).toHaveLength(1)
   })
 
   it('announces the editor opening and closing on document', async () => {

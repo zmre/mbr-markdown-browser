@@ -1697,6 +1697,10 @@ fn push_chat_block<'a>(
 ///
 /// `first_line` is the source line of `text`'s first byte, `None` when no line
 /// table is recording.
+///
+/// Footnotes are off: each body is a parse of its own, so its footnote ids
+/// (`[^1]` → `#fn-1`) would repeat those of other bubbles and of the page, and
+/// its footnote list would land inside the bubble. A `[^1]` there stays text.
 fn push_chat_markdown<'a>(
     events: &mut Vec<Event<'a>>,
     text_lines: &mut TextLines,
@@ -1706,7 +1710,9 @@ fn push_chat_markdown<'a>(
 ) {
     let options = markdown_options()
         - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        - Options::ENABLE_FOOTNOTES
+        - Options::ENABLE_OLD_FOOTNOTES;
     let index = first_line.map(|_| LineIndex::build(text));
     let parser = TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter());
     for (event, range) in parser {
@@ -3947,6 +3953,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// A labeled `aliases:` map is published once, as the flat list — not
+    /// also as the generic flattening's `aliases.<label>` keys, which the info
+    /// panel listed as duplicate rows.
+    #[test]
+    fn simplified_labeled_aliases_have_no_dot_keys() {
+        let docs = YamlLoader::load_from_str(
+            "title: Robert\naliases:\n  nickname: Bob\n  formal: Mr. Smith\n",
+        )
+        .unwrap();
+        let hm = yaml_frontmatter_simplified(&docs.into_iter().next());
+        assert_eq!(hm["aliases"], serde_json::json!(["Bob", "Mr. Smith"]));
+        assert!(!hm.keys().any(|k| k.starts_with("aliases.")), "{hm:?}");
+    }
 
     async fn render_markdown(content: &str) -> String {
         render_markdown_with_config(content, false, HashSet::new()).await
@@ -9130,6 +9150,28 @@ mod tests {
             !chat.contains("<section") && !chat.contains("</section>"),
             "a body rule must not split sections inside the bubble: {chat}"
         );
+    }
+
+    /// Footnotes are off inside a chat block: every body is parsed on its own,
+    /// so a `[^1]` there duplicated the ids of the page's own `[^1]`.
+    #[tokio::test]
+    async fn chat_bodies_do_not_emit_footnotes() {
+        let md = concat!(
+            "Page note[^1].\n\n",
+            "[^1]: The page's footnote.\n\n",
+            "```chat\n",
+            "{{A|One[^1]\n\n[^1]: in a bubble|}}\n",
+            "{{B|Two[^1]\n\n[^1]: in another|}}\n",
+            "```\n",
+        );
+        let html = render_markdown(md).await;
+        let chat = chat_part(&html);
+        assert!(!chat.contains("footnote"), "{chat}");
+        assert!(chat.contains("One[^1]"), "{chat}");
+        // The page's own footnote still renders, once.
+        assert!(html.contains("footnote."), "{html}");
+        assert_eq!(html.matches("id=\"1\"").count(), 1, "{html}");
+        assert_eq!(html.matches("href=\"#1\"").count(), 1, "{html}");
     }
 
     #[tokio::test]

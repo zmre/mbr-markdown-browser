@@ -189,6 +189,32 @@ impl TestServer {
     async fn wait_for_scan(&self) {
         let _ = self.get("/.mbr/site.json").await;
     }
+
+    /// The text of `/.mbr/media.json` once media population has finished.
+    ///
+    /// The endpoint answers as soon as the scan is done, with
+    /// `"populated": false` while the deferred passes (static folder, basic
+    /// and media metadata) run — so poll the way the media browser does.
+    async fn populated_media_text(&self) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let text = self.get_text("/.mbr/media.json").await;
+            let json: serde_json::Value = serde_json::from_str(&text).expect("media.json");
+            if json["populated"] == serde_json::Value::Bool(true) {
+                return text;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "media.json never reported populated: {text}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// `/.mbr/media.json` once populated, parsed.
+    async fn populated_media_json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.populated_media_text().await).expect("media.json")
+    }
 }
 
 #[tokio::test]
@@ -3215,7 +3241,7 @@ async fn test_site_json_contains_no_absolute_host_paths() {
 async fn test_media_json_contains_no_absolute_host_paths() {
     let repo = repo_with_all_file_kinds();
     let server = TestServer::start(&repo).await;
-    let body = server.get("/.mbr/media.json").await.text().await.unwrap();
+    let body = server.populated_media_text().await;
 
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
     let other = parsed["other_files"]
@@ -3315,7 +3341,7 @@ async fn test_site_json_other_files_kind_structure() {
     );
 
     // Fetch media.json which has other_files
-    let body: serde_json::Value = server.get("/.mbr/media.json").await.json().await.unwrap();
+    let body: serde_json::Value = server.populated_media_json().await;
 
     // Should have other_files array
     assert!(
@@ -3409,7 +3435,7 @@ async fn test_site_json_srt_file_classified_as_text() {
     );
 
     let server = TestServer::start(&repo).await;
-    let body: serde_json::Value = server.get("/.mbr/media.json").await.json().await.unwrap();
+    let body: serde_json::Value = server.populated_media_json().await;
 
     let other_files = body["other_files"].as_array().unwrap();
 
@@ -7428,8 +7454,8 @@ async fn test_listings_advertise_editing_and_carry_the_editor() {
             .await
             .unwrap();
         assert!(
-            html.contains("<mbr-editor></mbr-editor>"),
-            "listing {path} must carry the editor element"
+            html.contains("<mbr-editor new-note></mbr-editor>"),
+            "listing {path} must carry the editor element, with its New note button"
         );
 
         // A Host the write endpoints refuse gets a read-only listing.
@@ -7448,7 +7474,7 @@ async fn test_listings_advertise_editing_and_carry_the_editor() {
             .await
             .unwrap();
         assert!(
-            !refused.contains("<mbr-editor>"),
+            !refused.contains("<mbr-editor"),
             "listing {path} at a refused Host must not carry the editor"
         );
     }
@@ -10530,6 +10556,49 @@ fn dt_lines(html: &str) -> Vec<u32> {
         .collect()
 }
 
+/// A note with carriage-return-only line endings cannot be addressed by line
+/// (every card and task is "line 1"), so both line-addressed writes refuse it
+/// with a `422` whose JSON `reason` the client turns into "convert the line
+/// endings" — not the `409` it would read as "changed elsewhere, reload?",
+/// which cannot help. Nothing is written.
+#[tokio::test]
+async fn test_line_addressed_writes_refuse_lone_carriage_returns_with_a_reason() {
+    const CR_DECK: &str = "Q1?\r: A1.\r\rQ2?\r: A2.\r";
+    const CR_TASKS: &str = "- [ ] a\r- [ ] b\r";
+    let repo = TestRepo::new();
+    let deck = repo.create_markdown("deck.md", CR_DECK);
+    let tasks = repo.create_markdown("tasks.md", CR_TASKS);
+    let server = TestServer::start_with_config_fn(&repo, enable_editing).await;
+    server.wait_for_scan().await;
+
+    let review = edit_post(
+        &server,
+        "/.mbr/flashcard-review",
+        review_body(1, "Q1?", "good"),
+    )
+    .await;
+    let toggle = edit_post(
+        &server,
+        "/.mbr/task",
+        serde_json::json!({
+            "path": "tasks.md", "line": 1, "expected": "- [ ] a\r- [ ] b", "to": "done",
+        }),
+    )
+    .await;
+    for resp in [review, toggle] {
+        assert_eq!(resp.status(), 422);
+        let json: serde_json::Value = resp.json().await.expect("JSON body");
+        assert_eq!(json["reason"], "lone_carriage_return");
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("line endings"))
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&deck).unwrap(), CR_DECK);
+    assert_eq!(std::fs::read_to_string(&tasks).unwrap(), CR_TASKS);
+}
+
 #[tokio::test]
 async fn test_flashcard_review_disabled_returns_403() {
     let repo = TestRepo::new();
@@ -10545,6 +10614,52 @@ async fn test_flashcard_review_disabled_returns_403() {
     .await;
     assert_eq!(resp.status(), 403);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+}
+
+/// A token-protected server must refuse a review without (or with a wrong)
+/// token, even from loopback and even for an otherwise valid body, and leave
+/// the deck untouched; the token holder's identical request is accepted.
+#[tokio::test]
+async fn test_flashcard_review_requires_the_edit_token_when_configured() {
+    let repo = TestRepo::new();
+    let file = repo.create_markdown("deck.md", DECK_SOURCE);
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let body = review_body(5, "Capital of France?", "good");
+    let no_token = edit_post(&server, "/.mbr/flashcard-review", body.clone()).await;
+    assert_eq!(no_token.status(), 401, "missing token must be 401");
+
+    let wrong = server
+        .client
+        .post(server.url("/.mbr/flashcard-review"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer nope")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401, "wrong token must be 401");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
+
+    let ok = server
+        .client
+        .post(server.url("/.mbr/flashcard-review"))
+        .header("X-MBR-Edit", "1")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer s3cret-token")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200, "valid token must be accepted");
+    assert_ne!(std::fs::read_to_string(&file).unwrap(), DECK_SOURCE);
 }
 
 /// The whole loop the overlay runs: read the term's line from the rendered
@@ -10948,12 +11063,7 @@ async fn test_peer_static_site_serves_pages_assets_and_media_index() {
     assert_eq!(server.get("/images/missing.png").await.status(), 404);
 
     // The overlay's files are indexed as other files, at their served URLs.
-    let media: serde_json::Value = server
-        .get("/.mbr/media.json")
-        .await
-        .json()
-        .await
-        .expect("media.json");
+    let media: serde_json::Value = server.populated_media_json().await;
     let urls: Vec<&str> = media["other_files"]
         .as_array()
         .expect("other_files")
@@ -11018,7 +11128,7 @@ async fn test_peer_static_site_serves_a_symlink_mount() {
     ] {
         assert_eq!(server.get(hidden).await.status(), 404, "{hidden}");
     }
-    let media = server.get_text("/.mbr/media.json").await;
+    let media = server.populated_media_text().await;
     assert!(
         media.contains("/videos/clip.mp4"),
         "the mount's file is indexed at its served URL: {media}"
@@ -11373,7 +11483,7 @@ async fn test_watcher_indexes_new_files_in_a_symlink_mount() {
     let fx = MountedNoteRepo::new();
     let server = TestServer::start(&fx.repo).await;
     server.wait_for_scan().await;
-    let _ = server.get("/.mbr/media.json").await;
+    let _ = server.populated_media_text().await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut attempt = 0;
@@ -11381,7 +11491,7 @@ async fn test_watcher_indexes_new_files_in_a_symlink_mount() {
         attempt += 1;
         std::fs::write(fx.target.join(format!("new-{attempt}.png")), b"png").unwrap();
         tokio::time::sleep(Duration::from_millis(2500)).await;
-        let media = server.get_text("/.mbr/media.json").await;
+        let media = server.populated_media_text().await;
         if media.contains("/ext/new-") {
             assert!(
                 !media.contains(&fx.target.display().to_string()),
@@ -11420,7 +11530,7 @@ async fn test_symlink_mounts_can_be_switched_off() {
     assert_eq!(server.get("/videos/clip.mp4").await.status(), 404);
     assert_eq!(server.get("/images/logo.png").await.status(), 200);
     assert_eq!(server.get("/.env").await.status(), 404);
-    let media = server.get_text("/.mbr/media.json").await;
+    let media = server.populated_media_text().await;
     assert!(!media.contains("clip.mp4"), "{media}");
 }
 

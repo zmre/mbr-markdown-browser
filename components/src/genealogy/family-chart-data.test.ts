@@ -7,9 +7,12 @@ import {
 } from '../graph/relationship-graph.js'
 import { GENEALOGY_TYPES, genealogyNotes, rel } from '../graph/test-fixtures.js'
 import {
+  escapeMarkup,
   familyChartGender,
   findParentChildCycle,
+  safeAvatar,
   toFamilyChartData,
+  withSafeAvatars,
   type FamilyChartDatum,
 } from './family-chart-data.js'
 
@@ -252,5 +255,85 @@ describe('REGRESSION cyclic relationships never reach family-chart', () => {
     expect(tree.main_id).toBe(mainId)
     expect(tree.data.length).toBeGreaterThan(0)
     expect(tree.data.map((node) => node.data.id)).toContain('/p/b/')
+  })
+})
+
+describe('UNIT family-chart avatar and label safety', () => {
+  // family-chart's CardImage template, in shape: the avatar is interpolated
+  // into markup that d3's `.html()` parses with innerHTML.
+  const renderLikeCardImage = (avatar: string): Element => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    svg.appendChild(g)
+    g.innerHTML = `<image href="${avatar}" height="60" width="60" preserveAspectRatio="xMidYMin slice" />`
+    return g
+  }
+  const identity = (p: string) => p
+  const noRels = () => ({ parents: [], spouses: [], children: [] })
+
+  it('attribute-encodes a quote so the avatar cannot add an attribute', () => {
+    const avatar = safeAvatar('x" onerror="alert(1)', identity)
+    expect(avatar).toBe('x&quot; onerror=&quot;alert(1)')
+    const g = renderLikeCardImage(avatar!)
+    const images = g.querySelectorAll('image')
+    expect(images).toHaveLength(1)
+    expect(images[0]!.hasAttribute('onerror')).toBe(false)
+    // The parser decodes the entities: the value is still the authored path.
+    expect(images[0]!.getAttribute('href')).toBe('x" onerror="alert(1)')
+  })
+
+  it('cannot close the element and inject markup', () => {
+    const avatar = safeAvatar('"/><script>alert(1)</script><image href="', identity)
+    const g = renderLikeCardImage(avatar!)
+    expect(g.querySelector('script')).toBeNull()
+    expect(g.querySelectorAll('image')).toHaveLength(1)
+  })
+
+  it.each([
+    'javascript:alert(1)',
+    'JaVaScRiPt:alert(1)',
+    ' java\tscript:alert(1)',
+    'vbscript:msgbox(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'data:image/svg+xml,<svg onload=alert(1)>',
+  ])('drops a script-capable avatar %j', (raw) => {
+    expect(safeAvatar(raw, identity)).toBeUndefined()
+  })
+
+  it('judges the resolved URL, not only the authored one', () => {
+    expect(safeAvatar('photo.png', () => 'javascript:alert(1)')).toBeUndefined()
+  })
+
+  it('keeps ordinary portraits, resolved for the page', () => {
+    expect(safeAvatar('/img/ann.jpg', (p) => `..${p}`)).toBe('../img/ann.jpg')
+    expect(safeAvatar('https://example.com/a.png?w=1&h=2', identity)).toBe(
+      'https://example.com/a.png?w=1&amp;h=2'
+    )
+    expect(safeAvatar('data:image/png;base64,AAAA', identity)).toBe('data:image/png;base64,AAAA')
+    expect(safeAvatar('', identity)).toBeUndefined()
+  })
+
+  it('withSafeAvatars drops unusable avatars and leaves the input untouched', () => {
+    const input: FamilyChartDatum[] = [
+      { id: '/a/', data: { label: 'A', avatar: 'javascript:alert(1)' }, rels: noRels() },
+      { id: '/b/', data: { label: 'B', avatar: 'b.png' }, rels: noRels() },
+      { id: '/c/', data: { label: 'C' }, rels: noRels() },
+    ]
+    // Like the real resolver: a URL with a scheme is left as it is.
+    const out = withSafeAvatars(input, (p) => (p.includes(':') ? p : `/base/${p}`))
+    expect('avatar' in out[0]!.data).toBe(false)
+    expect(out[1]!.data.avatar).toBe('/base/b.png')
+    expect(out[2]).toBe(input[2])
+    expect(input[0]!.data.avatar).toBe('javascript:alert(1)')
+  })
+
+  it('escapeMarkup neutralizes text bound into a <tspan>', () => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+    svg.appendChild(text)
+    const title = `<img src=x onerror="alert(1)">Ann & 'Bob'`
+    text.innerHTML = `<tspan x="0" dy="14">${escapeMarkup(title)}</tspan>`
+    expect(text.querySelector('img')).toBeNull()
+    expect(text.textContent).toBe(title)
   })
 })

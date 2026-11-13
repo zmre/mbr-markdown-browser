@@ -249,9 +249,10 @@ The **Cards** box in the top bar shows the stack's size and follows it as it
 grows. Change it at any time: raising it adds cards in the order above,
 lowering it sends the cards you know best back to the pool (Easy before Good
 before not yet rated, never the card on screen). A stack thinned by discards
-keeps the size you chose in the box. The counter reads `8 in play · 4 left`:
-cards in the stack, and cards still to be folded in. Once any card is discarded
-it adds `· 1 discarded`; discarded cards are not counted as left.
+keeps the size you chose in the box. The counter reads `8 in play · 4 waiting`:
+cards in the stack, and cards still waiting to be folded in (left out once none
+are). Once any card is discarded it adds `· 1 discarded`; discarded cards are
+not counted as waiting.
 
 **Saving.** With [editing enabled](editing/), every Concentric (FSRS) rating is
 written to the card's [review history](#the-review-history) exactly as a spaced
@@ -466,7 +467,10 @@ Each entry is stamped with your device's clock when you rate the card, and the
 server writes only that line (plus the `___Review History___` line the first
 time), keeping the file's line endings.
 If the note changed on disk since the page loaded, nothing is written and the
-deck offers to reload the page; reload to continue saving. The endpoint is
+deck offers to reload the page; reload to continue saving. A note saved with old
+Mac (CR-only) line endings cannot be written to at all: the deck says so, offers
+no reload, and finishes the session without saving — convert the file to LF (or
+CRLF) line endings to record reviews. The endpoint is
 [`POST /.mbr/flashcard-review`](editing/#flashcard-reviews).
 
 > [!NOTE]

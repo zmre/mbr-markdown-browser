@@ -40,7 +40,12 @@ pub fn probe_pdf(path: &Path) -> Result<PdfMetadata, PdfMetadataError> {
         path: path.to_path_buf(),
         source: e,
     })?;
+    Ok(probe_pdf_document(&doc))
+}
 
+/// The metadata of an already loaded PDF: the repository scan loads each PDF
+/// once and reads both this and its text from it.
+pub fn probe_pdf_document(doc: &lopdf::Document) -> PdfMetadata {
     let num_pages = doc.get_pages().len() as u32;
 
     // Get Info dictionary reference from trailer
@@ -53,10 +58,10 @@ pub fn probe_pdf(path: &Path) -> Result<PdfMetadata, PdfMetadataError> {
 
     let (title, author, subject, keywords) = if let Some(info) = info {
         (
-            get_string_from_dict(&doc, info, b"Title"),
-            get_string_from_dict(&doc, info, b"Author"),
-            get_string_from_dict(&doc, info, b"Subject"),
-            get_string_from_dict(&doc, info, b"Keywords").map(|s| {
+            get_string_from_dict(doc, info, b"Title"),
+            get_string_from_dict(doc, info, b"Author"),
+            get_string_from_dict(doc, info, b"Subject"),
+            get_string_from_dict(doc, info, b"Keywords").map(|s| {
                 s.split(',')
                     .map(|k| k.trim().to_string())
                     .filter(|k| !k.is_empty())
@@ -67,13 +72,13 @@ pub fn probe_pdf(path: &Path) -> Result<PdfMetadata, PdfMetadataError> {
         (None, None, None, None)
     };
 
-    Ok(PdfMetadata {
+    PdfMetadata {
         title,
         author,
         subject,
         keywords,
         num_pages,
-    })
+    }
 }
 
 /// Extract a string value from a PDF dictionary, handling various encodings.

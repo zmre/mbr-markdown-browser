@@ -251,12 +251,13 @@ In the editor, ⋯ → **New note…** asks for a path, prefilled with the note'
 folder, creates the file with an `# Title` heading taken from its name, and
 opens it with the editor already up.
 
-The same flow can also start without an editor open, from any page while
-editing is on — folder listings and the home page included. In a browser there
-is no button for it; the `<mbr-editor>` element exposes it as `openNew()` (with
-`canCreate` saying whether it is available), and the iOS app's menu calls it.
-There the path is prefilled with the folder you are in: the note's folder on a
-note page, the listed folder on a listing, nothing at the root.
+On a folder listing or the home page (where there is no note to edit, so no
+pencil and no ⋯ menu), the header has a **+** button instead: **New note** in
+the folder you are looking at. The `<mbr-editor>` element exposes the same flow
+as `openNew()` (with `canCreate` saying whether it is available), which the iOS
+app's own **+** calls; inside the app the web **+** is not shown. The path is
+prefilled with the folder you are in: the note's folder on a note page, the
+listed folder on a listing, nothing at the root.
 
 Opening the new note with the editor up is the `#mbr-edit` fragment: any
 editable note's URL with `#mbr-edit` on the end opens the editor straight away,
@@ -277,6 +278,11 @@ the document, **double-click it** — the media picker reopens prefilled with it
 current file and caption so you can swap the file or edit the caption. You can
 also place the cursor on (or next to) an embed and use the same button: when an
 embed is the current target it reads **Edit media** instead of **Media**.
+
+The picker lists every media file in the repository, including ones added
+since the page loaded. On a large repository the server may still be reading
+titles, sizes and durations when you open it; the list fills them in as they
+arrive, without losing what you typed in the filter or the file you picked.
 
 ### Error handling
 
@@ -366,6 +372,26 @@ style, spacing, other annotations, the line's terminator (a CRLF file stays
 CRLF) and the presence or absence of a trailing newline are all preserved. See
 [`tasks_stamp_done`](../reference/configuration.md#task-settings) for the stamp.
 
+#### Carriage-return-only line endings
+
+Both line-addressed writes, `POST /.mbr/task` and `POST /.mbr/flashcard-review`,
+count lines at `\n`. A note with a `\r` that is not part of a `\r\n` — classic
+Mac line endings, or one stray carriage return — cannot be addressed that way:
+every task and card in it would be "line 1", and a write aimed at one could
+land on another. Such a note is refused with `422` and a JSON body, and nothing
+is written:
+
+```json
+{ "error": "The note uses carriage-return-only line endings; …", "reason": "lone_carriage_return" }
+```
+
+`reason` is what tells this apart from a stale page (`409`) or a malformed body
+(the other `422`s). A reload cannot fix it, so the page says so instead of
+offering one — "This note uses old Mac (CR-only) line endings, so mbr can't
+write to it" — and the flashcard deck stops writing for the session. Convert the
+file to LF (or CRLF) line endings and the writes work again. LF and CRLF notes
+are unaffected.
+
 Every edit endpoint (`/.mbr/raw`, `/.mbr/edit`, `/.mbr/task`,
 `/.mbr/flashcard-review`) reads the note first. When the vault reports the note
 not downloaded — a cloud provider's placeholder, as on the iOS app after the
@@ -403,7 +429,9 @@ browser's time zone, so the server's own clock would be wrong whenever the two
 zones differ. It is required, must be exactly `YYYY-MM-DD HH:MM`, and must lie
 within 26 hours of the server's UTC clock — any real time zone passes, a wrong
 date does not — otherwise the request is rejected with `422` and nothing is
-written. On success it returns
+written. A note with [carriage-return-only line
+endings](#carriage-return-only-line-endings) is also a `422`, with
+`reason: "lone_carriage_return"`. On success it returns
 `{ "entry": "2026-10-06 13:45 - Good", "line": 15, "inserted_at": 14, "inserted": […] }`:
 the entry, the line of its bullet, and the inserted lines — two when the term's
 history definition had to be created, one otherwise. Line terminators and the

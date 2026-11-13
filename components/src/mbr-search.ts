@@ -654,7 +654,10 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
   private _handleInput(e: Event) {
     const target = e.target as HTMLInputElement;
     this._query = target.value;
-    this._selectedIndex = -1;
+    // The selection is left alone: the list on screen is still the previous
+    // query's until the next one lands, and `_setResults` resets it then.
+    // Clearing it here left the visible list with no selected row, so an
+    // Enter typed before the debounce fired did nothing.
 
     // Debounce search
     if (this._debounceTimeout) {
@@ -688,6 +691,20 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
    * moved (see `_lastPointer`). The first event of a session only records a
    * baseline, so a modal opening under a resting cursor selects nothing.
    */
+  /**
+   * Record every pointer position inside the modal, not only over rows. A
+   * pointer that last moved over a row and then came to rest elsewhere in the
+   * modal (the input, the header, empty space below a short list) would
+   * otherwise keep the row's old position as its baseline, and when a longer
+   * list rendered under the resting pointer the browser's re-dispatched move
+   * would differ from it and steal the selection. Row handlers run first (the
+   * event bubbles from the row to here), so they still compare against the
+   * previous position.
+   */
+  private _recordPointer = (e: MouseEvent): void => {
+    this._lastPointer = { x: e.clientX, y: e.clientY };
+  };
+
   private _selectFromPointer(e: MouseEvent, index: number): void {
     const last = this._lastPointer;
     this._lastPointer = { x: e.clientX, y: e.clientY };
@@ -1219,7 +1236,7 @@ export class MbrSearchElement extends LitElement implements MbrOverlay {
 
     return html`
       <div class="modal-backdrop" @click=${this._closeSearch}>
-        <div class="modal" @click=${this._handleModalClick}>
+        <div class="modal" @click=${this._handleModalClick} @mousemove=${this._recordPointer}>
           <div class="search-header">
             <div class="search-input-wrapper">
               ${icon(iconSearch, { className: 'search-icon' })}

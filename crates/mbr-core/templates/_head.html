@@ -23,7 +23,8 @@
       // - tagSources: configuration for tag linking in info panel
       // - flashcardsConcentricThreshold / flashcardsProgressIndicators: the
       //   flashcard deck's Concentric growth threshold and the reading-view
-      //   progress indicators (markdown pages only; defaults elsewhere)
+      //   progress indicators (markdown pages only; elsewhere the threshold is
+      //   omitted and the indicators default to on)
       // - slides / slidesPage: deck settings from config.toml's [slides] and
       //   from the note's `slides:` frontmatter (markdown pages only; `{}`
       //   elsewhere). mbr-slides.ts merges them over its built-in defaults
@@ -40,7 +41,10 @@
         basePath: "{{ relative_root | default(value='') | safe }}",
         tagSources: {{ tag_sources | default(value="[]") | safe }},
         graphDepth: {{ graph_depth | default(value=2) }},
-        flashcardsConcentricThreshold: {{ flashcards_concentric_threshold | default(value=0.7) }},
+        {# Markdown pages only (page_context.rs); elsewhere the deck cannot open
+            and shared.ts's getFlashcardsConcentricThreshold falls back. No
+            default here: the one default is config.rs's. #}
+        {% if flashcards_concentric_threshold %}flashcardsConcentricThreshold: {{ flashcards_concentric_threshold }},{% endif %}
         flashcardsProgressIndicators: {{ flashcards_progress_indicators | default(value=true) }},
         slides: {{ slides_config | default(value="{}") | safe }},
         slidesPage: {{ slides_page | default(value="{}") | safe }},

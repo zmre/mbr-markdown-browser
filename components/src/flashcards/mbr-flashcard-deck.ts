@@ -35,7 +35,14 @@
  * without asking whether an overlay is open), and every key it sees stops
  * there: while the deck is open, nothing behind it reacts to the keyboard.
  * Modified keys are never handled, only stopped, so `Cmd`/`Ctrl` combinations
- * keep their browser meaning.
+ * keep their browser meaning. The one exception is a key aimed at the GUI's
+ * `<mbr-find-bar>` (opened over the deck from the native menu), which passes
+ * untouched so its field and buttons work.
+ *
+ * A rating write in flight does not freeze the deck: mode, position, stack
+ * size and sections can still change. `_rate` therefore records which session
+ * it rated in and, when that session is gone by the time the write answers,
+ * keeps the review in the card's history but leaves the new session alone.
  *
  * # Concentric
  *
@@ -123,7 +130,18 @@ interface DeckCard {
 }
 
 /** Elements a click on a card face must reach instead of flipping it. */
-const INTERACTIVE = 'a, button, input, select, textarea, summary, video, audio, label, [contenteditable]'
+/** The session a rating was made in (`_sessionMark`); compared by identity. */
+interface SessionMark {
+  readonly mode: DeckMode
+  readonly position: number
+  readonly queue: readonly number[]
+  readonly concentric: ConcentricState | null
+}
+
+/** `<mbr-find-bar>`'s tag: its keys pass the deck untouched (`_onKeydown`). */
+const FIND_BAR_TAG = 'mbr-find-bar'
+
+const INTERACTIVE ='a, button, input, select, textarea, summary, video, audio, label, [contenteditable]'
 
 /** Elements focus can rest on, for the dialog's focus trap. */
 const FOCUSABLE =
@@ -521,10 +539,17 @@ export class MbrFlashcardDeckElement extends LitElement {
 
     let entry: HistoryEntry = { at: new Date(), rating }
     let saved = false
+    // Whatever the reader did while the write was out — switched mode, moved,
+    // resized the stack, chose sections — the card on screen may no longer be
+    // the one rated. The rating then updates the card's own history (the file
+    // has it) but not the session that replaced the one it was made in.
+    const session = this._sessionMark()
+    let stale = false
     if (write && this.recordReview) {
       this._pending = rating
       const outcome = await this.recordReview({ line, rating })
       this._pending = null
+      stale = !this._sameSession(session)
       if (outcome.ok) {
         // The page behind is not reloaded: renumber the lines below the
         // insert, then show the entry in the card's history there too. This
@@ -547,17 +572,20 @@ export class MbrFlashcardDeckElement extends LitElement {
           this._message = outcome.message
           this._announcement = outcome.message
         }
-        // Every later write would be refused as well (a stale file, or a 403
-        // that no retry can fix); finish the session as a read-only one rather
+        // Every later write would be refused as well (a stale file, a 403 or
+        // line endings the server cannot address, none of which a retry can
+        // fix); finish the session as a read-only one rather
         // than failing — and re-showing the notice — card after card. An
         // `auth` or `other` failure does not block: the next rating tries
         // again, so saving resumes once a token is entered or the network is
         // back.
-        if (outcome.kind === 'conflict' || outcome.kind === 'refused') this._writesBlocked = true
+        if (outcome.kind === 'conflict' || outcome.kind === 'refused' || outcome.kind === 'unwritable')
+          this._writesBlocked = true
         // The note changed somewhere else: the cards on screen may no longer
         // be the ones in the file. Offer the reload that fixes it; declined,
         // the session carries on read-only as above.
         if (outcome.kind === 'conflict' && offerReload(outcome.message)) return
+        if (stale) return
         // Spaced repetition keeps the card so the rating can be retried.
         // Concentric keeps going with this rating, session-only — it never
         // needed the writer, and stalling on a 401 would leave the default
@@ -575,6 +603,7 @@ export class MbrFlashcardDeckElement extends LitElement {
     // latest entry (or a hand-edited future date) would otherwise throw here.
     card.history = [...card.history, entry].sort((a, b) => a.at.getTime() - b.at.getTime())
     card.state = replay(this._scheduler, card.history)
+    if (stale) return
     this._ratingCounts = { ...this._ratingCounts, [rating]: this._ratingCounts[rating] + 1 }
     const verb = saved ? 'Saved' : 'Rated'
 
@@ -589,6 +618,20 @@ export class MbrFlashcardDeckElement extends LitElement {
     }
     this._announcement = `${verb}: ${RATING_LABELS[rating]}`
     this._goTo(this._position + 1)
+  }
+
+  /** What identifies the session a rating was made in; see `_rate`. */
+  private _sessionMark(): SessionMark {
+    return { mode: this._mode, position: this._position, queue: this._queue, concentric: this._concentric }
+  }
+
+  private _sameSession(mark: SessionMark): boolean {
+    return (
+      mark.mode === this._mode &&
+      mark.position === this._position &&
+      mark.queue === this._queue &&
+      mark.concentric === this._concentric
+    )
   }
 
   /**
@@ -805,6 +848,11 @@ export class MbrFlashcardDeckElement extends LitElement {
   // ========================================
 
   private _onKeydown = (e: KeyboardEvent): void => {
+    // The GUI's find bar (Cmd/Ctrl+F from the native menu) can open over the
+    // deck; its own field and buttons need their keys (Enter = next match,
+    // Esc = close the bar, Tab between its controls), so a key aimed there
+    // is left entirely alone.
+    if (e.composedPath().some((node) => node instanceof Element && node.localName === FIND_BAR_TAG)) return
     // Nothing behind an open deck reacts to the keyboard (see the class doc).
     // Stopping propagation leaves default actions alone: Space still toggles a
     // focused checkbox, digits still reach the Cards box.
@@ -988,10 +1036,15 @@ export class MbrFlashcardDeckElement extends LitElement {
   private _counter(): string {
     if (this._cards.length === 0) return ''
     if (this._mode === 'concentric' && this._concentric) {
-      // "Left" is what can still be folded in; retired cards are counted apart.
+      // "Waiting" is what can still be folded into the stack (not cards left
+      // to answer in this round, which "left" read as while a card was on
+      // screen); omitted at 0. Retired cards are counted apart.
       const { stack, retired } = this._concentric
-      const base = `${stack.length} in play · ${cardsLeft(this._concentric)} left`
-      return retired.size > 0 ? `${base} · ${retired.size} discarded` : base
+      const waiting = cardsLeft(this._concentric)
+      const parts = [`${stack.length} in play`]
+      if (waiting > 0) parts.push(`${waiting} waiting`)
+      if (retired.size > 0) parts.push(`${retired.size} discarded`)
+      return parts.join(' · ')
     }
     if (this._mode === 'srs') {
       const remaining = this._finished ? [] : this._queue.slice(this._position)

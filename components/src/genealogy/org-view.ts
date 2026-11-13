@@ -68,6 +68,42 @@ export function moreCardText(card: OrgCard, expands: boolean, titleOf: (path: st
   return count > ORG_EXPAND_STEP ? `Show ${ORG_EXPAND_STEP} more (of ${count})` : `Show ${count} more`
 }
 
+/** Corner radius of a person/organization card's background rect. */
+export const ORG_CARD_RADIUS = 8
+/** Width of the coloured accent strip down a card's left edge. */
+export const ORG_ACCENT_WIDTH = 5
+
+/**
+ * The accent strip down a card's left edge, as a path that follows the card's
+ * own rounded corners. A plain `rect` (rx 2.5) is square where the card is
+ * round, so its top-left and bottom-left corners poked outside the card's
+ * border. The strip is the part of the rounded card left of
+ * `left + width`: each corner arc runs from where that vertical line meets the
+ * corner's circle to the left edge. (`width` is below the radius, so the line
+ * always meets the arc.)
+ */
+export function orgAccentPath(
+  left: number,
+  top: number,
+  height: number,
+  width = ORG_ACCENT_WIDTH,
+  radius = ORG_CARD_RADIUS
+): string {
+  const r = Math.min(radius, height / 2)
+  const w = Math.min(width, r)
+  // How far below the corner circle's top the line x = left + w meets it.
+  const dy = r - Math.sqrt(r * r - (r - w) * (r - w))
+  const n = (v: number) => Number(v.toFixed(3))
+  const bottom = top + height
+  return [
+    `M${n(left + w)},${n(top + dy)}`,
+    `A${r},${r} 0 0 0 ${n(left)},${n(top + r)}`,
+    `L${n(left)},${n(bottom - r)}`,
+    `A${r},${r} 0 0 0 ${n(left + w)},${n(bottom - dy)}`,
+    'Z',
+  ].join(' ')
+}
+
 function cardTemplate(
   card: OrgCard,
   titleOf: (path: string) => string,
@@ -106,8 +142,8 @@ function cardTemplate(
       data-org-id="${card.id}"
       @click=${() => onActivate(card)} @keydown=${(e: KeyboardEvent) => onKeydown(e, card)}>
       <title>${tooltip}</title>
-      <rect class="org-card-bg" x="${left}" y="${top}" width="${card.w}" height="${card.h}" rx="8"></rect>
-      <rect class="org-accent" x="${left}" y="${top}" width="5" height="${card.h}" rx="2.5"></rect>
+      <rect class="org-card-bg" x="${left}" y="${top}" width="${card.w}" height="${card.h}" rx="${ORG_CARD_RADIUS}"></rect>
+      <path class="org-accent" d="${orgAccentPath(left, top, card.h)}"></path>
       ${isOrg ? buildingIcon(left + 12, card.y - 8) : nothing}
       <text class="org-title" x="${textX}" y="${hasSub ? top + 22 : card.y + 4.5}">
         ${truncate(card.title, isOrg ? TITLE_CHARS - 2 : TITLE_CHARS)}

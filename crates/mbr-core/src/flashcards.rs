@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{FlashcardPatchError, ReviewTimeError};
 use crate::markdown::{LineIndex, markdown_options, strip_bom};
-use crate::tasks::{line_span, split_line_terminator};
+use crate::tasks::{has_lone_carriage_return, line_span, split_line_terminator};
 
 /// The label written when a term gets its first review.
 ///
@@ -244,8 +244,10 @@ impl ReviewPatch {
 /// # Errors
 ///
 /// [`FlashcardPatchError`]. [`FlashcardPatchError::UnsafeInsert`] when no
-/// insertion passes the check above; every other variant means the client is
-/// looking at a stale copy of the file.
+/// insertion passes the check above; [`FlashcardPatchError::LoneCarriageReturn`]
+/// when the note has a `\r` that is not part of a `\r\n` (lines are counted
+/// at `\n`, so such a note cannot be addressed by line); every other variant
+/// means the client is looking at a stale copy of the file.
 ///
 /// # Examples
 ///
@@ -272,6 +274,9 @@ pub fn append_review(
     rating: Rating,
     reviewed_at: NaiveDateTime,
 ) -> Result<ReviewPatch, FlashcardPatchError> {
+    if has_lone_carriage_return(source) {
+        return Err(FlashcardPatchError::LoneCarriageReturn);
+    }
     let span = line_span(source, term_line)
         .ok_or(FlashcardPatchError::LineOutOfRange { line: term_line })?;
     let (content, term_terminator) = split_line_terminator(&source[span]);
@@ -658,8 +663,28 @@ fn content_indent(prefix: &str) -> String {
     prefix.replace(':', " ")
 }
 
+/// The marker of the item after one marked `marker`: an ordered marker
+/// (`3.`, `07)`) counts up, keeping its delimiter and zero padding; a bullet is
+/// repeated. CommonMark allows at most nine digits, so a number that would
+/// outgrow them is repeated instead (a repeated number is still an item of the
+/// same list).
+fn next_marker(marker: &str) -> String {
+    let digits = marker.trim_end_matches(['.', ')']);
+    let delimiter = &marker[digits.len()..];
+    let ordered = delimiter.len() == 1
+        && (1..=9).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit());
+    let next = ordered
+        .then(|| digits.parse::<u32>().ok())
+        .flatten()
+        .and_then(|n| n.checked_add(1))
+        .map(|n| format!("{n:0width$}{delimiter}", width = digits.len()))
+        .filter(|next| next.len() - delimiter.len() <= 9);
+    next.unwrap_or_else(|| marker.to_string())
+}
+
 /// A list item for `entry` shaped like the item starting at `item_start`: same
-/// indentation, marker and gap.
+/// indentation, marker and gap — an ordered marker counted up (`next_marker`).
 fn bullet_after(source: &str, item_start: usize, entry: &str) -> String {
     let start = line_start(source, item_start);
     // Only whitespace is expected in front of a top-level definition's list
@@ -675,11 +700,11 @@ fn bullet_after(source: &str, item_start: usize, entry: &str) -> String {
     let after = &rest[marker_len..];
     let gap = &after[..after.len() - after.trim_start_matches([' ', '\t']).len()];
     let (marker, gap) = if marker.is_empty() {
-        ("*", " ")
+        ("*".to_string(), " ")
     } else if gap.is_empty() {
-        (marker, " ")
+        (next_marker(marker), " ")
     } else {
-        (marker, gap)
+        (next_marker(marker), gap)
     };
     format!("{indent}{marker}{gap}{entry}")
 }
@@ -1219,6 +1244,63 @@ mod tests {
             appended(fresh, 1),
             "Q?\r\n: A.\r\n: ___Review History___\r\n  * 2026-10-06 13:45 - Good\r\n"
         );
+    }
+
+    #[test]
+    fn lone_carriage_returns_are_refused() {
+        // Classic Mac endings: every card would be "line 1".
+        let source = "Q1?\r: A1.\r\rQ2?\r: A2.\r";
+        assert_eq!(
+            append_review(source, 1, "Q1?", Rating::Good, at(1, 2)),
+            Err(FlashcardPatchError::LoneCarriageReturn)
+        );
+        // One stray `\r` in an otherwise LF or CRLF file is refused too.
+        for source in ["Q?\n: A.\rmore\n", "Q?\r\n: A.\r\r\n", "Q?\n: A.\r"] {
+            assert_eq!(
+                append_review(source, 1, "Q?", Rating::Good, at(1, 2)),
+                Err(FlashcardPatchError::LoneCarriageReturn),
+                "{source:?}"
+            );
+        }
+        assert!(!has_lone_carriage_return("Q?\r\n: A.\r\n"));
+        assert!(!has_lone_carriage_return("Q?\n: A.\n"));
+    }
+
+    #[test]
+    fn ordered_history_lists_count_up() {
+        let source = "Q?\n: A.\n: ___Review History___\n  1. 2026-10-01 08:00 - Good\n  2. 2026-10-02 08:00 - Easy\n";
+        assert_eq!(
+            appended(source, 1),
+            format!("{source}  3. 2026-10-06 13:45 - Good\n")
+        );
+        // (A list must start at 1 to follow the label line directly; `9)`
+        // there would be a lazy continuation, not a list.)
+        let paren = "Q?\n: A.\n: ___Review History___\n  1) 2026-10-01 08:00 - Good\n";
+        assert_eq!(
+            appended(paren, 1),
+            format!("{paren}  2) 2026-10-06 13:45 - Good\n")
+        );
+        // Counting past a digit boundary still lands in the same list.
+        let nine: String = (1..=9)
+            .map(|n| format!("  {n}. 2026-10-01 08:00 - Good\n"))
+            .collect();
+        let source = format!("Q?\n: A.\n: ___Review History___\n{nine}");
+        assert_eq!(
+            appended(&source, 1),
+            format!("{source}  10. 2026-10-06 13:45 - Good\n")
+        );
+    }
+
+    #[test]
+    fn next_marker_counts_ordered_markers_and_repeats_bullets() {
+        assert_eq!(next_marker("*"), "*");
+        assert_eq!(next_marker("-"), "-");
+        assert_eq!(next_marker("+"), "+");
+        assert_eq!(next_marker("1."), "2.");
+        assert_eq!(next_marker("9)"), "10)");
+        assert_eq!(next_marker("07."), "08.");
+        assert_eq!(next_marker("999999999."), "999999999.");
+        assert_eq!(next_marker("x."), "x.");
     }
 
     #[test]
@@ -2133,10 +2215,17 @@ mod tests {
         }
     }
 
+    /// A history list. `marker` is a bullet (`*`, `-`) or an ordered list's
+    /// delimiter (`.`, `)`), numbered from 1.
     fn history_text(marker: char, entries: &[u8]) -> String {
         let mut text = String::from(": ___Review History___");
         for (i, kind) in entries.iter().enumerate() {
             let rating = ["Again", "Fail", "Hard", "Good", "Easy", "garbage"][*kind as usize % 6];
+            let marker = if matches!(marker, '.' | ')') {
+                format!("{}{marker}", i + 1)
+            } else {
+                marker.to_string()
+            };
             text.push_str(&format!(
                 "\n  {marker} 2026-09-{:02} 10:00 - {rating}",
                 i + 1
@@ -2152,8 +2241,8 @@ mod tests {
             0usize..4,
             prop::collection::vec(0u8..5, 1..4),
             prop::option::of((
-                prop::sample::select(vec!['*', '-']),
-                prop::collection::vec(0u8..6, 0..4),
+                prop::sample::select(vec!['*', '-', '.', ')']),
+                prop::collection::vec(0u8..6, 0..12),
             )),
         )
             .prop_map(|(loose, glued, indent, answers, history)| GenCard {
@@ -2260,7 +2349,12 @@ mod tests {
                 let history = term.definitions.iter().find(|d| d.history).map(|d| {
                     let text = &source[d.range.clone()];
                     text.lines()
-                        .filter(|line| line.trim_start().starts_with(['*', '-']))
+                        .filter(|line| {
+                            let item = line.trim_start();
+                            let ordered = item.trim_start_matches(|c: char| c.is_ascii_digit());
+                            item.starts_with(['*', '-'])
+                                || (ordered.len() < item.len() && ordered.starts_with(['.', ')']))
+                        })
                         .count()
                 });
                 (term_text.to_string(), answers, history)
@@ -2304,6 +2398,21 @@ mod tests {
             }
             prop_assert!(lines[patch.entry_line() as usize - 1].ends_with(&patch.entry));
 
+            // An ordered history counts on from its last item.
+            let number = |line: &str| {
+                line.trim_start()
+                    .split_once(['.', ')'])
+                    .and_then(|(n, _)| n.parse::<u32>().ok())
+            };
+            if let Some(previous) = number(lines[patch.entry_line() as usize - 2]) {
+                prop_assert_eq!(
+                    number(lines[patch.entry_line() as usize - 1]),
+                    Some(previous + 1),
+                    "{}",
+                    patch.source
+                );
+            }
+
             // Terminator style and trailing-newline presence are preserved.
             let crlf = source.contains("\r\n");
             prop_assert_eq!(crlf, patch.source.contains("\r\n"));
@@ -2335,6 +2444,7 @@ mod tests {
                 prop::sample::select(vec![
                     "Q?", ": a", ": ___Review History___", "  * x", "  - 2026-01-01 00:00 - Good",
                     "", "```", "> q", "- item", "  ```", ":", "  : nested", "\t* tab", "**Review History**",
+                    "  1. 2026-01-01 00:00 - Good", "  2) x", "a\rb",
                 ]),
                 0..24,
             ),

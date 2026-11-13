@@ -1,4 +1,6 @@
 {% set asset_base = relative_base | default(value="/.mbr/") %}
+{# A folder listing: `_nav.html` gives `<mbr-editor>` its "+" (New note here). #}
+{% set mbr_listing_page = true %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -6,7 +8,7 @@
     <title>{{title_prefix | default(value="")}}{{current_path | default(value="Directory") | escape}}{{title_suffix | default(value="")}}</title>
   </head>
   <body>
-{% if sidebar_style == "single" %}<mbr-browse-single>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
     <main id="wrapper" class="container" data-pagefind-body>
       <span class="sr-only" data-pagefind-weight="10">{{ current_dir_name | default(value="") }}</span>

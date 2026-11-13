@@ -148,6 +148,23 @@ describe('makeReviewRecorder', () => {
     expect(fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('/.mbr/raw/'))).toHaveLength(2)
   })
 
+  it('reports a line-ending refusal as unwritable, not as a conflict', async () => {
+    const body = { error: 'carriage-return-only line endings', reason: 'lone_carriage_return' }
+    const response = new Response(JSON.stringify(body), { status: 422 })
+    route(response as unknown as { ok: boolean; status: number })
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'unwritable' })
+    expect(outcome.ok === false && outcome.message).toContain('line endings')
+    expect(outcome.ok === false && outcome.message).not.toContain('changed somewhere else')
+  })
+
+  it('keeps reading any other 422 as a clock problem', async () => {
+    route(new Response('`at` is further from the server', { status: 422 }) as unknown as { ok: boolean; status: number })
+    const outcome = await recordReview({ line: 1, rating: 'good' })
+    expect(outcome).toMatchObject({ ok: false, kind: 'other' })
+    expect(outcome.ok === false && outcome.message).toContain('clock')
+  })
+
   it('reports a missing token, and remembers one is needed', async () => {
     route({ ok: false, status: 401 })
     const outcome = await recordReview({ line: 1, rating: 'hard' })

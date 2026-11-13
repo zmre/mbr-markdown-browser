@@ -95,7 +95,7 @@ pub const NOT_FOUND_JS: &[u8] = include_bytes!("../templates/components-js/mbr-n
 pub const QUICKLOOK_CALENDAR_JS: &[u8] =
     include_bytes!("../templates/components-js/mbr-quicklook-calendar.min.js");
 
-pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.2.0.min.js");
+pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.3.0.min.js");
 
 /// AsciiMath → TeX converter (asciimath2tex, Apache-2.0; its license is
 /// vendored beside it as `templates/asciimath2tex.LICENSE`). Loaded by

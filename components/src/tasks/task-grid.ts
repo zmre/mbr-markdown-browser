@@ -14,6 +14,7 @@ import type { DateKey } from '../calendar/note-date.js'
 import { gridMonthRange, monthOf, weekRange, type DayRange, type Weekday } from '../calendar/month-grid.js'
 import type { DayMarks, GridEntry } from '../calendar/types.js'
 import type { DueView, GridDay, TaskGridResponse, TaskHit, TaskStatus } from './types.js'
+import { taskDisplayText } from './task-text.js'
 
 /** A grid view: "By Due" minus its list. */
 export type GridView = Exclude<DueView, 'list'>
@@ -59,12 +60,12 @@ export function gridEntries(
 ): GridEntry[] {
   if (!day) return []
   return day.tasks.map((hit) => ({
-    title: hit.text,
+    title: taskDisplayText(hit.text),
     href: href(hit),
     status: statusOf(hit),
     // The server sends a time only when the placing date carried one.
     time: hit.time,
-    tooltip: `${hit.text} — ${hit.note}`,
+    tooltip: `${taskDisplayText(hit.text)} — ${hit.note}`,
   }))
 }
 

@@ -758,6 +758,31 @@ mod tests {
         assert!(!render_default_error(503, true).contains("<mbr-not-found-suggestions"));
     }
 
+    /// `_head.html` carries no default of its own for the Concentric threshold
+    /// (config.rs owns it): a page whose context lacks the key — every page but
+    /// a note's — renders without it rather than with a second copy of 0.7.
+    #[test]
+    fn test_head_omits_concentric_threshold_unless_supplied() {
+        let html = render_default_error(404, false);
+        assert!(html.contains("window.__MBR_CONFIG__"), "{html}");
+        assert!(!html.contains("flashcardsConcentricThreshold:"), "{html}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let mut ctx = HashMap::new();
+        crate::page_context::insert_error_keys(&mut ctx, 404, "Title", None);
+        ctx.insert("sidebar_style".to_string(), serde_json::json!("panel"));
+        ctx.insert(
+            "flashcards_concentric_threshold".to_string(),
+            serde_json::json!(0.85),
+        );
+        let html = templates.render_error(ctx).unwrap();
+        assert!(
+            html.contains("flashcardsConcentricThreshold: 0.85,"),
+            "{html}"
+        );
+    }
+
     /// A custom `.mbr/error.html` keeps working untouched (no suggestions),
     /// and can opt in by including the partial.
     #[test]
@@ -1435,6 +1460,21 @@ mod tests {
         render_page(parsed.frontmatter, HashMap::new())
     }
 
+    /// `Type: person` gets the contact card (it reads keys case-insensitively),
+    /// so every other gate has to see it too: the genealogy trigger, the body
+    /// class and the `type` the page's scripts read.
+    #[test]
+    fn test_type_key_in_any_case_gates_like_lowercase_type() {
+        let html = render_parsed("Type: person\nTitle: Ada\n");
+        assert!(html.contains("<mbr-genealogy></mbr-genealogy>"), "{html}");
+        assert_eq!(body_tag(&html), r#"<body class="person">"#);
+        let fm = parse_js_value(&html, "window.frontmatter = ");
+        assert_eq!(fm["type"], json!("person"));
+        assert!(fm.get("Type").is_none(), "one spelling only: {fm}");
+        // Only the keys the contact hook owns are canonicalized.
+        assert_eq!(fm["Title"], json!("Ada"));
+    }
+
     /// Whitespace around `type` must gate every feature the same way: the
     /// contact card and the implied company edge already trim, so the
     /// templates' exact `type == "person"` has to see the trimmed value too.
@@ -1757,6 +1797,15 @@ mod tests {
         overrides: &[(&str, &str)],
         sidebar_style: &str,
     ) -> Vec<(&'static str, String)> {
+        render_link_pages_with(overrides, sidebar_style, &[])
+    }
+
+    /// [`render_link_pages`] with `extra` added to every page's context.
+    fn render_link_pages_with(
+        overrides: &[(&str, &str)],
+        sidebar_style: &str,
+        extra: &[(&str, serde_json::Value)],
+    ) -> Vec<(&'static str, String)> {
         let tmp = tempfile::tempdir().unwrap();
         let mbr_dir = tmp.path().join(".mbr");
         std::fs::create_dir_all(&mbr_dir).unwrap();
@@ -1778,6 +1827,10 @@ mod tests {
             ("pages".to_string(), json!([])),
             ("media_type".to_string(), json!("video")),
         ]);
+        let base: HashMap<String, serde_json::Value> = base
+            .into_iter()
+            .chain(extra.iter().map(|(k, v)| (k.to_string(), v.clone())))
+            .collect();
         let markdown = templates
             .render_markdown("<p>body</p>", SimpleMetadata::new(), base.clone())
             .expect("index.html should render");
@@ -1836,6 +1889,28 @@ mod tests {
                     browse.trim(),
                     "",
                     "{template} ({style}): default browse footer must add nothing (Tera comments only)"
+                );
+            }
+        }
+    }
+
+    /// `sidebar_max_items` reaches both sidebar elements as `max-items` (it
+    /// used to reach neither), and a context without it emits no attribute.
+    #[test]
+    fn test_sidebar_max_items_is_written_on_the_sidebar_element() {
+        for (style, tag) in [("auto", "<mbr-browse"), ("single", "<mbr-browse-single")] {
+            for (template, html) in
+                render_link_pages_with(&[], style, &[("sidebar_max_items", json!(25))])
+            {
+                assert!(
+                    html.contains(&format!(r#"{tag} max-items="25">"#)),
+                    "{template} ({style}): max-items on {tag}:\n{html}"
+                );
+            }
+            for (template, html) in render_link_pages(&[], style) {
+                assert!(
+                    !html.contains("max-items"),
+                    "{template} ({style}): no attribute without the option"
                 );
             }
         }

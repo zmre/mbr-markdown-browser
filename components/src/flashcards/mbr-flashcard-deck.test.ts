@@ -287,6 +287,23 @@ describe('spaced repetition', () => {
     expect(isFlipped()).toBe(false)
   })
 
+  it('stops writing for a note it cannot write to, without offering a reload', async () => {
+    reply = { ok: false, kind: 'unwritable', message: 'This note uses old Mac (CR-only) line endings.' }
+    const confirmMock = vi.fn(() => true)
+    window.confirm = confirmMock
+    await mountSrs()
+    await key(' ')
+    await key('3')
+    await vi.waitFor(() => expect(deck.querySelector('.mbr-fc-banner')).not.toBeNull())
+    await deck.updateComplete
+    expect(deck.querySelector('.mbr-fc-banner')!.textContent).toContain('line endings')
+    // A reload cannot fix the note's line endings, so none is offered.
+    expect(confirmMock).not.toHaveBeenCalled()
+    expect(deck.querySelector('.mbr-fc-ratings')).toBeNull()
+    await key(' ')
+    expect(isFlipped()).toBe(false)
+  })
+
   it('keeps the card on any other failure so the rating can be retried', async () => {
     reply = { ok: false, kind: 'auth', message: 'Editing needs a token' }
     await mountSrs()
@@ -388,10 +405,10 @@ describe('concentric mode', () => {
     await select('concentric')
     expect(sizeBox()!.value).toBe('5')
     expect(sizeBox()!.getAttribute('aria-label')).toBe('Cards in play')
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
     await setSize(2)
     expect(sizeBox()!.value).toBe('2')
-    expect(counter()).toBe('2 in play · 3 left')
+    expect(counter()).toBe('2 in play · 3 waiting')
   })
 
   it('rates session-only without a writer: no write, ratings move the card on', async () => {
@@ -517,10 +534,10 @@ describe('concentric mode', () => {
     // 3 of 3 known — folded in one at a time to 3 of 5 (60% < 70%).
     for (let i = 0; i < 3; i++) await rate('4')
     expect(sizeBox()!.value).toBe('5')
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
     // The first card's second Easy in a row retires it; nothing to swap in.
     await rate('4')
-    expect(counter()).toBe('4 in play · 0 left · 1 discarded')
+    expect(counter()).toBe('4 in play · 1 discarded')
     for (let i = 0; i < 20 && !deck.querySelector('.mbr-fc-screen'); i++) await rate('4')
     expect(deck.querySelector('.mbr-fc-screen h3')!.textContent).toBe('Stack mastered')
     const keep = Array.from(deck.querySelectorAll<HTMLButtonElement>('.mbr-fc-screen button')).find(
@@ -546,12 +563,12 @@ describe('concentric mode', () => {
     keep().click()
     await deck.updateComplete
     await rate('4') // second Easy: retired, the stack is empty
-    expect(counter()).toBe('0 in play · 0 left · 1 discarded')
+    expect(counter()).toBe('0 in play · 1 discarded')
     expect(deck.querySelector('.mbr-fc-screen p')!.textContent).toContain('1 discarded')
     keep().click()
     await deck.updateComplete
     expect(card()).not.toBeNull()
-    expect(counter()).toBe('1 in play · 0 left')
+    expect(counter()).toBe('1 in play')
   })
 
   it('toasts cards folded in and retired, and speaks them politely', async () => {
@@ -710,10 +727,10 @@ describe('section filter', () => {
     await select('concentric')
     await openFilter()
     await check('Math')
-    expect(counter()).toBe('2 in play · 0 left')
+    expect(counter()).toBe('2 in play')
     expect(deck.querySelector<HTMLInputElement>('.mbr-fc-size input')!.value).toBe('2')
     await check('All sections')
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
   })
 
   it('Escape closes the popover first, then the deck', async () => {
@@ -852,15 +869,15 @@ describe('keyboard shortcuts', () => {
 
   it('+ / = grow and - shrinks Concentric’s stack through the Cards box path', async () => {
     await mount({ html: SECTIONED_DECK_HTML })
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
     await key('-')
-    expect(counter()).toBe('4 in play · 1 left')
+    expect(counter()).toBe('4 in play · 1 waiting')
     expect(sizeBox()!.value).toBe('4')
     await key('-')
     await key('+')
     expect(sizeBox()!.value).toBe('4')
     await key('=')
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
     // Clamped by the eligible cards, like the box.
     await key('+')
     expect(sizeBox()!.value).toBe('5')
@@ -882,12 +899,12 @@ describe('keyboard shortcuts', () => {
     await key('-', box)
     expect(isFlipped()).toBe(false)
     expect(mode()).toBe('concentric')
-    expect(counter()).toBe('5 in play · 0 left')
+    expect(counter()).toBe('5 in play')
 
     box.value = '2'
     await key('Enter', box)
     await settle()
-    expect(counter()).toBe('2 in play · 3 left')
+    expect(counter()).toBe('2 in play · 3 waiting')
     expect(document.activeElement).toBe(card())
 
     await key('#')
@@ -895,7 +912,7 @@ describe('keyboard shortcuts', () => {
     await key('Escape', sizeBox()!)
     await settle()
     expect(sizeBox()!.value).toBe('2')
-    expect(counter()).toBe('2 in play · 3 left')
+    expect(counter()).toBe('2 in play · 3 waiting')
     expect(closed).not.toHaveBeenCalled()
     expect(document.activeElement).toBe(card())
   })
@@ -974,5 +991,95 @@ describe('keyboard shortcuts', () => {
     } finally {
       document.removeEventListener('keydown', page)
     }
+  })
+})
+
+describe('a rating write in flight', () => {
+  let resolveWrite: (outcome: ReviewOutcome) => void
+  let calls: ReviewTarget[]
+  const recorder: ReviewRecorder = (target) => {
+    calls.push(target)
+    return new Promise((resolve) => {
+      resolveWrite = resolve
+    })
+  }
+  const ok: ReviewOutcome = { ok: true, entry: '2026-10-20 10:00 - Good', line: 10, insertedAt: 10, insertedCount: 1 }
+  const settleWrite = async () => {
+    await new Promise((r) => setTimeout(r, 0))
+    await deck.updateComplete
+  }
+
+  beforeEach(() => {
+    calls = []
+    vi.useFakeTimers({ now: new Date(2027, 5, 1, 12), toFake: ['Date'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('does not advance the session a mode key started while it was pending', async () => {
+    await mount({ recorder })
+    await select('srs')
+    await key(' ')
+    await key('3')
+    expect(calls).toHaveLength(1)
+
+    // Switch mode before the server answers.
+    await key('o')
+    expect(deck.querySelector<HTMLSelectElement>('.mbr-fc-bar select')!.value).toBe('order')
+    const front = frontText()
+    const count = counter()
+
+    resolveWrite(ok)
+    await settleWrite()
+    // The In order session stays on its first card, unflipped.
+    expect(frontText()).toBe(front)
+    expect(counter()).toBe(count)
+    expect(isFlipped()).toBe(false)
+  })
+
+  it('does not rate into a stack resized while it was pending', async () => {
+    await mount({ html: SECTIONED_DECK_HTML, recorder })
+    await select('concentric')
+    await key(' ')
+    await key('3')
+    expect(calls).toHaveLength(1)
+
+    await key('-')
+    const front = frontText()
+    const count = counter()
+    const flipped = isFlipped()
+
+    resolveWrite(ok)
+    await settleWrite()
+    expect(frontText()).toBe(front)
+    expect(counter()).toBe(count)
+    expect(isFlipped()).toBe(flipped)
+  })
+})
+
+describe('the GUI find bar over the deck', () => {
+  it('leaves keys aimed at <mbr-find-bar> alone: Enter, Escape and Tab reach it', async () => {
+    await mount()
+    const closed = vi.fn()
+    deck.addEventListener(DECK_CLOSE_EVENT, closed)
+    const bar = document.createElement('mbr-find-bar')
+    const field = document.createElement('input')
+    bar.append(field)
+    document.body.append(bar)
+    const seen: Array<{ key: string; prevented: boolean }> = []
+    bar.addEventListener('keydown', (e) => seen.push({ key: e.key, prevented: e.defaultPrevented }))
+
+    for (const k of ['Enter', 'Escape', 'Tab', 'n']) await key(k, field)
+
+    expect(seen).toEqual([
+      { key: 'Enter', prevented: false },
+      { key: 'Escape', prevented: false },
+      { key: 'Tab', prevented: false },
+      { key: 'n', prevented: false },
+    ])
+    expect(closed).not.toHaveBeenCalled()
+    expect(deck.isConnected).toBe(true)
   })
 })

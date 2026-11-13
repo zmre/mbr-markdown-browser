@@ -7,10 +7,16 @@
  *                           when a start/end timestamp is given (the only form
  *                           that supports timestamps).
  *
- * media.json is fetched fresh on open (server-mode only). This module keeps its
- * own minimal media types and does NOT import `types.ts`/`shared.ts`, because
- * those run top-level site/media fetches at import time — which must not happen
- * inside the lazy editor chunk (project bundle rule).
+ * The catalog comes from `shared.ts`'s media.json state, which `<mbr-editor>`
+ * hands in as {@link MediaPickerOptions.subscribeMediaFiles}: refetched on open,
+ * then — while the server still answers `"populated": false` — every couple of
+ * seconds, so titles, sizes and durations fill in while the picker is open.
+ * The list updates in place (the query, the selection and the caption stay)
+ * and the subscription ends when the picker closes. Without a subscription
+ * (tests, an older trigger) it fetches once. This module keeps its own minimal
+ * media types and does NOT import `types.ts`/`shared.ts`: the lazy editor
+ * chunk must not hold a second copy of the main bundle's state (project bundle
+ * rule).
  *
  * The picker only computes the embed; the caller (`editor-crepe.ts`) performs
  * the ProseMirror insertion/replacement.
@@ -32,11 +38,30 @@ export interface MediaFile {
   };
 }
 
+/** One state of the page's media catalog, as `<mbr-editor>` relays it. */
+export interface MediaCatalogUpdate {
+  /** media.json's `other_files`, or `null` before the first answer. */
+  files: MediaFile[] | null;
+  /** Why the catalog could not be loaded, when it could not. */
+  error: string | null;
+}
+
+/**
+ * Subscribes to the media catalog: `onUpdate` is called with the current state
+ * at once and again whenever it changes. Returns the unsubscribe function.
+ */
+export type MediaCatalogSubscribe = (onUpdate: (update: MediaCatalogUpdate) => void) => () => void;
+
 export interface MediaPickerOptions {
   mode: 'insert' | 'edit';
   /** For `edit`: the existing embed's src + caption to prefill. */
   initial?: { src: string; caption: string };
-  /** Fetches the fresh `other_files` array from media.json. */
+  /**
+   * The page's media catalog, kept current while the picker is open (see the
+   * module comment). Preferred over {@link fetchMediaFiles} when given.
+   */
+  subscribeMediaFiles?: MediaCatalogSubscribe;
+  /** Fetches the fresh `other_files` array from media.json, once. */
   fetchMediaFiles: () => Promise<MediaFile[]>;
 }
 
@@ -109,9 +134,12 @@ function mediaTitle(file: MediaFile): string {
 export function openMediaPicker(opts: MediaPickerOptions): Promise<MediaPickResult | null> {
   return new Promise<MediaPickResult | null>((resolve) => {
     let settled = false;
+    let unsubscribe: (() => void) | null = null;
     const finish = (result: MediaPickResult | null) => {
       if (settled) return;
       settled = true;
+      unsubscribe?.();
+      unsubscribe = null;
       shell.destroy();
       resolve(result);
     };
@@ -321,27 +349,56 @@ export function openMediaPicker(opts: MediaPickerOptions): Promise<MediaPickResu
     setStatus('Loading media…');
     search.focus();
 
-    void opts
-      .fetchMediaFiles()
-      .then((files) => {
-        if (settled) return;
-        mediaFiles = files.filter((f) => mediaKindOf(f) !== null);
+    /** Whether the first catalog has arrived (the edit-mode prefill ran). */
+    let loaded = false;
+    /**
+     * A new catalog: the same filter and selection over the new entries. The
+     * selection is re-found by URL, since every answer is a new set of objects.
+     */
+    const applyFiles = (files: MediaFile[]) => {
+      mediaFiles = files.filter((f) => mediaKindOf(f) !== null);
+      const first = !loaded;
+      loaded = true;
+      if (selected) {
+        const url = selected.url_path;
+        selected = mediaFiles.find((f) => f.url_path === url) ?? selected;
+      } else if (first && opts.initial) {
         // In edit mode, preselect the entry matching the current src.
-        if (opts.initial) {
-          const match = mediaFiles.find((f) => f.url_path === opts.initial!.src);
-          if (match) {
-            selectedIndex = filtered.indexOf(match);
-            selectFile(match);
-          } else {
-            setStatus('Current embed is not in media.json; pick a replacement.', '');
-          }
-        }
-        setStatus('');
-        renderList();
-      })
-      .catch(() => {
+        selected = mediaFiles.find((f) => f.url_path === opts.initial!.src) ?? null;
+      }
+      if (first) {
+        setStatus(
+          opts.initial && !selected ? 'Current embed is not in media.json; pick a replacement.' : '',
+        );
+      }
+      // The keyboard cursor follows the selection to its new row.
+      if (selected) selectedIndex = -1;
+      selectFile(selected);
+      if (selected) selectedIndex = filtered.indexOf(selected);
+    };
+
+    if (opts.subscribeMediaFiles) {
+      const subscription = opts.subscribeMediaFiles((update) => {
         if (settled) return;
-        setStatus('Could not load media.json.', 'warn');
+        if (update.files) {
+          applyFiles(update.files);
+        } else if (update.error && !loaded) {
+          setStatus('Could not load media.json.', 'warn');
+        }
       });
+      // A callback that ran synchronously may already have closed the picker.
+      if (settled) subscription();
+      else unsubscribe = subscription;
+    } else {
+      void opts
+        .fetchMediaFiles()
+        .then((files) => {
+          if (!settled) applyFiles(files);
+        })
+        .catch(() => {
+          if (settled) return;
+          setStatus('Could not load media.json.', 'warn');
+        });
+    }
   });
 }

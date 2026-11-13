@@ -67,11 +67,27 @@ export interface NoteCardOptions {
   onCancelDelete: () => void
 }
 
+/**
+ * Where the note is, as a card shows it: `:15`, `:15-18`, or `whole file`.
+ *
+ * The panel draws every card under its file's heading, so repeating the file
+ * name here only cost the width the line number needs (a long path was cut to
+ * `notes/projects/acme…` and the line was never seen). The full
+ * `file:line` (the export's `formatLocation`, unchanged) is the tooltip.
+ */
+export function cardLocation(note: ReviewNote): string {
+  if (note.line === null) return 'whole file'
+  const full = formatLocation(note)
+  return full.slice(note.file.length)
+}
+
 export function renderNoteCard(options: NoteCardOptions): TemplateResult {
   const { note, focused, href, editable, confirming } = options
   const def = typeDef(note.type)
   const quote = displayQuote(note.quote)
   const stale = staleLabel(note)
+  const location = cardLocation(note)
+  const fullLocation = formatLocation(note)
 
   return html`
     <article
@@ -91,12 +107,14 @@ export function renderNoteCard(options: NoteCardOptions): TemplateResult {
           <span class="note-type-label">${def?.label ?? note.type}</span>
         </span>
         ${href === null
-          ? html`<span class="note-loc">${formatLocation(note)}</span>`
+          ? html`<span class="note-loc" title=${fullLocation}>${location}</span>`
           : html`<a
               class="note-loc"
               href=${href}
+              title=${fullLocation}
+              aria-label=${fullLocation}
               @click=${(e: Event) => e.stopPropagation()}
-              >${formatLocation(note)}</a
+              >${location}</a
             >`}
         ${stale !== null
           ? html`<span class="note-stale" title="The quoted text has changed since this note"
@@ -181,5 +199,8 @@ function renderSuggestion(note: ReviewNote): TemplateResult | typeof nothing {
   if (note.type !== 'suggestion') return nothing
   const text = note.suggestion ?? ''
   if (text.length === 0) return nothing
-  return html`<pre class="note-suggestion"><code>${text}</code></pre>`
+  return html`<div class="note-suggestion-block">
+    <span class="note-suggestion-label">Suggested replacement</span>
+    <pre class="note-suggestion"><code>${text}</code></pre>
+  </div>`
 }

@@ -316,6 +316,123 @@ describe('media navigation loading', () => {
     expect(mod.getMediaNavState().data?.other_files).toHaveLength(1);
     unsub();
   });
+
+  /** A fetch whose media.json answers come from `bodies`, in order (last repeats). */
+  async function importWithMediaBodies(bodies: unknown[], urls: string[]): Promise<SharedModule> {
+    vi.resetModules();
+    let served = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        urls.push(url);
+        const body = url.includes('media.json')
+          ? bodies[Math.min(served++, bodies.length - 1)]
+          : emptySite;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      }),
+    );
+    return await import('./shared.ts');
+  }
+
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  };
+
+  it('refetches an incomplete catalog until it is populated', async () => {
+    vi.useFakeTimers();
+    try {
+      const urls: string[] = [];
+      const mod = await importWithMediaBodies(
+        [
+          { populated: false, other_files: [{ url_path: '/v.mp4' }] },
+          { populated: false, other_files: [{ url_path: '/v.mp4', width: 1 }] },
+          { populated: true, other_files: [{ url_path: '/v.mp4', width: 1, duration: 3 }] },
+        ],
+        urls,
+      );
+      const seen: any[] = [];
+      const unsub = mod.subscribeMediaNav(state => seen.push(state.data));
+      await mod.loadMediaNav();
+      expect(countUrls(urls, 'media.json')).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(mod.MEDIA_REFRESH_MS);
+      await flush();
+      expect(countUrls(urls, 'media.json')).toBe(2);
+      await vi.advanceTimersByTimeAsync(mod.MEDIA_REFRESH_MS);
+      await flush();
+      expect(countUrls(urls, 'media.json')).toBe(3);
+      expect(seen[seen.length - 1]?.other_files[0].duration).toBe(3);
+
+      // Populated: polling stops.
+      await vi.advanceTimersByTimeAsync(mod.MEDIA_REFRESH_MS * 5);
+      expect(countUrls(urls, 'media.json')).toBe(3);
+      unsub();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops refetching when the last subscriber leaves', async () => {
+    vi.useFakeTimers();
+    try {
+      const urls: string[] = [];
+      const mod = await importWithMediaBodies([{ populated: false, other_files: [] }], urls);
+      const unsub = mod.subscribeMediaNav(() => {});
+      await mod.loadMediaNav();
+      await flush();
+      unsub();
+      await vi.advanceTimersByTimeAsync(mod.MEDIA_REFRESH_MS * 5);
+      expect(countUrls(urls, 'media.json')).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refreshMediaNav refetches a loaded catalog and tells subscribers', async () => {
+    const urls: string[] = [];
+    const mod = await importWithMediaBodies(
+      [{ other_files: [{ url_path: '/a.png' }] }, { other_files: [{ url_path: '/a.png' }, { url_path: '/new.png' }] }],
+      urls,
+    );
+    const seen: any[] = [];
+    const unsub = mod.subscribeMediaNav(state => seen.push(state.data));
+    // While the first load is out, a refresh adds nothing: that answer is fresh.
+    mod.refreshMediaNav();
+    expect(countUrls(urls, 'media.json')).toBe(1);
+    await mod.loadMediaNav();
+
+    mod.refreshMediaNav();
+    mod.refreshMediaNav(); // one fetch at a time
+    expect(countUrls(urls, 'media.json')).toBe(2);
+    await flush();
+    expect(seen[seen.length - 1]?.other_files).toHaveLength(2);
+    expect(mod.getMediaNavState().data?.other_files).toHaveLength(2);
+    unsub();
+  });
+
+  it('refreshMediaNav does nothing before anything loaded the catalog', async () => {
+    const urls: string[] = [];
+    const mod = await importWithMediaBodies([{ other_files: [] }], urls);
+    mod.refreshMediaNav();
+    expect(countUrls(urls, 'media.json')).toBe(0);
+  });
+
+  it('never polls a catalog without the field (static builds)', async () => {
+    vi.useFakeTimers();
+    try {
+      const urls: string[] = [];
+      const mod = await importWithMediaBodies([{ other_files: [] }], urls);
+      const unsub = mod.subscribeMediaNav(() => {});
+      await mod.loadMediaNav();
+      await vi.advanceTimersByTimeAsync(mod.MEDIA_REFRESH_MS * 5);
+      expect(countUrls(urls, 'media.json')).toBe(1);
+      expect(mod.isMediaCatalogIncomplete({ other_files: [] })).toBe(false);
+      expect(mod.isMediaCatalogIncomplete({ populated: false })).toBe(true);
+      unsub();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('flashcard config getters', () => {

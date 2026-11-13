@@ -1015,7 +1015,11 @@ export class MbrMediaBrowserElement extends LitElement {
       align-items: center;
       gap: 0.35rem;
       padding: 0.4rem 0.6rem;
-      background: var(--pico-secondary-background, #f5f5f5);
+      /* Not --pico-secondary-background: that is Pico's slate button fill,
+         against which the muted label all but disappeared (light and dark).
+         The card's sectioning band, as Pico draws a card header. */
+      background: var(--pico-card-sectioning-background-color, #fbfcfc);
+      border-bottom: 1px solid var(--pico-muted-border-color, #eee);
       font-size: 0.65rem;
       font-weight: 600;
       text-transform: uppercase;

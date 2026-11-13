@@ -15,6 +15,7 @@ import { html, nothing, type TemplateResult } from 'lit'
 import { chipDatetime, formatChipLabel, isOverdue, priorityDot } from './task-format.js'
 import type { TaskHit, TaskStatus } from './types.js'
 import { icon, iconCalendar, iconCalendarClock, iconCheck } from '../icons.js'
+import { taskDisplayText, taskTextSegments } from './task-text.js'
 
 /** Indent per nesting level for a subtask, in rem. */
 const DEPTH_INDENT_REM = 0.9
@@ -85,7 +86,7 @@ export function renderTaskCard(options: TaskCardOptions): TemplateResult {
             data-mbr-task-status=${status}
             .checked=${status === 'done'}
             ?disabled=${!editable}
-            aria-label=${hit.text}
+            aria-label=${taskDisplayText(hit.text)}
             title=${editable ? 'Click to complete · right-click to cancel' : nothing}
             @click=${(e: Event) => {
               // The card behind opens the file; a click on the box must not.
@@ -119,7 +120,8 @@ export function renderTaskCard(options: TaskCardOptions): TemplateResult {
 }
 
 /**
- * A hit's display text, with a marker word washed the way the rendered page
+ * A hit's display text — wikilinks as the names the page shows (see
+ * `task-text.ts`) — with a marker word washed the way the rendered page
  * washes it.
  *
  * A marker's `text` is its whole source line, so highlighting all of it would
@@ -145,10 +147,16 @@ function renderText(hit: TaskHit): TemplateResult | string {
     start >= 0 &&
     start < end &&
     end <= text.length
-  if (!sane) return text
+  const segments = taskTextSegments(text, sane ? [start, end] : null)
+  if (segments.length === 1 && segments[0].kind === 'text') return segments[0].text
 
-  return html`${text.slice(0, start)}<span class="task-marker">${text.slice(start, end)}</span
-    >${text.slice(end)}`
+  return html`${segments.map((segment) =>
+    segment.kind === 'marker'
+      ? html`<span class="task-marker">${segment.text}</span>`
+      : segment.kind === 'wikilink'
+        ? html`<span class="task-wikilink">${segment.text}</span>`
+        : segment.text
+  )}`
 }
 
 /**

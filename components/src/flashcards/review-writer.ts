@@ -20,7 +20,13 @@
  * The review is stamped here, with the reviewer's local wall-clock time (`at`),
  * because that is how `history.ts` replays it; the server only validates it.
  */
-import { NOTE_DOWNLOADING_MESSAGE, staleKindForRead, staleKindForWrite } from '../stale-note.js'
+import {
+  isLineEndingRefusal,
+  LINE_ENDINGS_MESSAGE,
+  NOTE_DOWNLOADING_MESSAGE,
+  staleKindForRead,
+  staleKindForWrite,
+} from '../stale-note.js'
 import { formatEntryTime } from './history.js'
 import type { ReviewOutcome, ReviewRecorder, ReviewServices, ReviewTarget, SourceLines } from './types.js'
 
@@ -64,8 +70,9 @@ function failure(status: number, tokenMessage: string): Failure {
       // a page outliving its server's config (restarted without `--edit`).
       return { ok: false, kind: 'refused', message: REFUSED_MESSAGE }
     case 422:
-      // The only 422 a well-formed request from this module can earn is `at`
-      // further from the server's clock than any time zone.
+      // Besides the line-ending refusal (handled before this, by its JSON
+      // `reason`), the only 422 a well-formed request from this module can
+      // earn is `at` further from the server's clock than any time zone.
       return {
         ok: false,
         kind: 'other',
@@ -160,6 +167,9 @@ export function makeReviewRecorder(services: ReviewServices): ReviewRecorder {
     }
 
     if (!response.ok) {
+      // The note's line endings, not a stale copy: the deck stops writing but
+      // offers no reload, which could not help.
+      if (await isLineEndingRefusal(response)) return { ok: false, kind: 'unwritable', message: LINE_ENDINGS_MESSAGE }
       if (response.status === 409 || response.status === 503) services.forget(path)
       if (response.status === 401) services.tokenRequired()
       return fail(response.status)

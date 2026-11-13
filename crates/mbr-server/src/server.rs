@@ -18,7 +18,7 @@ use crate::link_grep::InboundLinkCache;
 use mbr_core::config::{RelationType, SortField, TagSource};
 use mbr_core::embedded_katex;
 use mbr_core::embedded_pico;
-use mbr_core::errors::{MbrError, TaskPatchError};
+use mbr_core::errors::{FlashcardPatchError, MbrError, TaskPatchError};
 use mbr_core::link_index::{InboundIndex, LinkCache, resolve_outbound_links};
 use mbr_core::link_transform::LinkTransformConfig;
 use mbr_core::media::MediaViewerType;
@@ -3590,29 +3590,31 @@ impl Server {
             .map(IntoResponse::into_response)
     }
 
-    /// Returns media metadata (other_files) as JSON.
+    /// Returns media metadata (other_files) as JSON:
+    /// `{"other_files": {...}, "populated": bool}`.
     ///
-    /// Waits for both the initial scan and media metadata population to complete
-    /// before returning, ensuring rich metadata (dimensions, duration, etc.) is available.
+    /// Waits for the initial scan only, never for media metadata population:
+    /// probing every video and PDF can take minutes on a large repository, and
+    /// the entries (names, paths, kinds) are useful long before their
+    /// durations and dimensions are. `populated` is `false` while that pass is
+    /// still running; the media browser refetches until it is `true`.
     pub async fn get_media_info(
         State(config): State<ServerState>,
     ) -> Result<impl IntoResponse, StatusCode> {
         let start = std::time::Instant::now();
 
-        // Wait for background scan + media metadata population (watcher handles updates)
         if !config.repo.is_scan_complete() {
             tracing::debug!("get_media_info: waiting for background scan...");
             config.repo.wait_for_scan().await;
         }
-        if !config.repo.is_media_populated() {
-            tracing::debug!("get_media_info: waiting for media metadata...");
-            config.repo.wait_for_media().await;
-        }
+        // Read before serializing: a `true` here guarantees every entry below
+        // carries its metadata (the flag is published only once all are probed).
+        let populated = config.repo.is_media_populated();
 
-        // Build response with only other_files
         let json_start = std::time::Instant::now();
         let media_data = serde_json::json!({
             "other_files": &config.repo.other_files,
+            "populated": populated,
         });
 
         let resp = Response::builder()
@@ -4186,7 +4188,7 @@ impl Server {
     /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, a file that is not UTF-8, no such line, or the line is not a task |
     /// | `409` | The line no longer matches `expected`, or `base_hash` names another version of the file |
-    /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs) |
+    /// | `422` | The body is not a well-formed request (axum's `Json` rejection, before this handler runs); or, with a JSON body `{"error", "reason": "lone_carriage_return"}`, the note has carriage-return-only line endings and cannot be addressed by line |
     /// | `500` | The write failed |
     pub async fn task_toggle_handler(
         State(config): State<ServerState>,
@@ -4230,6 +4232,9 @@ impl Server {
                         TaskPatchError::LineOutOfRange { .. } | TaskPatchError::NotATask { .. } => {
                             StatusCode::BAD_REQUEST
                         }
+                        TaskPatchError::LoneCarriageReturn => {
+                            return Self::lone_carriage_return_response(&e);
+                        }
                     };
                     return (status, e.to_string()).into_response();
                 }
@@ -4270,6 +4275,24 @@ impl Server {
             )
                 .into_response()
         })
+    }
+
+    /// The `422` for a line-addressed write (`/.mbr/task`,
+    /// `/.mbr/flashcard-review`) refused because the note has carriage-return-
+    /// only line endings: `{"error": <message>, "reason": "lone_carriage_return"}`.
+    ///
+    /// Not a `409`: the client reads a `409` as "the note changed elsewhere"
+    /// and offers a reload, which cannot help here — the note itself has to be
+    /// converted. The `reason` is what lets the client say so.
+    fn lone_carriage_return_response(error: &dyn std::error::Error) -> Response {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": error.to_string(),
+                "reason": mbr_core::errors::LONE_CARRIAGE_RETURN_REASON,
+            })),
+        )
+            .into_response()
     }
 
     /// Reads a markdown file a line-level write is about to patch.
@@ -4337,7 +4360,7 @@ impl Server {
     /// | `503` | The note is not downloaded (a cloud provider's placeholder) and did not arrive within a few seconds; `Retry-After` |
     /// | `400` | Path outside the root, or a file that is not UTF-8 |
     /// | `409` | `base_hash` names another version of the file; the line is gone, changed, or no longer a top-level term — the client's copy is stale — or no insertion keeps every other card intact |
-    /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at` |
+    /// | `422` | Malformed body, including an unknown rating or a missing, malformed or implausible `at`; or, with a JSON body `{"error", "reason": "lone_carriage_return"}`, the note has carriage-return-only line endings and cannot be addressed by line |
     /// | `500` | The write failed |
     pub async fn flashcard_review_handler(
         State(config): State<ServerState>,
@@ -4381,6 +4404,9 @@ impl Server {
             reviewed_at,
         ) {
             Ok(patch) => patch,
+            Err(e @ FlashcardPatchError::LoneCarriageReturn) => {
+                return Self::lone_carriage_return_response(&e);
+            }
             Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
         };
 

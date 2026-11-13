@@ -266,9 +266,12 @@ pub enum TaskIndexError {
 
 /// Why [`crate::tasks::patch_task_line`] refused to rewrite a line.
 ///
-/// These are the three ways a single-line patch can be aimed at something other
-/// than the task the client thinks it is aimed at, which is exactly what the
-/// per-line optimistic-concurrency check exists to catch.
+/// The first three are the ways a single-line patch can be aimed at something
+/// other than the task the client thinks it is aimed at, which is exactly what
+/// the per-line optimistic-concurrency check exists to catch.
+/// `LoneCarriageReturn` is a property of the note rather than of the client's
+/// copy: no retry or reload can fix it, so the handler answers it with a
+/// distinct `422` (`reason: "lone_carriage_return"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TaskPatchError {
     #[error("The file has no line {line}")]
@@ -279,7 +282,21 @@ pub enum TaskPatchError {
 
     #[error("Line {line} is not a task")]
     NotATask { line: u32 },
+
+    /// The note has a `\r` not followed by `\n` (classic Mac line endings).
+    /// Lines are counted at `\n`, so every task would sit on line 1 and the
+    /// toggle could rewrite the wrong one.
+    #[error(
+        "The note uses carriage-return-only line endings; convert it to LF or CRLF to update tasks"
+    )]
+    LoneCarriageReturn,
 }
+
+/// The machine-readable `reason` the line-addressed write endpoints
+/// (`/.mbr/task`, `/.mbr/flashcard-review`) send, in a `422` JSON body
+/// `{"error": …, "reason": …}`, for a note with carriage-return-only line
+/// endings. The client (`components/src/stale-note.ts`) matches this string.
+pub const LONE_CARRIAGE_RETURN_REASON: &str = "lone_carriage_return";
 
 /// Why [`crate::flashcards::parse_review_time`] refused a reviewer's clock.
 ///
@@ -297,10 +314,14 @@ pub enum ReviewTimeError {
 /// Why [`crate::flashcards::append_review`] refused to record a review.
 ///
 /// The first three mean the client's picture of the file is stale — the line
-/// moved, changed, or no longer opens a top-level definition-list term. The
-/// last means the writer could not find an insertion that leaves every card
-/// intact, so it refused rather than corrupt the note. The handler answers
-/// every one of them with `409 Conflict`; nothing is written.
+/// moved, changed, or no longer opens a top-level definition-list term.
+/// `UnsafeInsert` means the writer could not find an insertion that leaves
+/// every card intact, and `LoneCarriageReturn` that the note's line endings
+/// are ones it cannot address lines in; either way it refused rather than
+/// corrupt the note. The handler answers `LoneCarriageReturn` with `422` and
+/// `reason: "lone_carriage_return"` ([`LONE_CARRIAGE_RETURN_REASON`]), since
+/// no reload can fix it, and every other variant with `409 Conflict`; nothing
+/// is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FlashcardPatchError {
     #[error("The file has no line {line}")]
@@ -314,6 +335,14 @@ pub enum FlashcardPatchError {
 
     #[error("Recording a review for line {line} would change the note's other cards")]
     UnsafeInsert { line: u32 },
+
+    /// The note has a `\r` not followed by `\n` (classic Mac line endings).
+    /// Lines are counted at `\n`, so every card would sit on line 1 and the
+    /// review could land under the wrong one.
+    #[error(
+        "The note uses carriage-return-only line endings; convert it to LF or CRLF to record reviews"
+    )]
+    LoneCarriageReturn,
 }
 
 /// Errors related to video metadata extraction.

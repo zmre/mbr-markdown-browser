@@ -80,6 +80,13 @@ is a slide with a heading and a list, never a second metadata block.
 Contacts read many more (`company`, `emails`, `phones`, `dates`, …); see
 [Contacts](../features/contacts/).
 
+Field names are case-sensitive, as in YAML, with one exception: `type`, and the
+contact `dates`, `born` and `died`, are read in any case. `Type: person` works
+like `type: person` everywhere — templates, the body class, `site.json`, search
+and the charts all see it as `type` — and if a note spells one of them twice
+(`Type:` and `type:`), the first one wins. Every other field keeps the case you
+wrote it in.
+
 ## Tags
 
 Any of these forms works:

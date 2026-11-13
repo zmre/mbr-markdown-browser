@@ -134,6 +134,11 @@
   --mbr-review-stale-color: var(--pico-muted-color, #5c6b73);
   --mbr-review-highlight-bg: rgba(255, 193, 7, 0.28);
   --mbr-review-marker-size: 0.8em;
+  /* Extra end padding on `<main>` where a docked column leaves it only Pico's
+   * 1rem gutter (the sidebar grid, the companion column): a marker beside an
+   * H1 (6px padding + 1.15 x 0.8em icon + 0.25rem margin) needs about 2.7rem,
+   * and was clipped at the viewport's edge or hidden under the column. */
+  --mbr-review-marker-gutter: 2rem;
 
   /* Paper margins. Applied as padding on the content box rather than as an
    * `@page` margin -- see the "Print Styles" section for the Safari reason. */
@@ -472,9 +477,13 @@ body :is(mbr-browse, mbr-browse-single) > a:hover {
      * table's min-content width sized the column and the page scrolled
      * sideways; at 0 the table's `.mbr-table-scroll` scrolls instead. */
     grid-template-columns: var(--mbr-sidebar-width) minmax(0, 1fr);
-    grid-template-rows: auto 1fr auto;
+    /* The breadcrumbs need a row of their own: every cell of a three-row
+     * grid is named, so an auto-placed `nav.breadcrumbs` went to an implicit
+     * row below the footer, and the H1 sat right under the header. */
+    grid-template-rows: auto auto 1fr auto;
     grid-template-areas:
       "sidebar header"
+      "sidebar crumbs"
       "sidebar main"
       "sidebar footer";
     min-height: 100vh;
@@ -512,13 +521,21 @@ body :is(mbr-browse, mbr-browse-single) > a:hover {
    * `--pico-spacing` is the gutter Pico itself gives `.container` on narrow
    * screens, so this is also what the content looks like there. */
   body.mbr-has-sidebar > header,
+  body.mbr-has-sidebar > nav.breadcrumbs,
   body.mbr-has-sidebar > main,
   body.mbr-has-sidebar > footer {
     padding-inline: var(--pico-spacing);
   }
 
+  body.mbr-has-sidebar > nav.breadcrumbs {
+    grid-area: crumbs;
+  }
+
   body.mbr-has-sidebar > main {
     grid-area: main;
+    /* Room for the review-note marker, which hangs at `left: 100%` of its
+     * block: the 16px gutter clipped it at the viewport's edge. */
+    padding-inline-end: calc(var(--pico-spacing) + var(--mbr-review-marker-gutter));
   }
 
   body.mbr-has-sidebar > footer {
@@ -558,6 +575,27 @@ figure > figcaption > mbr-video-extras {
 
 figure {
   margin-bottom: var(--pico-block-spacing-vertical);
+}
+
+/* ==================== Listing File Cards (home.html, section.html) ==================== */
+/*
+ * A folder listing's "Files" are Pico cards with a header (title, optional
+ * description) and a footer ("Modified: …") and no body. Pico spaces a card's
+ * header and footer away from the body between them, so the empty body left
+ * a band of about 2.5rem between the title and "Modified". With nothing
+ * between them the two sections meet, sharing the header's rule.
+ */
+main#wrapper > section > article > header:has(+ footer) {
+  margin-bottom: 0;
+}
+
+main#wrapper > section > article > header:has(+ footer) > :last-child {
+  margin-bottom: 0;
+}
+
+main#wrapper > section > article > header + footer {
+  margin-top: 0;
+  border-top: 0;
 }
 
 /* ==================== Video Theater Mode ==================== */
@@ -3174,6 +3212,12 @@ main .mbr-fc-pie-unreviewed {
   html:not(.mbr-companion-hidden) body.mbr-has-companion > main,
   html:not(.mbr-companion-hidden) body.mbr-has-companion > footer {
     padding-inline: var(--pico-spacing);
+  }
+
+  /* The review-note marker's room (see the sidebar grid): beside the docked
+   * column it would otherwise sit under the column. */
+  html:not(.mbr-companion-hidden) body.mbr-has-companion > main {
+    padding-inline-end: calc(var(--pico-spacing) + var(--mbr-review-marker-gutter));
   }
 }
 
