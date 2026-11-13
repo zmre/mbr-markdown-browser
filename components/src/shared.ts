@@ -437,9 +437,106 @@ export function subscribeMediaNav(callback: (state: MediaNavState) => void): () 
   // Errors are surfaced through mediaNavState, so swallow the rejection here to
   // avoid an unhandled promise rejection for subscribers that never await.
   loadMediaNav().catch(() => {});
+  // A subscriber arriving after polling paused (nobody was listening) resumes it.
+  scheduleMediaRefresh();
   // Immediately notify with current state
   callback(mediaNavState);
-  return () => mediaNavListeners.delete(callback);
+  return () => {
+    mediaNavListeners.delete(callback);
+    if (mediaNavListeners.size === 0) cancelMediaRefresh();
+  };
+}
+
+/**
+ * How often an incomplete catalog is refetched. In server mode
+ * `/.mbr/media.json` answers as soon as the scan is done, with
+ * `"populated": false` while durations/dimensions are still being probed; the
+ * media browser then fills in progressively instead of waiting for every
+ * video and PDF to be read.
+ */
+export const MEDIA_REFRESH_MS = 2000;
+
+let mediaRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * True when a media.json body says its metadata is still being populated.
+ * An absent field (a static build's media.json, an older server) is complete.
+ */
+export function isMediaCatalogIncomplete(data: unknown): boolean {
+  return (data as { populated?: unknown } | null)?.populated === false;
+}
+
+function cancelMediaRefresh(): void {
+  if (mediaRefreshTimer !== null) {
+    clearTimeout(mediaRefreshTimer);
+    mediaRefreshTimer = null;
+  }
+}
+
+/**
+ * Refetch the catalog in `MEDIA_REFRESH_MS` while it is incomplete and someone
+ * is subscribed. Stops once it is populated, when the last subscriber leaves,
+ * or on a failed refetch (the last good catalog stays).
+ */
+function scheduleMediaRefresh(): void {
+  if (
+    mediaRefreshTimer !== null ||
+    mediaNavListeners.size === 0 ||
+    !isMediaCatalogIncomplete(mediaNavState.data)
+  ) {
+    return;
+  }
+  mediaRefreshTimer = setTimeout(() => {
+    fetchMediaCatalog()
+      .then((data) => {
+        mediaRefreshTimer = null;
+        applyMediaCatalog(data);
+      })
+      .catch(() => {
+        mediaRefreshTimer = null;
+      });
+  }, MEDIA_REFRESH_MS);
+}
+
+/** One fetch of media.json. */
+function fetchMediaCatalog(): Promise<any> {
+  return fetch(getMediaJsonUrl()).then((resp) => {
+    if (!resp.ok) throw new Error(`Failed to load media data: ${resp.status}`);
+    return resp.json();
+  });
+}
+
+/** Publishes a newer catalog to every subscriber and keeps polling if needed. */
+function applyMediaCatalog(data: any): void {
+  mediaNavState.isLoading = false;
+  mediaNavState.data = data;
+  mediaNavState.error = null;
+  mediaNavPromise = Promise.resolve(data);
+  mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+  scheduleMediaRefresh();
+}
+
+/** True while a {@link refreshMediaNav} fetch is out. */
+let mediaRefreshInFlight = false;
+
+/**
+ * Refetch media.json now, for a consumer that needs files added since the
+ * catalog was first loaded (the editor's media picker, on every open). A
+ * no-op while the first load is still out — that answer is fresh — or before
+ * anything loaded it; a failure keeps the last good catalog. Subscribers hear
+ * the answer like any other update.
+ */
+export function refreshMediaNav(): void {
+  if (!mediaNavPromise || mediaNavState.isLoading || mediaRefreshInFlight) return;
+  // The pending poll would only race this fetch; the answer re-arms it.
+  cancelMediaRefresh();
+  mediaRefreshInFlight = true;
+  fetchMediaCatalog()
+    .then(applyMediaCatalog)
+    .catch(() => scheduleMediaRefresh())
+    .finally(() => {
+      mediaRefreshInFlight = false;
+    });
 }
 
 /**
@@ -467,25 +564,16 @@ let mediaNavPromise: Promise<any> | null = null;
  *
  * This is deliberately NOT fetched at module scope: shared.ts ships in the
  * always-loaded main bundle, but media.json is only consumed by the media
- * browser inside the search popup, and in server mode the endpoint blocks on
- * media probing (PDF parsing, video metadata). The first `subscribeMediaNav`
- * triggers it; later calls reuse the same promise.
+ * browser inside the search popup. The first `subscribeMediaNav` triggers it;
+ * later calls reuse the same promise. A server answer with `"populated": false`
+ * is refetched every `MEDIA_REFRESH_MS` while anyone is subscribed.
  */
 export function loadMediaNav(): Promise<any> {
   if (!mediaNavPromise) {
     mediaNavState.isLoading = true;
-    mediaNavPromise = fetch(getMediaJsonUrl())
-      .then((resp) => {
-        if (!resp.ok) {
-          throw new Error(`Failed to load media data: ${resp.status}`);
-        }
-        return resp.json();
-      })
+    mediaNavPromise = fetchMediaCatalog()
       .then((data) => {
-        mediaNavState.isLoading = false;
-        mediaNavState.data = data;
-        mediaNavState.error = null;
-        mediaNavListeners.forEach(cb => cb({ ...mediaNavState }));
+        applyMediaCatalog(data);
         return data;
       })
       .catch((err) => {

@@ -23,6 +23,9 @@ export interface ReviewTarget {
  * will not take edits from the address this page was loaded at (a `Host` it
  * does not recognise, e.g. behind a reverse proxy or `tailscale serve`). The
  * deck stops writing, and the trigger builds no writer for later opens.
+ * `kind: 'unwritable'` (a `422` with `reason: "lone_carriage_return"`) means
+ * the note itself cannot be written to — carriage-return-only line endings —
+ * so the deck stops writing and says so, but offers no reload.
  */
 export type ReviewOutcome =
   | {
@@ -36,7 +39,7 @@ export type ReviewOutcome =
       /** How many lines were inserted (1, or 2 with a new history label). */
       readonly insertedCount: number
     }
-  | { readonly ok: false; readonly kind: 'conflict' | 'refused' | 'auth' | 'other'; readonly message: string }
+  | { readonly ok: false; readonly kind: 'conflict' | 'refused' | 'unwritable' | 'auth' | 'other'; readonly message: string }
 
 /** The writer the deck uses (built by `review-writer.ts::makeReviewRecorder`). */
 export type ReviewRecorder = (target: ReviewTarget) => Promise<ReviewOutcome>

@@ -27,7 +27,10 @@ extension VaultSession {
             + "signal=\(outcome.signal ?? "none"), read=\(outcome.read)")
     }
 
-    /// How long a refresh waits for the provider, at most.
+    /// How long a refresh waits for the provider, at most: for one that has
+    /// not answered the coordinated read, or is delivering a change. One that
+    /// answers with nothing new ends ~300 ms after its answer
+    /// (`ProviderRefresh`).
     private static let providerBudget: Duration = .seconds(2)
 
     /// The markdown file behind the page on screen: the page's

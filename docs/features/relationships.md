@@ -245,7 +245,9 @@ Two fields describe how a type *draws*:
 
 Set them on one half of an inverse pair and the other half inherits the flipped
 direction and the same category. If both halves claim the same direction, mbr
-keeps the one declared first, flips the other and logs a warning.
+keeps the one declared first, flips the other and logs a warning. Likewise, if
+the halves name different categories, the one declared first wins for both, with
+a warning.
 
 A person's `company: "[[Acme Corp]]"` also creates an `employer` edge to that
 note (shown on both ends as derived) — see

@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getTagSources, isEditEnabled } from './shared.js';
+import { getTagSources, isEditEnabled, refreshMediaNav, subscribeMediaNav } from './shared.js';
 import { isInputTarget, isModalOpen, isPresentationPlaying } from './mbr-keys.js';
 import {
   getEditToken,
@@ -9,9 +9,11 @@ import {
   setEditToken,
 } from './edit-token.js';
 import { isSocketReachable } from './mbr-live-reload.js';
+import type { MediaCatalogUpdate } from './editor-media-picker.js';
 import { noteSelfWrite, readSourceLines } from './task-toggle.js';
 import { ICON_BUTTON_CSS } from './controls.ts';
-import { icon, iconPencil } from './icons.ts';
+import { icon, iconPencil, iconPlus } from './icons.ts';
+import { isEmbeddedPage } from './fab.ts';
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -86,9 +88,26 @@ export function newNoteFolder(markdownSource: string | null, pathname: string): 
  * Lightweight edit trigger: a pencil button (next to the info button) that,
  * when activated, lazy-loads the heavy Crepe editor chunk and opens the editing
  * modal for the current markdown file. The element is also on folder listings,
- * where it shows no pencil but still offers {@link openNew} ("New note") to the
- * iOS app's menu.
+ * where it shows a "+" for {@link openNew} ("New note") instead of the pencil;
+ * the iOS app's native + calls the same method.
  */
+/**
+ * The editor's media picker's view of `shared.ts`'s media.json catalog.
+ *
+ * Subscribing first starts the page's load if nothing has yet; the refresh
+ * after it then fetches again only when an older catalog was already held
+ * (files uploaded since must show). While the server answers
+ * `"populated": false`, `shared.ts` keeps polling for as long as the picker
+ * is subscribed, and each answer reaches it.
+ */
+export function subscribeMediaCatalog(onUpdate: (update: MediaCatalogUpdate) => void): () => void {
+  const unsubscribe = subscribeMediaNav((state) =>
+    onUpdate({ files: state.data?.other_files ?? null, error: state.error }),
+  );
+  refreshMediaNav();
+  return unsubscribe;
+}
+
 @customElement('mbr-editor')
 export class MbrEditorElement extends LitElement {
   @state()
@@ -245,6 +264,9 @@ export class MbrEditorElement extends LitElement {
         onToken: (token: string) => setEditToken(token),
         // The properties editor's tag fields; the chunk cannot read the page config itself.
         tagSources: getTagSources().map((s) => ({ field: s.field, label: s.label, label_plural: s.labelPlural })),
+        // The media picker's catalog: the page's one media.json state (the
+        // chunk cannot import it), refetched for files added since it loaded.
+        subscribeMedia: subscribeMediaCatalog,
         // Fired once the editor modal is on screen: hand off from our spinner.
         onReady: () => {
           this._isOpen = true;
@@ -294,12 +316,38 @@ export class MbrEditorElement extends LitElement {
     `;
   }
 
+  /**
+   * "New note" on a folder listing or home page, where there is no pencil and
+   * so no editor ⋯ menu to start one from. Only where the template marks the
+   * element `new-note` (home.html, section.html): a tag page or error page
+   * has no source file either, but its URL is not a folder to create in. Not
+   * in the iOS app, whose native bar has its own + (and whose web header is
+   * collapsed anyway).
+   */
+  private _renderNewTrigger(): TemplateResult {
+    return html`
+      <button
+        class="new-trigger mbr-icon-btn"
+        @click=${() => this.openNew()}
+        aria-label="New note in this folder"
+        title="New note"
+        ?aria-busy=${this._loading}
+      >
+        ${icon(iconPlus)}
+      </button>
+    `;
+  }
+
   override render() {
-    // The pencil only where there is a file to edit (a folder listing carries
-    // the element for "New note" alone); the overlay serves both flows.
+    // The pencil only where there is a file to edit; a folder listing gets a
+    // "+" for New note instead (on a note, New note is in the editor's ⋯
+    // menu). The overlay serves both flows.
     if (!isEditEnabled()) return html``;
+    const showNew =
+      this.hasAttribute('new-note') && this.canCreate && !this.canEdit && !isEmbeddedPage();
     return html`
       ${this.canEdit ? this._renderTrigger() : nothing}
+      ${showNew ? this._renderNewTrigger() : nothing}
       ${this._loading ? this._renderLoading() : nothing}
     `;
   }

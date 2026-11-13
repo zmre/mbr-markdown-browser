@@ -23,7 +23,12 @@ import familyChartCss from 'family-chart/styles/family-chart.css?inline'
 import { familyGraph, formatLifespan, hasFamilyEdges } from '../graph/relationship-graph.js'
 import { DRAG_THRESHOLD_PX } from '../graph/viewport.js'
 import { iconElement, iconScan } from '../icon-dom.ts'
-import { findParentChildCycle, toFamilyChartData } from './family-chart-data.js'
+import {
+  escapeMarkup,
+  findParentChildCycle,
+  toFamilyChartData,
+  withSafeAvatars,
+} from './family-chart-data.js'
 import { computeInitialViewBox } from './timeline-layout.js'
 import {
   injectStylesOnce,
@@ -108,9 +113,10 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
 
   // The pure converter keeps raw frontmatter image paths; resolve them for the
   // current page (server absolute vs static relative) here at the view edge.
-  const resolved = data.map((d) =>
-    d.data.avatar ? { ...d, data: { ...d.data, avatar: ctx.resolveUrl(d.data.avatar) } } : d
-  )
+  // family-chart interpolates the avatar into `<image href="…">` markup parsed
+  // with `innerHTML`, so `withSafeAvatars` also drops script-capable schemes
+  // and attribute-encodes the rest.
+  const resolved = withSafeAvatars(data, ctx.resolveUrl)
 
   // Our data legitimately omits `gender` for unknown values; family-chart's
   // Datum types it as required but the runtime renders a genderless card.
@@ -138,11 +144,15 @@ function mountFamilyChart(container: HTMLElement, ctx: GenealogyContext): Geneal
   const card = chart.setCardSvg()
   card
     .setCardDisplay([
-      (d: Datum) => String(d.data['label'] ?? ''),
+      // Each line lands in a `<tspan>${line}</tspan>` template parsed as
+      // markup, so authored text (titles, dates) is escaped first.
+      (d: Datum) => escapeMarkup(String(d.data['label'] ?? '')),
       (d: Datum) =>
-        formatLifespan(
-          typeof d.data['birthday'] === 'string' ? d.data['birthday'] : undefined,
-          typeof d.data['death'] === 'string' ? d.data['death'] : undefined
+        escapeMarkup(
+          formatLifespan(
+            typeof d.data['birthday'] === 'string' ? d.data['birthday'] : undefined,
+            typeof d.data['death'] === 'string' ? d.data['death'] : undefined
+          )
         ),
     ])
     .setCardDim({ ...CARD_DIM })

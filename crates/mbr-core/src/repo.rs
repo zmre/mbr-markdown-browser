@@ -279,6 +279,32 @@ pub struct OtherFileInfo {
     /// Only populated for files under the size limit.
     #[serde(skip)]
     pub extracted_text: Option<String>,
+    /// Whether text extraction has run for this file, whatever it found. Set
+    /// when the media pass already read a PDF's text from the document it
+    /// loaded for its metadata, so [`Repo::ensure_text_extracted`] does not
+    /// load and parse the same file again — a scanned PDF has no text, and
+    /// `extracted_text` alone cannot tell "none" from "not looked".
+    #[serde(skip)]
+    pub text_extracted: bool,
+}
+
+/// Every page's text of a loaded PDF, trimmed; `None` when it has no pages,
+/// no text (a scan), or lopdf cannot extract it.
+fn pdf_document_text(doc: &lopdf::Document) -> Option<String> {
+    let page_numbers: Vec<u32> = doc.get_pages().keys().copied().collect();
+    if page_numbers.is_empty() {
+        return None;
+    }
+    match doc.extract_text(&page_numbers) {
+        Ok(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Err(e) => {
+            tracing::debug!("Failed to extract PDF text: {e}");
+            None
+        }
+    }
 }
 
 /// Maximum file size (in bytes) for text extraction (10 MB).
@@ -355,29 +381,25 @@ impl OtherFileInfo {
                 }
             },
         };
-        let doc = match loaded {
-            Ok(doc) => doc,
+        match loaded {
+            Ok(doc) => pdf_document_text(&doc),
             Err(e) => {
                 tracing::debug!("Failed to load PDF {:?}: {}", self.raw_path, e);
-                return None;
-            }
-        };
-
-        let page_numbers: Vec<u32> = doc.get_pages().keys().copied().collect();
-        if page_numbers.is_empty() {
-            return None;
-        }
-
-        match doc.extract_text(&page_numbers) {
-            Ok(text) => {
-                let text = text.trim().to_string();
-                if text.is_empty() { None } else { Some(text) }
-            }
-            Err(e) => {
-                tracing::debug!("Failed to extract PDF text from {:?}: {}", self.raw_path, e);
                 None
             }
         }
+    }
+
+    /// Whether [`Repo::ensure_text_extracted`] would extract this file's text:
+    /// searchable, not done yet, and not over [`MAX_TEXT_EXTRACTION_SIZE`].
+    #[cfg(feature = "media-metadata")]
+    fn wants_text(&self) -> bool {
+        self.is_searchable()
+            && !self.text_extracted
+            && self
+                .metadata
+                .file_size_bytes
+                .is_none_or(|size| size <= MAX_TEXT_EXTRACTION_SIZE)
     }
 
     /// Extract text from a plain text file.
@@ -569,7 +591,17 @@ impl StaticFileMetadata {
     /// Populate media-specific metadata (ffmpeg, lopdf) - expensive operation.
     #[cfg(feature = "media-metadata")]
     pub fn populate_media(self) -> Self {
+        self.populate_media_with_text(false).0
+    }
+
+    /// [`Self::populate_media`], and with `want_text` a PDF's text read from
+    /// the same loaded document: `Some(text)` when extraction was attempted
+    /// (the inner `None` = no text), `None` when it was not (not a PDF, not
+    /// wanted, or the file did not load).
+    #[cfg(feature = "media-metadata")]
+    fn populate_media_with_text(self, want_text: bool) -> (Self, Option<Option<String>>) {
         let mut me = self;
+        let mut text = None;
         let media_start = Instant::now();
         let kind_name = match &me.kind {
             StaticFileKind::Pdf { .. } => "pdf",
@@ -580,26 +612,28 @@ impl StaticFileMetadata {
             StaticFileKind::Other => "other",
         };
         me.kind = match me.kind {
-            StaticFileKind::Pdf { .. } => match crate::pdf_metadata::probe_pdf(&me.path) {
-                Ok(meta) => StaticFileKind::Pdf {
-                    title: meta.title,
-                    author: meta.author,
-                    subject: meta.subject,
-                    description: None,
-                    num_pages: Some(meta.num_pages as usize),
-                },
+            StaticFileKind::Pdf { .. } => match lopdf::Document::load(&me.path) {
+                Ok(doc) => {
+                    let meta = crate::pdf_metadata::probe_pdf_document(&doc);
+                    if want_text {
+                        text = Some(pdf_document_text(&doc));
+                    }
+                    StaticFileKind::Pdf {
+                        title: meta.title,
+                        author: meta.author,
+                        subject: meta.subject,
+                        description: None,
+                        num_pages: Some(meta.num_pages as usize),
+                    }
+                }
                 Err(e) => {
                     tracing::debug!("Failed to extract PDF metadata from {:?}: {}", me.path, e);
                     me.kind
                 }
             },
             StaticFileKind::Image { .. } => {
-                let metadata = metadata::media_file::MediaFileMetadata::new(&me.path).ok();
-
-                StaticFileKind::Image {
-                    width: metadata.as_ref().and_then(|m| m.width),
-                    height: metadata.as_ref().and_then(|m| m.height),
-                }
+                let (width, height) = image_dimensions(&me.path);
+                StaticFileKind::Image { width, height }
             }
             StaticFileKind::Audio { .. } => {
                 let metadata = metadata::media_file::MediaFileMetadata::new(&me.path).ok();
@@ -644,7 +678,7 @@ impl StaticFileMetadata {
             me.path,
             media_start.elapsed()
         );
-        me
+        (me, text)
     }
 
     /// Full populate: basic + media metadata (used by build mode).
@@ -658,6 +692,27 @@ impl StaticFileMetadata {
     pub fn from<P: Into<std::path::PathBuf>>(file: P) -> Self {
         let empty = Self::empty(file);
         empty.populate()
+    }
+}
+
+/// An image's `(width, height)`, read from its header only.
+///
+/// The `image` crate parses just enough of the file to know its size (no pixel
+/// decoding), by content rather than by extension. Formats it is not built to
+/// read here (BMP, TIFF) fall back to the ffmpeg probe, which is what every
+/// image used to go through: same answer, far slower, since ffmpeg opens a
+/// demuxer and a decoder per file.
+#[cfg(feature = "media-metadata")]
+fn image_dimensions(path: &Path) -> (Option<u32>, Option<u32>) {
+    let header = image::ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    match header {
+        Some((width, height)) => (Some(width), Some(height)),
+        None => metadata::media_file::MediaFileMetadata::new(&path)
+            .map(|m| (m.width, m.height))
+            .unwrap_or((None, None)),
     }
 }
 
@@ -1284,6 +1339,7 @@ impl Repo {
                     url_path: url,
                     metadata: StaticFileMetadata::empty(&key),
                     extracted_text: None,
+                    text_extracted: false,
                 };
                 other.push((key, other_file));
             }
@@ -1630,13 +1686,24 @@ impl Repo {
                 else {
                     return;
                 };
-                let updated = OtherFileInfo {
-                    metadata: StaticFileMetadata {
-                        path: local,
-                        ..info.metadata
-                    }
-                    .populate_media(),
-                    ..info
+                // A PDF's text comes from the document loaded for its
+                // metadata: `ensure_text_extracted`, which always follows
+                // this pass, would otherwise load and parse it a second time
+                // to keep the same text.
+                let wants_text = info.wants_text();
+                let (metadata, text) = StaticFileMetadata {
+                    path: local,
+                    ..info.metadata
+                }
+                .populate_media_with_text(wants_text);
+                let updated = match text {
+                    Some(extracted_text) => OtherFileInfo {
+                        metadata,
+                        extracted_text,
+                        text_extracted: true,
+                        ..info
+                    },
+                    None => OtherFileInfo { metadata, ..info },
                 };
                 self.other_files.pin().insert(key, updated);
             });
@@ -1663,7 +1730,9 @@ impl Repo {
         let pin = self.other_files.pin();
         let entries: Vec<_> = pin
             .iter()
-            .filter(|(_, info)| info.is_searchable() && info.extracted_text.is_none())
+            .filter(|(_, info)| {
+                info.is_searchable() && info.extracted_text.is_none() && !info.text_extracted
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         drop(pin);
@@ -1672,6 +1741,7 @@ impl Repo {
             info.extracted_text = self
                 .locate(&key)
                 .and_then(|(vault, path)| info.extract_text(vault, &path));
+            info.text_extracted = true;
             self.other_files.pin().insert(key, info);
         });
 
@@ -1840,6 +1910,7 @@ impl Repo {
                         metadata: StaticFileMetadata::empty(abs_path)
                             .with_details(self.basic_details(abs_path)),
                         extracted_text: None,
+                        text_extracted: false,
                     };
                     self.other_files.pin().insert(abs_path.to_path_buf(), info);
                 }
@@ -1882,6 +1953,7 @@ impl Repo {
                         metadata: StaticFileMetadata::empty(abs_path)
                             .with_details(self.basic_details(abs_path)),
                         extracted_text: None,
+                        text_extracted: false,
                     };
                     self.other_files.pin().insert(abs_path.to_path_buf(), info);
                 }
@@ -3714,6 +3786,7 @@ mod tests {
                         metadata: StaticFileMetadata::empty(&raw_path),
                         raw_path,
                         extracted_text: None,
+                        text_extracted: false,
                     },
                 );
             }
@@ -3893,5 +3966,228 @@ mod proptests {
             prop_assert!(!url.contains("//"), "URL should not contain //: {}", url);
             prop_assert!(!url.contains('\\'), "URL must not contain a backslash: {}", url);
         }
+    }
+}
+
+#[cfg(all(test, feature = "media-metadata"))]
+mod media_pass_tests {
+    use super::*;
+
+    fn write_image(dir: &Path, name: &str, width: u32, height: u32, format: image::ImageFormat) {
+        image::RgbImage::from_pixel(width, height, image::Rgb([10, 200, 30]))
+            .save_with_format(dir.join(name), format)
+            .expect("write test image");
+    }
+
+    fn populated_dimensions(path: PathBuf) -> (Option<u32>, Option<u32>) {
+        match StaticFileMetadata::empty(path).populate_media().kind {
+            StaticFileKind::Image { width, height } => (width, height),
+            _ => panic!("not an image"),
+        }
+    }
+
+    #[test]
+    fn png_and_jpeg_dimensions_come_from_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        write_image(dir.path(), "wide.png", 37, 11, image::ImageFormat::Png);
+        write_image(dir.path(), "tall.jpg", 9, 23, image::ImageFormat::Jpeg);
+        assert_eq!(
+            image_dimensions(&dir.path().join("wide.png")),
+            (Some(37), Some(11))
+        );
+        assert_eq!(
+            image_dimensions(&dir.path().join("tall.jpg")),
+            (Some(9), Some(23))
+        );
+        // Through the scan's own entry point: the metadata keeps its shape.
+        assert_eq!(
+            populated_dimensions(dir.path().join("wide.png")),
+            (Some(37), Some(11))
+        );
+        assert_eq!(
+            populated_dimensions(dir.path().join("tall.jpg")),
+            (Some(9), Some(23))
+        );
+    }
+
+    #[test]
+    fn content_decides_the_format_not_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        // A PNG saved under a JPEG name, as happens with downloaded images.
+        write_image(dir.path(), "real.png", 5, 6, image::ImageFormat::Png);
+        std::fs::rename(dir.path().join("real.png"), dir.path().join("misnamed.jpg")).unwrap();
+        assert_eq!(
+            image_dimensions(&dir.path().join("misnamed.jpg")),
+            (Some(5), Some(6))
+        );
+    }
+
+    #[test]
+    fn unreadable_images_have_no_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("broken.png"), b"not an image").unwrap();
+        assert_eq!(
+            image_dimensions(&dir.path().join("broken.png")),
+            (None, None)
+        );
+        assert_eq!(
+            image_dimensions(&dir.path().join("missing.png")),
+            (None, None)
+        );
+    }
+
+    // ==================== One PDF load for metadata and text ====================
+
+    /// A one-page PDF with a title and, unless `body` is `None`, one line of
+    /// text (a scan has none).
+    fn write_pdf(path: &Path, title: &str, body: Option<&str>) {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let operations = match body {
+            Some(text) => vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![100.into(), 600.into()]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+            ],
+            None => vec![],
+        };
+        let content = Content { operations };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal(title),
+        });
+        doc.trailer.set("Info", info_id);
+        doc.save(path).expect("write test pdf");
+    }
+
+    fn scanned_repo(root: &Path) -> Repo {
+        let repo = Repo::init(
+            root.to_path_buf(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+        repo.scan_all().expect("scan");
+        repo.populate_basic_metadata();
+        repo
+    }
+
+    fn pdf_info(repo: &Repo, name: &str) -> OtherFileInfo {
+        let key = repo.canonical_root.join(name);
+        repo.other_files
+            .pin()
+            .get(&key)
+            .expect("indexed pdf")
+            .clone()
+    }
+
+    #[test]
+    fn the_media_pass_reads_metadata_and_text_from_one_load() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pdf(
+            &dir.path().join("report.pdf"),
+            "Kumquat Report",
+            Some("kumquat harvest"),
+        );
+        let repo = scanned_repo(dir.path());
+
+        repo.populate_media_metadata();
+        let info = pdf_info(&repo, "report.pdf");
+        match &info.metadata.kind {
+            StaticFileKind::Pdf {
+                title, num_pages, ..
+            } => {
+                assert_eq!(title.as_deref(), Some("Kumquat Report"));
+                assert_eq!(*num_pages, Some(1));
+            }
+            _ => panic!("not a pdf"),
+        }
+        assert!(info.text_extracted);
+        let text = info
+            .extracted_text
+            .clone()
+            .expect("text from the media pass");
+        assert!(text.contains("kumquat harvest"), "{text}");
+
+        // The text pass does not load the file again: with it gone, a second
+        // load would fail and clear the text.
+        std::fs::remove_file(dir.path().join("report.pdf")).unwrap();
+        repo.ensure_text_extracted();
+        assert_eq!(pdf_info(&repo, "report.pdf").extracted_text, Some(text));
+    }
+
+    #[test]
+    fn a_pdf_without_text_is_not_parsed_again_by_the_text_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan.pdf");
+        write_pdf(&path, "A Scan", None);
+        let repo = scanned_repo(dir.path());
+
+        repo.populate_media_metadata();
+        let info = pdf_info(&repo, "scan.pdf");
+        assert!(info.text_extracted, "attempted, found nothing");
+        assert_eq!(info.extracted_text, None);
+
+        // Same file, now with text: only a re-parse could find it.
+        write_pdf(&path, "A Scan", Some("now with words"));
+        repo.ensure_text_extracted();
+        assert_eq!(pdf_info(&repo, "scan.pdf").extracted_text, None);
+    }
+
+    #[test]
+    fn the_text_pass_alone_still_extracts_pdf_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pdf(
+            &dir.path().join("report.pdf"),
+            "Kumquat Report",
+            Some("kumquat harvest"),
+        );
+        let repo = scanned_repo(dir.path());
+
+        repo.ensure_text_extracted();
+        let info = pdf_info(&repo, "report.pdf");
+        assert!(info.text_extracted);
+        assert!(
+            info.extracted_text
+                .is_some_and(|text| text.contains("kumquat harvest"))
+        );
     }
 }

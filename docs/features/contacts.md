@@ -36,7 +36,11 @@ Met Jane at the 2019 conference. Loves sailing.
 ```
 
 Every field is optional. A contact with none of them still gets its name and an
-avatar; a field that is absent simply leaves its section off the card.
+avatar; a field that is absent simply leaves its section off the card. Field
+names are read in any case (`Type: person`, `Emails:`, `Company:`); the first
+spelling wins if a note has two. `type`, `dates`, `born` and `died` are also
+published in lowercase, so templates, charts and search see a `Type: person`
+note as a person too.
 
 The field names were chosen to map cleanly onto vCard, Apple Contacts and Google
 Contacts (see [Compatibility](#compatibility-with-address-books)), so a future
@@ -97,6 +101,11 @@ that replaces `relationship_types` must keep it (see
 
 Phones, email addresses, websites, social profiles, instant-messaging handles
 and postal addresses can each have several values, each with an optional label.
+
+Field names on a contact are not case-sensitive: `Emails:` and `PHONES:` are
+read like `emails:` and `phones:` (if a note spells one field two ways, the
+first one wins). The `type` value itself must still be exactly `person` or
+`organization`.
 
 | Field | Suggested labels |
 |-------|------------------|
@@ -280,8 +289,8 @@ template already prints).
 
 ## Privacy: what reaches site.json
 
-`emails`, `phones`, `urls`, `social`, `im` and `addresses` are left **out** of
-`site.json`, the site-wide index every page downloads and that is published with
+`emails`, `phones`, `urls`, `social`, `im` and `addresses` (in any letter case)
+are left **out** of `site.json`, the site-wide index every page downloads and that is published with
 a static build. They stay on the contact's own page. Server-side search still
 matches values written in the map form (`emails: {work: …}`); the list form is
 not indexed for search.
@@ -400,7 +409,8 @@ Search (`/` or `Ctrl+K`/`Cmd+K`) matches any frontmatter field with
 | `job_title:engineer` | Everyone whose title contains "engineer" |
 | `type:person jane` | People matching "jane" |
 
-Matching is case-insensitive and by substring. Put a value containing spaces in
+Matching is case-insensitive and by substring, except `type:`, which must
+match the whole type (`type:person` does not find a `salesperson` note). Put a value containing spaces in
 double quotes: `type:"Meeting Notes"`.
 
 In server and GUI mode the search panel adds two shortcuts:

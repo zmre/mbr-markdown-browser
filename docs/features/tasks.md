@@ -263,7 +263,9 @@ usefully when the note has changed somewhere else since the page was rendered
 an added line moves every task below it), in which case nothing is written: a checkbox in the document offers to reload the page for the latest
 version, and the panel refreshes its list so you can try again. On a vault the
 server has to fetch from the cloud first (the iOS app over iCloud), a note that
-is still downloading says so; try again in a moment.
+is still downloading says so; try again in a moment. A note saved with old Mac (CR-only) line endings
+cannot be toggled; mbr says so rather than risk flipping the wrong line —
+convert it to LF (or CRLF) line endings ([details](editing/#carriage-return-only-line-endings)).
 
 The page does **not** reload for your own toggle. A done chip appears
 (or disappears) in place, your scroll position and the panel's filters survive,

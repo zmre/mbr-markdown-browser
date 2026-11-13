@@ -103,7 +103,7 @@ left.
 |---------|-----|
 | `chat` blocks (2.x syntax) | Supported |
 | Messages, `...`, `#` comments, `>` and `^` alignment | Supported |
-| Markdown in message bodies | Supported |
+| Markdown in message bodies | Supported (except footnotes) |
 | Lines that match nothing | **Rendered as markdown** (the plugin drops them) |
 | A `> quote` *inside* a message body | **Stays a quote** (the plugin also treats it as an alignment line) |
 | 1.x configuration lines (`[Name=color]`, `{mw=60, mode=minimal}`) | Silently ignored, so old notes do not show stray config |
@@ -118,7 +118,12 @@ left.
   [Task Browser](../features/tasks.md) does not look inside code blocks, so a task there
   could not be found or toggled anyway. A `TODO:` inside a message is
   highlighted but is not listed in the Task Browser, for the same reason.
-- **Moving or renaming a note** through mbr's editor does not find links that
-  appear only inside a chat block, because the link finder skips code blocks.
+- **Moving or renaming a note** through mbr's editor updates links inside a
+  chat block as well: the rewrite works on the note's text and does not skip
+  code blocks of any kind, so a link written inside an ordinary code fence is
+  rewritten too.
+- **Footnotes** are not supported inside a chat block. A `[^1]` in a message
+  stays plain text, and a `[^1]: …` line shows as written; put the footnote
+  outside the block.
 - **Reference-style links** (`[text][ref]`) in a body only resolve when the
   `[ref]: url` definition is in the same message.

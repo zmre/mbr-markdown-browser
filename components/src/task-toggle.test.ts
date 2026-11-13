@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { NOTE_CHANGED_MESSAGE, NOTE_DOWNLOADING_MESSAGE } from './stale-note.js'
+import { LINE_ENDINGS_MESSAGE, NOTE_CHANGED_MESSAGE, NOTE_DOWNLOADING_MESSAGE } from './stale-note.js'
 import {
   applyCheckboxStatus,
   checkboxStatus,
@@ -145,6 +145,14 @@ describe('toggleTask', () => {
     await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
     const rawCalls = fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/.mbr/raw/'))
     expect(rawCalls).toHaveLength(2)
+  })
+
+  it('reports a line-ending refusal as its own message, never as a conflict', async () => {
+    const body = JSON.stringify({ error: 'carriage-return-only line endings', reason: 'lone_carriage_return' })
+    routeFetch({ ok: false, status: 422, clone: () => new Response(body, { status: 422 }) })
+    const outcome = await toggleTask({ path: 'notes.md', line: 3, to: 'done' })
+    // `other`: the page alerts and offers no reload, which could not help.
+    expect(outcome).toEqual({ ok: false, kind: 'other', message: LINE_ENDINGS_MESSAGE })
   })
 
   it('reports a 503 on the write as still downloading and re-reads next time', async () => {

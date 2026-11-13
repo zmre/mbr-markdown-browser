@@ -6,7 +6,7 @@
     <title>{{title_prefix | default(value="")}}Outside this folder{{title_suffix | default(value="")}}</title>
   </head>
   <body>
-{% if sidebar_style == "single" %}<mbr-browse-single></mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}></mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
     <main id="wrapper" class="container">
       <h1>Outside this folder</h1>

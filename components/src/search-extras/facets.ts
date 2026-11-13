@@ -82,9 +82,10 @@ export function deriveSearchFacets(data: { markdown_files?: unknown } | null | u
 /**
  * The `key:value` facet token. A value with whitespace is quoted —
  * `parse_query` (src/search.rs `query_tokens`) keeps `key:"two words"` whole.
- * A literal `"` cannot be expressed inside that quoting, so it is dropped; a
- * frontmatter facet is a substring match, so the remaining text still selects
- * the value.
+ * A literal `"` cannot be expressed inside that quoting, so it is dropped;
+ * most frontmatter facets are substring matches, so the remaining text still
+ * selects the value. `type:` is matched exactly (case-insensitively), so a note
+ * type containing a `"` cannot be selected through this token.
  */
 export function facetToken(key: string, value: string): string {
   const clean = value.replace(/"/g, '').trim()

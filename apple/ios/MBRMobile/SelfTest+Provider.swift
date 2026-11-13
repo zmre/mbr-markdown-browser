@@ -6,8 +6,9 @@ extension SelfTest {
     /// `ProviderRefresh` on the sample vault. The simulator has no file
     /// provider, so this checks the mechanics, not a provider's answer: the
     /// location test, the folder choice, that presenters and the coordinated
-    /// read complete and come off again, that an idle run costs its budget
-    /// and no more, and that a change made during the wait ends it early.
+    /// read complete and come off again, that an idle run ends shortly after
+    /// the read (not at its budget), and that a change made during the wait
+    /// ends it early.
     static func providerRefresh(_ session: VaultSession) async -> String {
         let root = session.access.url
         let folder = root.appending(path: self.fixtureFolder, directoryHint: .isDirectory)
@@ -28,9 +29,10 @@ extension SelfTest {
 
         let (idle, early) = await Task.detached {
             try? "before\n".write(to: probe, atomically: true, encoding: .utf8)
-            let idle = ProviderRefresh.refresh(folder: folder, file: probe, budget: .milliseconds(600))
-            // A write 300 ms into the wait, as a provider updating its replica.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            let idle = ProviderRefresh.refresh(folder: folder, file: probe, budget: .seconds(3))
+            // A write 100 ms into the wait, as a provider updating its replica
+            // (inside the 300 ms quiet window after the read).
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
                 try? "after, longer\n".write(to: probe, atomically: true, encoding: .utf8)
             }
             let early = ProviderRefresh.refresh(folder: folder, file: probe, budget: .seconds(3))
@@ -38,7 +40,8 @@ extension SelfTest {
             return (idle, early)
         }.value
 
-        if idle.fileChanged || idle.read == "timed out" || idle.millis < 550 || idle.millis > 1500 {
+        // Idle: the read answers at once (no provider), then 300 ms of quiet.
+        if idle.fileChanged || idle.read == "timed out" || idle.millis < 250 || idle.millis > 1500 {
             problems.append("idle: \(idle.millis)ms changed=\(idle.fileChanged) read=\(idle.read)")
         }
         if !early.fileChanged || early.millis > 2000 {

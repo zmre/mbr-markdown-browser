@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
+  isLineEndingRefusal,
   NOTE_CHANGED_MESSAGE,
   NOTE_DOWNLOADING_MESSAGE,
   RELOAD_QUESTION,
@@ -71,5 +72,22 @@ describe('offerReload', () => {
     } finally {
       window.confirm = original
     }
+  })
+})
+
+describe('isLineEndingRefusal', () => {
+  const json = (body: unknown, status: number) => new Response(JSON.stringify(body), { status })
+
+  it('is true only for a 422 naming the lone-carriage-return reason', async () => {
+    expect(await isLineEndingRefusal(json({ error: 'x', reason: 'lone_carriage_return' }, 422))).toBe(true)
+    expect(await isLineEndingRefusal(json({ error: 'x', reason: 'lone_carriage_return' }, 409))).toBe(false)
+    expect(await isLineEndingRefusal(json({ error: 'x', reason: 'other' }, 422))).toBe(false)
+    expect(await isLineEndingRefusal(new Response('not json', { status: 422 }))).toBe(false)
+  })
+
+  it('leaves the body readable for the caller', async () => {
+    const response = json({ reason: 'lone_carriage_return' }, 422)
+    await isLineEndingRefusal(response)
+    expect(await response.json()).toEqual({ reason: 'lone_carriage_return' })
   })
 })

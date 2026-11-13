@@ -5,6 +5,7 @@ import { isInputTarget, isPresentationPlaying } from './mbr-keys.js'
 import type { MbrOverlay } from './overlay.js'
 import { DISCLOSURE_CSS, ICON_BUTTON_CSS } from './controls.ts'
 import { SIDEBAR_FOOTER_CSS, hasMeaningfulContent, renderSidebarFooter, slotHasMeaningfulContent } from './slot-content.ts'
+import { DEFAULT_SIDEBAR_MAX_ITEMS, sidebarMaxItems } from './sidebar-max-items.ts'
 import { ICON_SM, icon, iconCalendarDays, iconChevronRight, iconFolder, iconFolderOpen, iconPanelLeft, iconX } from './icons.ts'
 import { CALENDAR_SECTION_CSS, calendarSectionModel, renderCalendarSection } from './calendar/browse-section.js'
 import { calendarOverlayAvailable, folderNodeFiles, openCalendarOverlay } from './calendar/open-overlay.js'
@@ -48,12 +49,6 @@ const RECENT_KEY = 'mbr_recent_files';
 const SHORTCUTS_KEY = 'mbr_shortcuts';
 const MAX_RECENT = 30;
 const RECENT_VIEWED_LIMIT = 15;
-
-/**
- * Number of file cards rendered per page in the middle pane.
- * Mirrors `DEFAULT_MAX_ITEMS` in mbr-browse-single.ts.
- */
-const DEFAULT_MAX_ITEMS = 100;
 
 /** Section key used for the middle pane's pagination state. */
 const MIDDLE_PANE_KEY = 'middle-pane';
@@ -155,8 +150,8 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
   @state()
   private _paginationState = new Map<string, number>();
 
-  /** Items rendered per page in the middle pane. */
-  private _maxItems = DEFAULT_MAX_ITEMS;
+  /** File cards rendered per page in the middle pane (`max-items`). */
+  private _maxItems = DEFAULT_SIDEBAR_MAX_ITEMS;
 
   /** The configured index file name from site.json */
   private _indexFile: string = 'index.md';
@@ -177,6 +172,9 @@ export class MbrBrowseElement extends LitElement implements MbrOverlay {
 
     // `_browse_footer.html`, emitted as children by `_nav.html`.
     this._hasFooterContent = hasMeaningfulContent(this.childNodes);
+
+    // `sidebar_max_items`, written by `_nav.html`.
+    this._maxItems = sidebarMaxItems(this.getAttribute('max-items'));
 
     // Track current page as recently viewed. `getCanonicalPath()` decodes the
     // pathname and strips any static-deployment prefix so the stored value

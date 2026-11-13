@@ -1097,6 +1097,20 @@ export class MbrReviewPanelElement extends LitElement {
       overflow-wrap: anywhere;
     }
 
+    .note-suggestion-block {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+
+    .note-suggestion-label {
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--pico-muted-color, #5c6b73);
+    }
+
     .note-suggestion {
       margin: 0;
       padding: 0.35rem 0.5rem;

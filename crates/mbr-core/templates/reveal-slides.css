@@ -1,9 +1,20 @@
-/* Hide MBR chrome in slides mode */
+/* Hide MBR chrome in slides mode. `body > header` too, not only the `<nav>`
+ * inside it: the header is sticky with a 1px bottom border (theme.css), which
+ * otherwise drew a hairline across the top of the deck. */
+body.slides-container > header,
 body.slides-container nav,
 body.slides-container .breadcrumbs,
 body.slides-container footer,
 body.slides-container mbr-nav {
   display: none !important;
+}
+
+/* The heading permalink "#" is invisible (opacity 0) until hover, but it
+ * still takes its width plus a 0.4em margin at the end of the heading's last
+ * line, so a centred two-line title had its second line pulled left of
+ * centre. Nobody follows a permalink from a projected slide. */
+body.slides-container .mbr-heading-anchor {
+  display: none;
 }
 
 /* Full viewport for Reveal.js. The review-notes button (`<mbr-review>`, which

@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/update-assets.sh                    # report vendored vs. latest upstream versions
 #   ./scripts/update-assets.sh --all              # update everything that is behind
-#   ./scripts/update-assets.sh --hljs 11.11.2     # update one asset to an exact version
+#   ./scripts/update-assets.sh --hljs 11.12.0     # update one asset to an exact version
 #   ./scripts/update-assets.sh --katex latest     # ...or to whatever upstream calls latest
 #
 # Assets covered: highlight.js, mermaid, KaTeX (+ fonts), asciimath2tex, reveal.js, Pico CSS.
@@ -478,7 +478,7 @@ Options:
 Examples:
   update-assets.sh                              # what is vendored, what is available
   update-assets.sh --all
-  update-assets.sh --hljs 11.11.2 --mermaid 11.16.1
+  update-assets.sh --hljs 11.12.0 --mermaid 12.3.0
 EOF
 }
 
@@ -521,7 +521,7 @@ if [[ -z "$HLJS_VERSION$MERMAID_VERSION$KATEX_VERSION$ASCIIMATH2TEX_VERSION$REVE
     report_versions true
     echo "To update, pass versions explicitly or use --all:"
     echo "  $0 --all"
-    echo "  $0 --hljs 11.11.2 --mermaid 11.16.1"
+    echo "  $0 --hljs 11.12.0 --mermaid 12.3.0"
     exit 0
 fi
 

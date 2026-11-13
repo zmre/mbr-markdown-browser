@@ -9,7 +9,7 @@ import { buildRegistry, type SiteNote } from '../graph/relationship-graph.js'
 import { CONTACT_TYPES, buildSiteNotes } from '../graph/test-fixtures.js'
 import type { GenealogyContext } from './chart-registry.js'
 import { ORG_EXPAND_STEP, type OrgCard } from './org-layout.js'
-import { moreCardText, orgChartType } from './org-view.js'
+import { moreCardText, orgAccentPath, orgChartType, ORG_ACCENT_WIDTH, ORG_CARD_RADIUS } from './org-view.js'
 
 const registry = buildRegistry(CONTACT_TYPES)
 
@@ -149,5 +149,37 @@ describe('UNIT moreCardText', () => {
 
   it('names the destination when the card navigates', () => {
     expect(moreCardText(card(21), false, titleOf)).toBe('21 more — open Acme to see them')
+  })
+})
+
+describe('orgAccentPath', () => {
+  /** Every point of the path's straight-line skeleton (its M/A/L endpoints). */
+  function points(d: string): Array<[number, number]> {
+    return [...d.matchAll(/(?:M|L|A[\d.]+,[\d.]+ 0 0 0 )([-\d.]+),([-\d.]+)/g)].map((m) => [Number(m[1]), Number(m[2])])
+  }
+
+  /** Inside (or on) a `w`×`h` rect at the origin with corner radius `r`. */
+  function insideRoundedRect(x: number, y: number, w: number, h: number, r: number): boolean {
+    const eps = 1e-3
+    if (x < -eps || y < -eps || x > w + eps || y > h + eps) return false
+    const cx = Math.min(Math.max(x, r), w - r)
+    const cy = Math.min(Math.max(y, r), h - r)
+    return (x - cx) ** 2 + (y - cy) ** 2 <= r * r + eps
+  }
+
+  it("stays inside the card's rounded corners (the old rect poked out)", () => {
+    const h = 52
+    const pts = points(orgAccentPath(0, 0, h))
+    expect(pts.length).toBe(4)
+    for (const [x, y] of pts) expect(insideRoundedRect(x, y, 180, h, ORG_CARD_RADIUS), `${x},${y}`).toBe(true)
+    // The strip spans the card's full height at its left edge and is the accent's width.
+    expect(Math.max(...pts.map(([x]) => x))).toBeCloseTo(ORG_ACCENT_WIDTH)
+    expect(Math.min(...pts.map(([x]) => x))).toBe(0)
+    expect(pts.some(([, y]) => y === ORG_CARD_RADIUS)).toBe(true)
+    expect(pts.some(([, y]) => y === h - ORG_CARD_RADIUS)).toBe(true)
+  })
+
+  it('arcs with the card radius, so the strip follows the border exactly', () => {
+    expect(orgAccentPath(10, 20, 40)).toBe('M15,20.584 A8,8 0 0 0 10,28 L10,52 A8,8 0 0 0 15,59.416 Z')
   })
 })

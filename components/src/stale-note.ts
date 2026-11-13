@@ -17,6 +17,13 @@
  *
  * A line the page names that is past the end of the file is the same story as
  * a `409`: the file is shorter than the page thinks.
+ *
+ * One refusal is *not* stale-note: a `422` from `/.mbr/task` or
+ * `/.mbr/flashcard-review` whose JSON body has
+ * `reason: "lone_carriage_return"` ({@link isLineEndingRefusal}). The note uses
+ * carriage-return-only line endings, which the server cannot address by line;
+ * a reload changes nothing, so writers show {@link LINE_ENDINGS_MESSAGE} and
+ * stop, without offering one.
  */
 
 /** Why a note-level write could not go ahead because the page is stale. */
@@ -32,6 +39,32 @@ export const RELOAD_QUESTION = 'Reload it to get the latest version?'
 /** Statement for a note the server is still fetching from the cloud. */
 export const NOTE_DOWNLOADING_MESSAGE =
   'This note is still downloading from the cloud. Try again in a moment.'
+
+/**
+ * The `reason` the server sends with a `422` for a note whose line endings it
+ * cannot address (`mbr_core::errors::LONE_CARRIAGE_RETURN_REASON`).
+ */
+export const LONE_CARRIAGE_RETURN_REASON = 'lone_carriage_return'
+
+/** Statement for a note mbr cannot write to because of its line endings. */
+export const LINE_ENDINGS_MESSAGE =
+  "This note uses old Mac (CR-only) line endings, so mbr can't write to it. " +
+  'Convert the file to LF (or CRLF) line endings, then try again.'
+
+/**
+ * Whether a failed write was refused because of the note's line endings — a
+ * `422` with `reason: "lone_carriage_return"`. Reads a clone, so the caller
+ * may still read the body; any other status or body is `false`.
+ */
+export async function isLineEndingRefusal(response: Response): Promise<boolean> {
+  if (response.status !== 422) return false
+  try {
+    const body = (await response.clone().json()) as { reason?: unknown } | null
+    return body?.reason === LONE_CARRIAGE_RETURN_REASON
+  } catch {
+    return false
+  }
+}
 
 /**
  * The stale-note reading of a failed `/.mbr/raw` read, or `null` when the
