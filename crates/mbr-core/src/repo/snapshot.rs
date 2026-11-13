@@ -363,6 +363,7 @@ impl Repo {
                     asset.modified,
                 ))),
                 extracted_text: None,
+                text_extracted: false,
             };
             if let Some(stamps) = &stamps {
                 stamps.insert(key.clone(), asset.stamp);

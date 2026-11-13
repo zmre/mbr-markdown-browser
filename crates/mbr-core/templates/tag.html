@@ -6,7 +6,7 @@
     <title>{{title_prefix | default(value="")}}{{ tag_label }}: {{ tag_display_value }}{{title_suffix | default(value="")}}</title>
   </head>
   <body>
-{% if sidebar_style == "single" %}<mbr-browse-single>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
     <main id="wrapper" class="container" data-pagefind-body>
       <span class="sr-only" data-pagefind-weight="10">{{ tag_display_value }}</span>

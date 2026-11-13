@@ -26,6 +26,7 @@
  * instead of a frozen tab.
  */
 import type { RelationshipGraph } from '../graph/relationship-graph.js'
+import { isDangerousUrl } from '../safe-href.js'
 
 /** One person in family-chart's data format (gender optional, see above). */
 export interface FamilyChartDatum {
@@ -48,6 +49,56 @@ export interface FamilyChartData {
   data: FamilyChartDatum[]
   /** The focused person's id (family-chart's "main" person). */
   mainId: string
+}
+
+/**
+ * Escape text for interpolation into markup. family-chart builds every SVG card
+ * as a template string and parses it with d3's `.html()` (i.e. `innerHTML`) —
+ * the avatar as `<image href="${avatar}">`, each display line as
+ * `<tspan>${line}</tspan>` — so anything authored (a frontmatter `image`, a
+ * note title) must be encoded before it reaches the library. Encoding is
+ * lossless: the parser decodes `&amp;`/`&quot;` back to the original value.
+ */
+export function escapeMarkup(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => MARKUP_ESCAPES[c] ?? c)
+}
+
+const MARKUP_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}
+
+/**
+ * A raw frontmatter image path made safe for family-chart's `<image href>`:
+ * resolved for the current page, dropped when it names a script-capable scheme
+ * (`javascript:`, `data:` other than raster images — the same rule as
+ * `safeHref`), and attribute-encoded so a quote cannot end the attribute.
+ * `undefined` means "no portrait", which the view draws as a text-only card.
+ */
+export function safeAvatar(raw: string, resolveUrl: (path: string) => string): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  const url = resolveUrl(raw)
+  if (typeof url !== 'string' || url.length === 0 || isDangerousUrl(url)) return undefined
+  return escapeMarkup(url)
+}
+
+/**
+ * The data handed to `createChart`: every avatar through `safeAvatar`, every
+ * datum with an unusable one left without `avatar`. The input is not mutated.
+ */
+export function withSafeAvatars(
+  data: readonly FamilyChartDatum[],
+  resolveUrl: (path: string) => string
+): FamilyChartDatum[] {
+  return data.map((d) => {
+    if (d.data.avatar === undefined) return d
+    const avatar = safeAvatar(d.data.avatar, resolveUrl)
+    const { avatar: _dropped, ...rest } = d.data
+    return { ...d, data: avatar === undefined ? rest : { ...rest, avatar } }
+  })
 }
 
 /** Map a normalized gender string to family-chart's 'M'/'F'; else undefined. */

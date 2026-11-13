@@ -164,20 +164,31 @@ fn query_tokens(q: &str) -> Vec<&str> {
     tokens
 }
 
-/// Check if a frontmatter field value contains the facet value (case-insensitive).
+/// Check if a frontmatter field value matches the facet value (case-insensitive).
 /// Handles both string values and array values (for array tags).
+///
+/// Most fields match by substring (`company:acme` finds `Acme Corp`). `type` is
+/// the exception: it names a note's kind, so it must match the whole value —
+/// `type:person` must not find a `salesperson` note. The stored `type` is
+/// already trimmed by the simplifier (`contact::normalize_type`).
 fn facet_matches(
     frontmatter: Option<&crate::markdown::SimpleMetadata>,
     field: &str,
     value: &str,
 ) -> bool {
+    let wanted = value.to_lowercase();
+    let exact = field == "type";
+    let matches = |s: &str| {
+        let have = s.to_lowercase();
+        if exact {
+            have == wanted
+        } else {
+            have.contains(&wanted)
+        }
+    };
     match frontmatter.and_then(|fm| fm.get(field)) {
-        Some(serde_json::Value::String(s)) => s.to_lowercase().contains(&value.to_lowercase()),
-        Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.to_lowercase().contains(&value.to_lowercase()))
-                .unwrap_or(false)
-        }),
+        Some(serde_json::Value::String(s)) => matches(s),
+        Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str().is_some_and(matches)),
         _ => false,
     }
 }
@@ -1821,6 +1832,23 @@ mod tests {
         );
 
         assert!(!facet_matches(Some(&fm), "category", "systems"));
+    }
+
+    #[test]
+    fn test_type_facet_matches_the_whole_value_only() {
+        let mut fm = crate::markdown::SimpleMetadata::new();
+        fm.insert("type".to_string(), serde_json::json!("Salesperson"));
+        assert!(!facet_matches(Some(&fm), "type", "person"));
+        assert!(facet_matches(Some(&fm), "type", "salesperson"));
+        assert!(facet_matches(Some(&fm), "type", "SALESPERSON"));
+
+        fm.insert("type".to_string(), serde_json::json!("Meeting Notes"));
+        assert!(facet_matches(Some(&fm), "type", "meeting notes"));
+        assert!(!facet_matches(Some(&fm), "type", "meeting"));
+
+        // Other fields keep substring matching.
+        fm.insert("role".to_string(), serde_json::json!("Salesperson"));
+        assert!(facet_matches(Some(&fm), "role", "person"));
     }
 
     #[test]

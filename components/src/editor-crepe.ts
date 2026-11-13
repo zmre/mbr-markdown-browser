@@ -27,7 +27,7 @@ import { MBR_WIDGETS } from './frontmatter/mbr-widgets.js';
 import { createActorMemory } from './frontmatter/mbr-logic.js';
 import type { RelationTypeConfig } from './graph/relationship-graph.js';
 import { openPathPicker, type SiteMarkdownFile } from './editor-path-picker.js';
-import { openMediaPicker, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
+import { openMediaPicker, type MediaCatalogSubscribe, type MediaFile, type MediaPickResult } from './editor-media-picker.js';
 import { createLinkAutocompletePlugin, AUTOCOMPLETE_CSS } from './editor-link-autocomplete.js';
 import type { EditTarget } from './editor-media-target.js';
 import { createMediaEditPlugin, detectEditTarget } from './editor-media-edit.js';
@@ -125,6 +125,13 @@ export interface OpenEditorOptions {
    * `shared.ts`; absent means the default `tags`.
    */
   tagSources?: readonly TagSourceLike[];
+  /**
+   * The page's media.json catalog (`shared.ts`'s, which this chunk must not
+   * import), kept current while the media picker is open: refetched on open
+   * and polled while the server reports `"populated": false`. Absent, the
+   * picker fetches media.json once.
+   */
+  subscribeMedia?: MediaCatalogSubscribe;
 }
 
 /**
@@ -359,10 +366,15 @@ const MODAL_CSS = `
 .mbr-editor-body { flex: 1; display: flex; flex-direction: column; overflow: auto; }
 @media (min-width: 601px) {
   .mbr-editor-modal .milkdown .ProseMirror {
+    padding-top: 24px;
     padding-left: max(120px, calc((100% - 48em) / 2));
     padding-right: max(120px, calc((100% - 48em) / 2));
   }
 }
+/* Crepe's 60px top padding plus a heading's own top margin (32px on an H1)
+   left a ~120px band between the properties bar and the first line. The first
+   block, not the first child: ProseMirror keeps a cursor widget there. */
+.mbr-editor-modal .milkdown .ProseMirror > :nth-child(1 of :not(.ProseMirror-widget)) { margin-top: 0; }
 .mbr-editor-notice {
   display: flex; align-items: flex-start; gap: 0.5rem;
   padding: 0.5rem 1rem; font-size: 0.85rem;
@@ -1265,6 +1277,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     const result = await openMediaPicker({
       mode: editTarget ? 'edit' : 'insert',
       initial: editTarget ? { src: editTarget.src, caption: editTarget.caption } : undefined,
+      subscribeMediaFiles: opts.subscribeMedia,
       fetchMediaFiles: fetchMediaOtherFiles,
     });
     if (!result) return;

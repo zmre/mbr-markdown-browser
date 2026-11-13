@@ -1083,6 +1083,16 @@ describe('UNIT reveal-slides.css kanban cards', () => {
   })
 })
 
+describe('UNIT reveal-slides.css chrome while playing', () => {
+  it('hides the sticky page header, whose bottom border drew a rule across the deck', () => {
+    expect(__MBR_REVEAL_SLIDES_CSS__).toMatch(/body\.slides-container > header,[\s\S]*?\{\s*display:\s*none !important;/)
+  })
+
+  it('takes the invisible heading permalink out of layout, so a wrapped title stays centred', () => {
+    expect(slidesRule('body.slides-container .mbr-heading-anchor')).toMatch(/display:\s*none/)
+  })
+})
+
 describe('UNIT reveal-slides.css review notes while playing', () => {
   it('hides the review-note markers (the wash and its hover card stay)', () => {
     expect(slidesRule('body.slides-container .mbr-review-marker')).toMatch(/display:\s*none/)

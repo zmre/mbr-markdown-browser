@@ -6,7 +6,7 @@
 {% include "_head_custom.html" %}
   </head>
   <body{% if style %} class="{{ style }}"{% endif %}>
-{% if sidebar_style == "single" %}<mbr-browse-single>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
 {% include "_breadcrumbs.html" %}
     <main id="wrapper" class="container" data-pagefind-body>{% include "_calendar_nav.html" %}{% if title %}<span class="sr-only" data-pagefind-weight="10">{{ title }}</span>{% endif %}{% if title and not has_h1 and not contact %}<h1>{{ title }}</h1>{% endif %}{% include "_contact_card.html" %}{{ markdown | safe}}</main>

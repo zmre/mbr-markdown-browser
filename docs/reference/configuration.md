@@ -198,7 +198,7 @@ assert a fact about the command line that was never typed.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `sidebar_style` | string | `"panel"` | Sidebar navigation style: `"panel"` (modal 3-pane) or `"single"` (persistent sidebar) |
-| `sidebar_max_items` | number | `100` | Maximum items per section in sidebar navigation |
+| `sidebar_max_items` | number | `100` | Items shown before "show more": per section in the `"single"` sidebar, and per page of the `"panel"` navigator's file list. Must be greater than 0 |
 | `graph_depth` | number | `2` | Default depth (`1`–`5`) of the link graph shown in the info panel; startup fails on out-of-range values |
 | `gui_menu_bar` | string | `"auto"` | GUI window's native menu bar: `"auto"`, `"always"`, or `"never"`. Linux only — see below |
 | `title_prefix` | string | `""` | Text to prepend to all page titles |
@@ -539,7 +539,8 @@ The two halves of an inverse pair must point opposite ways and share a category,
 you only need to set `hierarchy`/`category` on one half: the other inherits the
 flipped direction and the same category. If both halves claim the same direction,
 mbr keeps the one declared first, flips the other and logs a warning — startup never
-fails over it. A `hierarchy` on a symmetric type is ignored with a warning.
+fails over it. Two different categories are repaired the same way: the half declared
+first gives its category to both, with a warning. A `hierarchy` on a symmetric type is ignored with a warning.
 
 The default `relationship_types` cover family and work:
 

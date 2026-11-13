@@ -123,11 +123,42 @@ describe('theme.css: nothing widens the page', () => {
     // Without it the grid's containers fill their column exactly, and the
     // header's last `<ul>` (Pico's `nav ul:last-child` margin) and the
     // marginalia dagger (`left: 100%`) hang past the viewport at 1280px.
-    for (const child of ['header', 'main', 'footer']) {
+    for (const child of ['header', 'nav.breadcrumbs', 'main', 'footer']) {
       const selector = `body.mbr-has-sidebar > ${child}`
       const gutter = rulesFor(selector).find((r) => declaration(r, 'padding-inline'))
       expect(gutter && declaration(gutter, 'padding-inline'), selector).toBe('var(--pico-spacing)')
       expect(gutter?.conditions, selector).toEqual(['@media screen and (min-width: 1024px)'])
+    }
+  })
+
+  it('gives the breadcrumbs a row of their own in the docked sidebar grid', () => {
+    // Every cell of the old three-row grid was named, so the auto-placed
+    // breadcrumbs landed in an implicit row below the footer.
+    const grid = rulesFor('body.mbr-has-sidebar').find((r) => declaration(r, 'grid-template-areas'))
+    const areas = grid ? (declaration(grid, 'grid-template-areas') ?? '') : ''
+    expect(areas.match(/"[^"]*"/g)).toEqual([
+      '"sidebar header"',
+      '"sidebar crumbs"',
+      '"sidebar main"',
+      '"sidebar footer"',
+    ])
+    expect(grid && declaration(grid, 'grid-template-rows')).toBe('auto auto 1fr auto')
+    const crumbs = rulesFor('body.mbr-has-sidebar > nav.breadcrumbs').find((r) => declaration(r, 'grid-area'))
+    expect(crumbs && declaration(crumbs, 'grid-area')).toBe('crumbs')
+  })
+
+  it('leaves room at the end of a docked layout\'s main for the review-note marker', () => {
+    // The marker hangs at `left: 100%` of its block; a 1rem gutter clipped it.
+    const gutter = rulesFor(':root').find((r) => declaration(r, '--mbr-review-marker-gutter'))
+    expect(gutter && declaration(gutter, '--mbr-review-marker-gutter')).toBe('2rem')
+    for (const selector of [
+      'body.mbr-has-sidebar > main',
+      'html:not(.mbr-companion-hidden) body.mbr-has-companion > main',
+    ]) {
+      const end = rulesFor(selector).find((r) => declaration(r, 'padding-inline-end'))
+      expect(end && declaration(end, 'padding-inline-end'), selector).toBe(
+        'calc(var(--pico-spacing) + var(--mbr-review-marker-gutter))'
+      )
     }
   })
 
@@ -324,5 +355,18 @@ describe('kanban card layout', () => {
     expect(declaration(check!, 'margin-inline')).toBe('calc(-1 * var(--mbr-kanban-gutter)) 0.45em')
     // 1.25em box + 0.45em gap = the 1.7em gutter.
     expect(1.25 + 0.45).toBeCloseTo(parseFloat(gutter!))
+  })
+})
+
+describe('listing file cards', () => {
+  it("closes the empty body between a file card's title and its footer", () => {
+    const card = 'main#wrapper > section > article'
+    const header = rulesFor(`${card} > header:has(+ footer)`)[0]
+    expect(header && declaration(header, 'margin-bottom')).toBe('0')
+    const title = rulesFor(`${card} > header:has(+ footer) > :last-child`)[0]
+    expect(title && declaration(title, 'margin-bottom')).toBe('0')
+    const footer = rulesFor(`${card} > header + footer`)[0]
+    expect(footer && declaration(footer, 'margin-top')).toBe('0')
+    expect(footer && declaration(footer, 'border-top')).toBe('0')
   })
 })

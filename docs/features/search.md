@@ -15,7 +15,10 @@ search dialog. It works in the GUI, in server mode and in static builds.
 - Search across all markdown files
 - Filter by metadata, content, or both
 - Filter on any frontmatter field with `field:value` (`tags:rust`,
-  `company:acme`); quote values with spaces: `type:"Meeting Notes"`
+  `company:acme`); quote values with spaces: `type:"Meeting Notes"`. Values
+  match anywhere in the field (`company:acme` finds `Acme Corp`), except
+  `type:`, which must match the whole type (`type:person` does not find
+  `salesperson`); case never matters
 - Pick a note type from the scope menu — every `type` in your notes is listed
   with a count, and choosing one writes the `type:` filter for you
 - Scope to the current folder (on a note, the folder the note is in), to any

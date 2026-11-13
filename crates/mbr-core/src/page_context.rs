@@ -500,7 +500,8 @@ pub struct MarkdownContextOptions<'a> {
     /// Concentric-mode growth threshold, read by the flashcard deck as
     /// `__MBR_CONFIG__.flashcardsConcentricThreshold`. Markdown pages only:
     /// the deck exists only on a `type: flashcard` note, so the chrome-only
-    /// pages leave it to the template's default.
+    /// pages omit the key (`_head.html` emits it only when set) and the
+    /// client's fallback applies.
     pub flashcards_concentric_threshold: f64,
     /// Whether the reading view draws flashcard progress indicators
     /// (`__MBR_CONFIG__.flashcardsProgressIndicators`). Markdown pages only.

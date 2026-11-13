@@ -13,7 +13,7 @@
     </script>
   </head>
   <body>
-{% if sidebar_style == "single" %}<mbr-browse-single>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
+{% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}
 {% include "_nav.html" %}
 {% include "_breadcrumbs.html" %}
     <main id="wrapper" class="container">

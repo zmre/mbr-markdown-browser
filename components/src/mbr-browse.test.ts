@@ -462,7 +462,11 @@ describe('MbrBrowseElement with site data', () => {
   }
 
   /** Mount an open <mbr-browse> for `pathname` with `files` as the site index. */
-  async function mount(files: MarkdownFile[], pathname: string): Promise<MbrBrowseElement> {
+  async function mount(
+    files: MarkdownFile[],
+    pathname: string,
+    attributes: Record<string, string> = {},
+  ): Promise<MbrBrowseElement> {
     vi.stubGlobal('location', { pathname })
     mocks.state = {
       isLoading: false,
@@ -470,6 +474,7 @@ describe('MbrBrowseElement with site data', () => {
       error: null,
     }
     const el = document.createElement('mbr-browse') as MbrBrowseElement
+    for (const [name, value] of Object.entries(attributes)) el.setAttribute(name, value)
     document.body.appendChild(el)
     element = el
     el.open()
@@ -609,6 +614,23 @@ describe('MbrBrowseElement with site data', () => {
 
       expect(root(el).querySelectorAll('.file-card')).toHaveLength(100)
       expect(root(el).querySelector('.pane-count')?.textContent?.trim()).toBe('500')
+    })
+
+    it('pages by the max-items attribute (sidebar_max_items)', async () => {
+      const el = await mount(taggedFiles(60), '/', { 'max-items': '25' })
+      await selectTag(el, 'note')
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(25)
+
+      const showMore = root(el).querySelector('.middle-pane .show-more') as HTMLElement
+      showMore.click()
+      await el.updateComplete
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(50)
+    })
+
+    it('ignores an unusable max-items attribute', async () => {
+      const el = await mount(taggedFiles(150), '/', { 'max-items': '0' })
+      await selectTag(el, 'note')
+      expect(root(el).querySelectorAll('.file-card')).toHaveLength(100)
     })
 
     it('reveals the next page when show more is clicked', async () => {

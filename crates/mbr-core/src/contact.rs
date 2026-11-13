@@ -377,6 +377,27 @@ pub struct RelationshipGroup {
     pub items: Vec<RelationshipItem>,
 }
 
+/// A YAML mapping key as text, the way `relationships::yaml_to_json` writes it
+/// (an integer key as its digits; anything else empty).
+fn yaml_key(key: &Yaml) -> String {
+    key.as_str()
+        .map(str::to_string)
+        .or_else(|| key.as_i64().map(|i| i.to_string()))
+        .unwrap_or_default()
+}
+
+/// The frontmatter map with every top-level key lowercased, for the card's
+/// case-insensitive reading (`Emails:` and `emails:` are one field to a
+/// reader). When two spellings collide, the first in `entries` (authored order)
+/// wins. Nested keys — labels, address fields — keep their case: their readers
+/// already compare them case-insensitively. Only contact notes pay for this.
+fn lowercase_top_level_keys(entries: impl Iterator<Item = (String, Value)>) -> Map<String, Value> {
+    entries.fold(Map::new(), |mut map, (key, value)| {
+        map.entry(key.to_lowercase()).or_insert(value);
+        map
+    })
+}
+
 /// One neighbour in a [`RelationshipGroup`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RelationshipItem {
@@ -403,29 +424,39 @@ impl Contact {
     /// Parses a contact from raw YAML frontmatter, or `None` when the note is
     /// not `type: person` / `type: organization`.
     ///
-    /// Checks the type on the YAML before converting anything, so the cost for
-    /// every other note is one hash lookup.
+    /// Top-level keys are read **case-insensitively** (`Emails:`, `Type:`),
+    /// the first spelling in the note winning when two collide; see
+    /// [`lowercase_top_level_keys`]. Checks the type on the YAML before
+    /// converting anything, so the cost for every other note is one scan of its
+    /// top-level keys.
     pub fn from_yaml(yaml: &Yaml) -> Option<Self> {
         let hash = yaml.as_hash()?;
         let kind = hash
-            .get(&Yaml::String("type".to_string()))
-            .and_then(Yaml::as_str)
+            .iter()
+            .find(|(k, _)| k.as_str().is_some_and(|k| k.eq_ignore_ascii_case("type")))
+            .and_then(|(_, v)| v.as_str())
             .and_then(ContactKind::from_type)?;
-        match crate::relationships::yaml_to_json(yaml) {
-            Value::Object(fm) => Some(Self::from_map(kind, &fm)),
-            _ => None,
-        }
+        let fm = lowercase_top_level_keys(
+            hash.iter()
+                .map(|(k, v)| (yaml_key(k), v))
+                .map(|(k, v)| (k, crate::relationships::yaml_to_json(v))),
+        );
+        Some(Self::from_map(kind, &fm))
     }
 
-    /// Parses a contact from frontmatter already converted to JSON.
+    /// Parses a contact from frontmatter already converted to JSON. Keys are
+    /// read case-insensitively, as in [`Contact::from_yaml`].
     pub fn from_frontmatter(fm: &Map<String, Value>) -> Option<Self> {
+        let fm = lowercase_top_level_keys(fm.iter().map(|(k, v)| (k.clone(), v.clone())));
         let kind = fm
             .get("type")
             .and_then(Value::as_str)
             .and_then(ContactKind::from_type)?;
-        Some(Self::from_map(kind, fm))
+        Some(Self::from_map(kind, &fm))
     }
 
+    /// `fm`'s top-level keys must already be lowercase
+    /// ([`lowercase_top_level_keys`]).
     fn from_map(kind: ContactKind, fm: &Map<String, Value>) -> Self {
         let mut problems = Vec::new();
         let text = |key: &str| fm.get(key).and_then(scalar_text);
@@ -1086,6 +1117,15 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 /// The frontmatter simplifier's contact hook. Called once per note on the
 /// simplified map, with the raw YAML it came from:
 ///
+/// - The keys this hook owns — [`CANONICAL_LOWERCASE_KEYS`]: `type`, `dates`,
+///   `born`, `died` — are found **case-insensitively** and published under
+///   their lowercase spelling (`Type: person` → `type`), the first spelling in
+///   the note winning and any other dropped, together with their flattened
+///   `Dates.<label>` variants. The contact card already reads them that way
+///   ([`Contact::from_yaml`]); without this, templates (`{% if type ==
+///   "person" %}`), the body class, `site.json` readers and the search
+///   `type:` facet would not. Every other key is user data shown as authored,
+///   so it keeps its case.
 /// - A string `type` is trimmed for **every** note (and dropped when blank),
 ///   because it gates features by exact comparison in places that cannot all
 ///   be made to trim — `{% if type == "person" %}` in templates (including a
@@ -1093,7 +1133,8 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 ///   search `type:` facet. `type: " person"` would otherwise get the contact
 ///   card (Rust trims) but not the charts (templates do not).
 /// - `aliases` becomes a flat array of names (labels dropped) for **every**
-///   note, so labeled aliases resolve wikilinks and relationship endpoints.
+///   note, so labeled aliases resolve wikilinks and relationship endpoints;
+///   the `aliases.<label>` keys the generic flattening wrote are removed.
 /// - On person/organization notes, every date — `dates` in any accepted shape,
 ///   plus legacy `born`/`died` — is written as a `dates.<label>` string
 ///   ([`PartialDate::iso`] when parseable), the label **lowercased**. This is
@@ -1103,6 +1144,9 @@ fn split_extension(lower: &str) -> (&str, Option<String>) {
 /// Costs nothing on a note with neither key.
 pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Hash) {
     let key = |k: &str| Yaml::String(k.to_string());
+    for name in CANONICAL_LOWERCASE_KEYS {
+        canonicalize_key_case(hm, hash, name);
+    }
     normalize_type(hm);
     if let Some(aliases) = hash.get(&key(ALIASES_KEY)) {
         let json = crate::relationships::yaml_to_json(aliases);
@@ -1110,28 +1154,32 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
             .into_iter()
             .map(Value::String)
             .collect();
+        // The generic simplifier has already flattened a labeled `aliases:`
+        // map into `aliases.<label>` keys; the flat list replaces them, or the
+        // info panel lists every alias twice.
+        let flattened = format!("{ALIASES_KEY}.");
+        hm.retain(|k, _| !k.starts_with(&flattened));
         hm.insert(ALIASES_KEY.to_string(), Value::Array(names));
     }
 
-    let is_contact = hash
-        .get(&key("type"))
-        .and_then(Yaml::as_str)
+    let is_contact = find_key_ignoring_case(hash, "type")
+        .and_then(|(_, v)| v.as_str())
         .and_then(ContactKind::from_type)
         .is_some();
     if !is_contact {
         return;
     }
     let date_keys = ["dates", "born", "died"];
-    if !date_keys.iter().any(|k| hash.contains_key(&key(k))) {
-        return;
-    }
     let fm: Map<String, Value> = date_keys
         .iter()
         .filter_map(|k| {
-            hash.get(&key(k))
-                .map(|v| (k.to_string(), crate::relationships::yaml_to_json(v)))
+            find_key_ignoring_case(hash, k)
+                .map(|(_, v)| (k.to_string(), crate::relationships::yaml_to_json(v)))
         })
         .collect();
+    if fm.is_empty() {
+        return;
+    }
     for date in parse_dates(&fm, None) {
         // Lowercase, because every reader of a label matches it
         // case-insensitively (`has` and `rank` above) except a key lookup: the
@@ -1143,6 +1191,60 @@ pub fn normalize_simplified(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Ha
             hm.remove(&format!("dates.{}", date.label));
         }
         hm.insert(format!("dates.{canonical}"), Value::String(date.value));
+    }
+}
+
+/// The top-level keys [`normalize_simplified`] publishes in lowercase whatever
+/// case the note wrote them in.
+pub const CANONICAL_LOWERCASE_KEYS: [&str; 4] = ["type", "dates", "born", "died"];
+
+/// The first top-level key of `hash` equal to `name` ignoring ASCII case, with
+/// its value — the spelling that wins when a note has two. The contact card,
+/// the simplifier and the implied `company` edge
+/// (`relationships::company_employer_relationship`) all find keys this way.
+pub(crate) fn find_key_ignoring_case<'a>(
+    hash: &'a yaml_rust2::yaml::Hash,
+    name: &str,
+) -> Option<(&'a str, &'a Yaml)> {
+    hash.iter().find_map(|(k, v)| {
+        k.as_str()
+            .filter(|k| k.eq_ignore_ascii_case(name))
+            .map(|k| (k, v))
+    })
+}
+
+/// Publishes `name` (lowercase) under its lowercase spelling in `hm`: the
+/// note's first spelling of it (`Type`, `TYPE`, …) is renamed — with its
+/// flattened `Type.<sub>` keys — and every other spelling is dropped, so a
+/// note with both `Type` and `type` keeps exactly one, the one written first.
+///
+/// Free for a note that spells the key only as `name` (one scan of its
+/// top-level keys).
+fn canonicalize_key_case(hm: &mut SimpleMetadata, hash: &yaml_rust2::yaml::Hash, name: &str) {
+    let other_spelling = |k: &str| k != name && k.eq_ignore_ascii_case(name);
+    if !hash.keys().filter_map(Yaml::as_str).any(other_spelling) {
+        return;
+    }
+    let Some((first, _)) = find_key_ignoring_case(hash, name) else {
+        return;
+    };
+    // The root of a simplified key: the authored key, before the generic
+    // simplifier's `.<sub>` flattening.
+    let root = |k: &str| k.split('.').next().unwrap_or(k).to_string();
+    let spelled: Vec<String> = hm
+        .keys()
+        .filter(|k| root(k).eq_ignore_ascii_case(name))
+        .cloned()
+        .collect();
+    let (winner, losers): (Vec<String>, Vec<String>) =
+        spelled.into_iter().partition(|k| root(k) == first);
+    for k in losers {
+        hm.remove(&k);
+    }
+    for k in winner {
+        if let Some(value) = hm.remove(&k) {
+            hm.insert(format!("{name}{}", &k[first.len()..]), value);
+        }
     }
 }
 
@@ -1709,6 +1811,110 @@ mod tests {
         assert_eq!(hm["aliases"], json!(["A", "N"]));
         let scalar = simplified("aliases: Bob\n");
         assert_eq!(scalar["aliases"], json!(["Bob"]));
+    }
+
+    #[test]
+    fn normalize_replaces_flattened_labeled_aliases() {
+        // What the generic simplifier has already written for a labeled
+        // `aliases:` map: one dot key per label, beside the flat list.
+        let mut flattened = SimpleMetadata::from([
+            ("aliases.nickname".to_string(), json!("Bobby")),
+            ("aliases.maiden".to_string(), json!("Smith")),
+            ("aliasesque".to_string(), json!("kept")),
+            ("title".to_string(), json!("Bob")),
+        ]);
+        let y =
+            yaml("title: Bob\naliases:\n  nickname: Bobby\n  maiden: Smith\naliasesque: kept\n");
+        normalize_simplified(&mut flattened, y.as_hash().unwrap());
+        assert_eq!(flattened["aliases"], json!(["Bobby", "Smith"]));
+        assert!(
+            !flattened.keys().any(|k| k.starts_with("aliases.")),
+            "{flattened:?}"
+        );
+        assert_eq!(flattened["aliasesque"], json!("kept"));
+        assert_eq!(flattened["title"], json!("Bob"));
+    }
+
+    #[test]
+    fn normalize_publishes_owned_keys_in_lowercase_first_spelling_wins() {
+        // What the generic simplifier writes: authored keys, maps flattened.
+        let mut hm = SimpleMetadata::from([
+            ("Type".to_string(), json!("person")),
+            ("TYPE".to_string(), json!("organization")),
+            ("Dates.Birthday".to_string(), json!("1815-12-10")),
+            ("Born".to_string(), json!("1815")),
+            ("Title".to_string(), json!("Ada")),
+            ("typeface".to_string(), json!("serif")),
+        ]);
+        let y = yaml(
+            "Type: person\nTYPE: organization\nDates:\n  Birthday: 1815-12-10\nBorn: '1815'\nTitle: Ada\ntypeface: serif\n",
+        );
+        normalize_simplified(&mut hm, y.as_hash().unwrap());
+        assert_eq!(hm["type"], json!("person"), "first spelling wins: {hm:?}");
+        assert!(
+            !hm.contains_key("Type") && !hm.contains_key("TYPE"),
+            "{hm:?}"
+        );
+        // Still recognised as a contact, so its dates are normalised too.
+        assert_eq!(hm["dates.birthday"], json!("1815-12-10"));
+        assert!(!hm.keys().any(|k| k.starts_with("Dates")), "{hm:?}");
+        assert_eq!(hm["born"], json!("1815"));
+        assert!(!hm.contains_key("Born"));
+        // User keys keep their case; a longer key is not the owned one.
+        assert_eq!(hm["Title"], json!("Ada"));
+        assert_eq!(hm["typeface"], json!("serif"));
+    }
+
+    #[test]
+    fn normalize_keeps_lowercase_type_over_a_later_spelling() {
+        let mut hm = SimpleMetadata::from([
+            ("type".to_string(), json!("person")),
+            ("Type".to_string(), json!("meeting")),
+        ]);
+        let y = yaml("type: person\nType: meeting\n");
+        normalize_simplified(&mut hm, y.as_hash().unwrap());
+        assert_eq!(
+            hm,
+            SimpleMetadata::from([("type".to_string(), json!("person"))])
+        );
+    }
+
+    #[test]
+    fn card_keys_are_read_case_insensitively() {
+        let c = contact(
+            "Type: person\nFirst_Name: Ada\nEmails:\n  work: ada@example.com\nPHONES:\n  - mobile: '+1 555 0100'\nURLs: https://ada.example\nAddresses:\n  home:\n    city: London\n",
+        );
+        assert_eq!(c.kind, ContactKind::Person);
+        assert_eq!(c.name.first.as_deref(), Some("Ada"));
+        assert_eq!(c.emails[0].value, "ada@example.com");
+        assert_eq!(c.phones[0].value, "+1 555 0100");
+        assert_eq!(c.urls[0].value, "https://ada.example");
+        assert_eq!(c.addresses.len(), 1);
+
+        // Two spellings of one field: the first in the note wins.
+        let c = contact("type: person\nEmails: first@example.com\nemails: second@example.com\n");
+        let values: Vec<_> = c.emails.iter().map(|e| e.value.as_str()).collect();
+        assert_eq!(values, ["first@example.com"]);
+
+        let from_json = Contact::from_frontmatter(&Map::from_iter([
+            ("TYPE".to_string(), json!("organization")),
+            ("Emails".to_string(), json!("hi@acme.example")),
+        ]))
+        .unwrap();
+        assert_eq!(from_json.kind, ContactKind::Organization);
+        assert_eq!(from_json.emails[0].value, "hi@acme.example");
+
+        // The site.json filter withholds every spelling the card now reads.
+        for key in [
+            "Emails",
+            "PHONES.mobile",
+            "URLs",
+            "Addresses.home.city",
+            "Social",
+            "IM",
+        ] {
+            assert!(!is_public_frontmatter_key(key), "{key}");
+        }
     }
 
     #[test]

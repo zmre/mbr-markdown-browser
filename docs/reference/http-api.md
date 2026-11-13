@@ -19,11 +19,29 @@ server-only.
 | `/{path}/` | GET | Markdown page or directory |
 | `/{path}` | GET | `301` to the canonical `/{path}/` when it names a markdown page |
 | `/.mbr/site.json` | GET | Full site metadata as JSON |
+| `/.mbr/media.json` | GET | Every non-markdown file with its metadata; see [Media catalog](#media-catalog) |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/tasks` | POST | Task query for the task browser and the calendar's task marks (`404` with `--no-tasks`) |
 | `/.mbr/ws/changes` | WS | WebSocket for live reload |
 | `/.mbr/outside/?path=…` | GET | Where a link out of the repository leads; see [Outside links](#outside-links) |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
+
+## Media catalog
+
+`GET /.mbr/media.json` lists the repository's other files (images, video,
+audio, PDFs, …), the catalog the media browser shows:
+
+```json
+{ "other_files": [ … ], "populated": true }
+```
+
+It waits for the initial scan, never for the slower passes after it (the
+static folder listing, file sizes and times, video durations, image
+dimensions, PDF page counts). While those run it answers at once with what it
+has and `"populated": false`; ask again until `"populated": true`, at which
+point every entry carries its metadata. The media browser refetches every
+2 seconds while it is open. A static build's `.mbr/media.json` has no
+`populated` field: it is complete when written.
 
 ## Task Queries
 
@@ -191,6 +209,12 @@ with in-browser editing: see
 [File-management endpoints](../features/editing/#file-management-endpoints),
 [Task toggling](../features/editing/#task-toggling) and
 [Flashcard reviews](../features/editing/#flashcard-reviews).
+
+`/.mbr/task` and `/.mbr/flashcard-review` address a note by line. A note with
+carriage-return-only line endings cannot be, and both refuse it with `422` and
+`{"error": "…", "reason": "lone_carriage_return"}` — distinct from the `409` of
+a stale page, since a reload cannot fix it; see
+[Carriage-return-only line endings](../features/editing/#carriage-return-only-line-endings).
 
 ## Media viewers
 

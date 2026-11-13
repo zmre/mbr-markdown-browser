@@ -1244,6 +1244,30 @@ describe('MbrTasksPanelElement', () => {
       expect(link.textContent).toBe('rename the TODO list page')
     })
 
+    it('shows a wikilink as its name, never its brackets', async () => {
+      respondWith(
+        makeResponse({
+          groups: [
+            makeGroup({
+              key: '/notes/',
+              url_path: '/notes/',
+              total: 1,
+              tasks: [makeHit({ text: 'Call [[Maya Okafor]] re [[projects/acme|Acme]]', line: 3 })],
+            }),
+          ],
+          total_matches: 1,
+        })
+      )
+      element = await mountBare(null)
+
+      const link = element.shadowRoot!.querySelector('.task-link')!
+      expect(link.textContent).toBe('Call Maya Okafor re Acme')
+      expect([...link.querySelectorAll('.task-wikilink')].map((n) => n.textContent)).toEqual(['Maya Okafor', 'Acme'])
+      expect(element.shadowRoot!.querySelector('.mbr-task-check')!.getAttribute('aria-label')).toBe(
+        'Call Maya Okafor re Acme'
+      )
+    })
+
     it('degrades an unusable span to plain text instead of mis-slicing', async () => {
       // Three ways the range can be wrong — past the end of a text that got
       // shorter, inverted, and absent on a hit that still claims to be a

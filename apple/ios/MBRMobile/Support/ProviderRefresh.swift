@@ -35,10 +35,14 @@ import Foundation
 /// So: register presenters on the folder and the page's file, make one
 /// coordinated read of both (the folder's listing and the file's attributes
 /// inside it), and wait — until a presenter is told something changed, the
-/// file's or folder's stamp moves, or the budget runs out — then let the
-/// ordinary stat-diff pick up whatever arrived. Everything runs off the main
-/// thread; the coordinated read is cancelled at the deadline, so a provider
-/// that never answers costs the budget and nothing more.
+/// file's or folder's stamp moves, the coordinated read has finished and
+/// `quietAfterRead` has passed with nothing changing, or the budget runs out —
+/// then let the ordinary stat-diff pick up whatever arrived. Everything runs
+/// off the main thread; the coordinated read is cancelled at the deadline, so
+/// a provider that never answers costs the budget and nothing more. An
+/// unchanged folder whose provider answers the read promptly therefore costs
+/// about the read plus `quietAfterRead`, not the whole budget (it used to
+/// wait the full 2 s on every Refresh).
 enum ProviderRefresh {
     struct Outcome {
         let millis: Int
@@ -142,6 +146,13 @@ enum ProviderRefresh {
                 folderChanged = Self.folderStamp(folder) != folderBefore
                 break
             }
+            // The provider has answered the read and nothing has moved since:
+            // a provider with news delivers it within moments of the read (the
+            // presenter is what makes it look), so the rest of the budget is
+            // only kept for one that has not answered yet.
+            if let readAt = signal.readAt, ContinuousClock.now - readAt >= Self.quietAfterRead {
+                break
+            }
             Thread.sleep(forTimeInterval: Self.pollInterval)
         }
         let read = signal.readResult ?? "timed out"
@@ -159,6 +170,9 @@ enum ProviderRefresh {
 
     private static let pollInterval: TimeInterval = 0.15
     private static let settle: TimeInterval = 0.25
+    /// How long after the coordinated read finishes an unchanged folder and
+    /// file are taken as up to date.
+    private static let quietAfterRead: Duration = .milliseconds(300)
 
     /// Size and modification time, read fresh (`attributesOfItem` is a
     /// `stat`; a `URL`'s resource values would be cached per instance).
@@ -194,6 +208,7 @@ private final class ChangeSignal: @unchecked Sendable {
     private let lock = NSLock()
     private var changedValue: String?
     private var readValue: String?
+    private var readInstant: ContinuousClock.Instant?
 
     var changed: String? {
         self.lock.withLock { self.changedValue }
@@ -203,6 +218,11 @@ private final class ChangeSignal: @unchecked Sendable {
         self.lock.withLock { self.readValue }
     }
 
+    /// When the coordinated read finished (or failed), if it has.
+    var readAt: ContinuousClock.Instant? {
+        self.lock.withLock { self.readInstant }
+    }
+
     func change(_ what: String) {
         self.lock.withLock {
             if self.changedValue == nil { self.changedValue = what }
@@ -210,7 +230,11 @@ private final class ChangeSignal: @unchecked Sendable {
     }
 
     func read(_ what: String) {
-        self.lock.withLock { self.readValue = what }
+        let now = ContinuousClock.now
+        self.lock.withLock {
+            self.readValue = what
+            self.readInstant = now
+        }
     }
 }
 

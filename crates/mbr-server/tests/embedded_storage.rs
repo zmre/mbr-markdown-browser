@@ -771,3 +771,143 @@ async fn a_task_changed_on_another_device_downloads_then_conflicts() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(vault.contents("notes.md").unwrap(), changed.as_bytes());
 }
+
+/// A vault whose listing of one folder blocks until the test opens the gate.
+/// The static folder is listed only after the scan is marked complete (it is
+/// deferred from `scan_all`), so gating it holds media population open while
+/// the scan itself is done — exactly the window `/.mbr/media.json` used to
+/// block on.
+#[derive(Debug)]
+struct GatedListVault {
+    inner: Arc<MemVault>,
+    gated: VaultPath,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl GatedListVault {
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+}
+
+impl Vault for GatedListVault {
+    fn root(&self) -> &std::path::Path {
+        self.inner.root()
+    }
+    fn stat(
+        &self,
+        path: &VaultPath,
+    ) -> Result<Option<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        self.inner.stat(path)
+    }
+    fn list_dir(
+        &self,
+        dir: &VaultPath,
+    ) -> Result<Vec<mbr_core::vault::Entry>, mbr_core::vault::VaultError> {
+        if *dir == self.gated {
+            let guard = self.open.lock().unwrap();
+            drop(self.opened.wait_while(guard, |open| !*open).unwrap());
+        }
+        self.inner.list_dir(dir)
+    }
+    fn canonicalize(&self, path: &VaultPath) -> Result<VaultPath, mbr_core::vault::VaultError> {
+        self.inner.canonicalize(path)
+    }
+    fn read(&self, path: &VaultPath) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.inner.read(path)
+    }
+    fn read_prefix(
+        &self,
+        path: &VaultPath,
+        max_len: usize,
+    ) -> Result<Vec<u8>, mbr_core::vault::VaultError> {
+        self.inner.read_prefix(path, max_len)
+    }
+    fn write_atomic(
+        &self,
+        path: &VaultPath,
+        bytes: &[u8],
+    ) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.write_atomic(path, bytes)
+    }
+    fn create_dir_all(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.create_dir_all(path)
+    }
+    fn remove_file(&self, path: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.remove_file(path)
+    }
+    fn rename(&self, from: &VaultPath, to: &VaultPath) -> Result<(), mbr_core::vault::VaultError> {
+        self.inner.rename(from, to)
+    }
+}
+
+/// Opens the gate when dropped, so a failing assertion cannot leave a
+/// blocking-pool thread parked forever.
+struct ReleaseOnDrop(Arc<GatedListVault>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+async fn media_json(server: &Server) -> serde_json::Value {
+    let (status, _, body) = send(server, get("/.mbr/media.json")).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice(&body).expect("media.json")
+}
+
+/// `/.mbr/media.json` waits for the scan only: while media population is
+/// still running it answers at once with what it has and `"populated": false`,
+/// and once population finishes the same request reports `true` with every
+/// entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_json_answers_before_media_population_finishes() {
+    let inner = Arc::new(
+        MemVault::new()
+            .with_file("note.md", NOTE)
+            .with_file("media/clip.mp4", "clip")
+            .with_file("static/pic.png", "png"),
+    );
+    let gated = Arc::new(GatedListVault {
+        inner: Arc::clone(&inner),
+        gated: VaultPath::new("static").unwrap(),
+        open: std::sync::Mutex::new(false),
+        opened: std::sync::Condvar::new(),
+    });
+    let _release = ReleaseOnDrop(Arc::clone(&gated));
+    let mut config = ServerConfig::from(&Config::default());
+    config.base_dir = inner.root().to_path_buf();
+    config.oembed_timeout_ms = 0;
+    config.embedded = Some(EmbeddedStorage {
+        vault: Arc::clone(&gated) as Arc<dyn Vault>,
+        snapshot: None,
+    });
+    let server = Server::init(config).expect("init");
+
+    let early = tokio::time::timeout(Duration::from_secs(10), media_json(&server))
+        .await
+        .expect("media.json must not wait for media population");
+    assert_eq!(early["populated"], serde_json::json!(false), "{early}");
+    assert!(!server.repo().is_media_populated());
+    let early_text = early.to_string();
+    assert!(early_text.contains("clip.mp4"), "scanned entries: {early}");
+    assert!(
+        !early_text.contains("pic.png"),
+        "static folder not listed yet"
+    );
+
+    gated.release();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let done = loop {
+        let json = media_json(&server).await;
+        if json["populated"] == serde_json::json!(true) {
+            break json;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never populated");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(done.to_string().contains("pic.png"), "{done}");
+}

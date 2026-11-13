@@ -516,18 +516,31 @@ fn reconcile_pair_metadata(
             (None, Some(p)) => (Some(p.flipped()), Some(p)),
             other => other,
         };
-        let category = current
-            .category
-            .clone()
-            .or_else(|| partner.category.clone());
+        let category = match (&current.category, &partner.category) {
+            (Some(own), Some(theirs)) if own != theirs => {
+                tracing::warn!(
+                    "relation types `{}` and `{}` are inverses but declare different \
+                     categories (`{}` and `{}`); both ends of an edge are one \
+                     relationship, so `{}` is being treated as `{}`",
+                    current.name,
+                    partner.name,
+                    own,
+                    theirs,
+                    partner.name,
+                    own,
+                );
+                Some(own.clone())
+            }
+            (own, theirs) => own.clone().or_else(|| theirs.clone()),
+        };
 
         if let Some(slot) = by_name.get_mut(&key) {
             slot.hierarchy = own_hierarchy;
-            slot.category = slot.category.clone().or_else(|| category.clone());
+            slot.category = category.clone();
         }
         if let Some(slot) = by_name.get_mut(&partner_key) {
             slot.hierarchy = partner_hierarchy;
-            slot.category = slot.category.clone().or(category);
+            slot.category = category;
         }
     }
     by_name
@@ -810,9 +823,10 @@ pub const COMPANY_RELATION_TYPE: &str = "employer";
 /// would mint edges the author never asked for — and a one-word company name is
 /// exactly the kind of string that collides with an unrelated note.
 fn company_employer_relationship(hash: &yaml_rust2::yaml::Hash) -> Option<RawRelationship> {
+    // Keys case-insensitively, as the contact card reads them: `Type: person`
+    // with `Company: "[[Acme]]"` shows Acme on the card, so it is the edge too.
     let field = |name: &str| {
-        hash.get(&Yaml::String(name.to_string()))
-            .and_then(Yaml::as_str)
+        crate::contact::find_key_ignoring_case(hash, name).and_then(|(_, v)| v.as_str())
     };
     if field("type").map(str::trim) != Some("person") {
         return None;
@@ -2229,6 +2243,41 @@ mod tests {
     }
 
     #[test]
+    fn registry_repairs_contradictory_category_in_favour_of_first_declared() {
+        // One edge cannot be both family and work: the first declared half
+        // wins, and its partner follows, without failing startup.
+        let categorized = |name: &str, inverse: &str, category: &str| RelationType {
+            category: Some(category.to_string()),
+            ..inverse_type(name, inverse)
+        };
+        let reg = RelationTypeRegistry::from_types(&[
+            categorized("godparent", "godchild", "family"),
+            categorized("godchild", "godparent", "work"),
+        ]);
+        assert_eq!(
+            reg.get("godparent").unwrap().category.as_deref(),
+            Some("family")
+        );
+        assert_eq!(
+            reg.get("godchild").unwrap().category.as_deref(),
+            Some("family")
+        );
+
+        let reversed = RelationTypeRegistry::from_types(&[
+            categorized("godchild", "godparent", "work"),
+            categorized("godparent", "godchild", "family"),
+        ]);
+        assert_eq!(
+            reversed.get("godchild").unwrap().category.as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            reversed.get("godparent").unwrap().category.as_deref(),
+            Some("work")
+        );
+    }
+
+    #[test]
     fn registry_drops_hierarchy_on_symmetric_type() {
         let reg = RelationTypeRegistry::from_types(&[RelationType {
             hierarchy: Some(Hierarchy::Up),
@@ -2448,6 +2497,15 @@ mod tests {
         assert!(rels[0].implicit);
         assert_eq!(rels[0].rel_type, COMPANY_RELATION_TYPE);
         assert_eq!(rels[0].to.as_deref(), Some("[[Acme Corp|Acme]]"));
+    }
+
+    #[test]
+    fn company_edge_reads_keys_in_any_case() {
+        // The contact card shows `Company:` on a `Type: person` note, so the
+        // implied edge must exist too.
+        let rels = parse_relationships(&parse_yaml("Type: person\nCompany: \"[[Acme]]\"\n"));
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].to.as_deref(), Some("[[Acme]]"));
     }
 
     #[test]

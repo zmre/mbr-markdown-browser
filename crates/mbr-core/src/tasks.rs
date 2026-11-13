@@ -942,6 +942,14 @@ pub struct PatchedSource {
 /// line keeps its own terminator, and a file that did not end in a newline still
 /// does not.
 ///
+/// # Errors
+///
+/// [`TaskPatchError`]. [`TaskPatchError::LoneCarriageReturn`] when the note has
+/// a `\r` that is not part of a `\r\n` (classic Mac line endings): lines are
+/// counted at `\n`, so every task in such a note is "line 1" and a toggle
+/// aimed at one would rewrite another. The other variants mean the client's
+/// copy of the line is stale or was never a task.
+///
 /// # Examples
 ///
 /// ```
@@ -968,6 +976,9 @@ pub fn patch_task_line(
     status: TaskStatus,
     now: Option<NaiveDateTime>,
 ) -> Result<PatchedSource, TaskPatchError> {
+    if has_lone_carriage_return(source) {
+        return Err(TaskPatchError::LoneCarriageReturn);
+    }
     let span = line_span(source, line_number)
         .ok_or(TaskPatchError::LineOutOfRange { line: line_number })?;
     let (content, terminator) = split_line_terminator(&source[span.clone()]);
@@ -1011,6 +1022,18 @@ pub(crate) fn line_span(source: &str, line_number: u32) -> Option<std::ops::Rang
         start += line.len();
     }
     None
+}
+
+/// Whether `source` has a `\r` that does not start a `\r\n` — a line ending
+/// [`line_span`] does not count, so a line-addressed write cannot trust its
+/// line numbers. Shared by [`patch_task_line`] and
+/// [`crate::flashcards::append_review`], which both refuse such a note.
+pub(crate) fn has_lone_carriage_return(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, &byte)| byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
 }
 
 /// Splits a line into its content and its terminator (`""`, `"\n"`, `"\r\n"`,
@@ -2650,6 +2673,29 @@ mod tests {
                 "exactly one line was touched"
             );
         }
+    }
+
+    #[test]
+    fn lone_carriage_returns_are_refused() {
+        // Regression: in a classic-Mac (CR-only) note every task is "line 1",
+        // and a toggle aimed at the second box used to rewrite the first.
+        let source = "- [ ] a\r- [ ] b\r";
+        assert_eq!(
+            patch_task_line(source, 1, "- [ ] a\r- [ ] b", TaskStatus::Done, None),
+            Err(TaskPatchError::LoneCarriageReturn)
+        );
+        // One stray `\r` anywhere in an LF or CRLF note is refused too.
+        for source in ["- [ ] a\nx\ry\n", "- [ ] a\r\n\r\r\n", "- [ ] a\n\r"] {
+            assert_eq!(
+                patch_task_line(source, 1, "- [ ] a", TaskStatus::Done, None),
+                Err(TaskPatchError::LoneCarriageReturn),
+                "{source:?}"
+            );
+        }
+        assert!(!has_lone_carriage_return("- [ ] a\r\n- [ ] b\r\n"));
+        assert!(!has_lone_carriage_return("- [ ] a\n"));
+        assert!(!has_lone_carriage_return(""));
+        assert!(has_lone_carriage_return("\r"));
     }
 
     #[test]

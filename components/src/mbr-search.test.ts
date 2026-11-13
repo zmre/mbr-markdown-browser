@@ -659,6 +659,43 @@ describe('MbrSearchElement', () => {
       expect(selectedRows()).toEqual([0])
     })
 
+    it('keeps the visible list selected while the next query is typed', async () => {
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+      expect(selectedRows()).toEqual([0])
+
+      // Typing again: the old list stays on screen until the debounce fires,
+      // and it must keep a selected row so Enter still opens something.
+      typeQuery(el, 'needle more')
+      await el.updateComplete
+      expect(selectedRows()).toEqual([0])
+      const clicks = vi.spyOn(rows()[0], 'click').mockImplementation(() => {})
+      await key('Enter')
+      expect(clicks).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not let a longer list rendered under a pointer resting outside the rows take the selection', async () => {
+      fetchMock.mockResolvedValue(okResponse({ results: results('a', 2), total_matches: 2 }))
+      typeQuery(el, 'needle')
+      await selectScope(el, 'all')
+
+      // A real move over a row, then on to empty modal space below the short list.
+      await pointer(0, 'mousemove', 40, 50)
+      await pointer(1, 'mousemove', 40, 100)
+      expect(selectedRows()).toEqual([1])
+      const modal = el.shadowRoot?.querySelector('.modal') as HTMLElement
+      modal.dispatchEvent(new MouseEvent('mousemove', { clientX: 40, clientY: 300, bubbles: true }))
+      await el.updateComplete
+
+      // A longer list lands under the resting pointer; the browser re-dispatches
+      // a move at the same position over row 5.
+      fetchMock.mockResolvedValue(okResponse({ results: results('b', 6), total_matches: 6 }))
+      typeQuery(el, 'needle2')
+      await selectScope(el, 'all')
+      await pointer(5, 'mousemove', 40, 300)
+      expect(selectedRows()).toEqual([0])
+    })
+
     it('keeps the selection when a stale response lands after a newer list', async () => {
       const slow = deferred<ReturnType<typeof okResponse>>()
       fetchMock.mockReturnValueOnce(slow.promise)
