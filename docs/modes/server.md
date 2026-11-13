@@ -31,13 +31,17 @@ When you save changes to a file, the browser automatically reloads:
 
 1. mbr watches for file changes via the filesystem
 2. Changes trigger a WebSocket notification
-3. Connected browsers refresh the current page
+3. A page reloads once, and only when the change is one it shows
 
-This works for:
-- Markdown file content
-- YAML frontmatter changes
-- Template modifications (in `.mbr/`)
-- CSS/style changes
+A page reloads for:
+- Its own note — but only when the note's contents differ from what the page
+  shows. An editor's save is reported several times (and the operating system
+  can repeat it seconds later); the page reloads for the first report and
+  ignores the rest, and a `touch` or a save with no changes reloads nothing
+- Template modifications (in `.mbr/` or the `--template-folder`)
+- CSS/style changes in `.mbr/`
+- On a folder listing: notes and folders added, removed or changed directly in
+  that folder (and a subfolder's index note, which titles it)
 - `.mbr/config.toml`: the server applies the new settings on the same port
   without a restart, then every open page reloads (see
   [Reloading Configuration](../reference/configuration.md#reloading-configuration))

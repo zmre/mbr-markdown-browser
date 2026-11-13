@@ -292,16 +292,20 @@ objc2-app-kit = { workspace = true, features = [
 ], optional = true }
 objc2-foundation = { workspace = true, features = [
     "std",
+    "NSArray",
     "NSString",
     "NSURL",
 ], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# `external_open`: ShellExecuteW. windows-sys 0.61.2 is already in the tree many
+# `external_open`: ShellExecuteW, and SHOpenFolderAndSelectItems (+ COM init)
+# for the info panel's reveal button. windows-sys 0.61.2 is already in the tree many
 # times over; only the feature gates below are new, and those add no crate.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_System_Com",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ], optional = true }
 

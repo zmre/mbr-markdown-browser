@@ -23,7 +23,7 @@ mbr provides vim-style keyboard shortcuts for efficient navigation. Press `?` at
 | `G` | Go to bottom of page |
 | `H` / `L` | Previous / next sibling page |
 | `d` | Go to today's [daily note](../features/calendar/#periodic-notes) (your local date); else the most recent one before today. A short message says so when the repository has none |
-| `[` / `]` | Previous / next [periodic note](../features/calendar/#navigating-periodic-notes) of the same kind (day, week, month, quarter, year), skipping gaps. Only on a periodic note; a no-op elsewhere |
+| `[` / `]` | Previous / next [periodic note](../features/calendar/#navigating-periodic-notes) of the same kind (day, week, month, quarter, year), skipping gaps. On any other page: previous / next heading of the note, scrolled to just below the header (the address bar is not changed) |
 | `Ctrl+o` / `Ctrl+i` | History back / forward |
 
 **Note on `Ctrl+f`:** full-page-down is bound on macOS only, where `Cmd+F` is the find
@@ -39,6 +39,7 @@ browser's own in server and static modes, mbr's in GUI mode. Use `Ctrl+b`, `Spac
 | `-` or `F2` | Open file browser |
 | `=` | Open media browser |
 | `Ctrl+g` | Toggle info panel |
+| `Ctrl+Shift+g` | Open the full-size [link graph](../features/links/#the-info-panel), with or without the info panel |
 | `t` | Open the task browser (server and GUI modes only) |
 | `e` | Open the editor for the current note (when [editing](../features/editing/) is enabled; not on folder listings) |
 | `r` | Add a [review note](../features/review/), anchored to the selection (server and GUI modes only) |
@@ -52,6 +53,22 @@ While a slide deck plays, the keyboard belongs to the slides: `?` shows the
 slide shortcuts (including `q` to exit), and mbr's own page shortcuts are
 turned off until you leave. `r` still adds a [review note](../features/review/) to
 the selected text. See [Presentation Slides](../features/slides/#keyboard-shortcuts).
+
+`Ctrl+Shift+g` takes over the browser's "find previous" on Windows and Linux, as
+`Ctrl+g` already does for "find next"; `Shift+F3` still finds the previous match.
+
+## Info Panel (when open)
+
+While the info panel is open it owns the scroll keys, so they move the panel
+rather than the page behind it.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` / `↓` / `↑` | Scroll the panel down / up |
+| `Ctrl+d` / `Ctrl+u` | Scroll the panel half a page |
+| `Ctrl+f` / `Ctrl+b` | Scroll the panel a full page (`Ctrl+f` on macOS only) |
+| `Ctrl+Shift+g` | Expand the panel's link graph |
+| `Esc` | Close the expanded graph, then the panel |
 
 ## Quick Navigation (Fuzzy Nav)
 

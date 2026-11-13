@@ -210,6 +210,56 @@ describe('the floating action button', () => {
   })
 })
 
+describe('the floating action button during slides', () => {
+  async function mountWithNote(): Promise<void> {
+    localStorage.setItem(STORAGE_KEY, serializeEnvelope([makeNote()]))
+    resetStoreCache()
+    element.remove()
+    element = mount()
+    await settle(element)
+  }
+
+  afterEach(() => {
+    document.body.className = ''
+    history.replaceState(null, '', location.pathname)
+  })
+
+  it('hides while a deck plays and comes back when it stops', async () => {
+    await mountWithNote()
+    expect(element.shadowRoot?.querySelector('.review-fab')).not.toBeNull()
+
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: true } }))
+    await settle(element)
+    expect(element.shadowRoot?.querySelector('.review-fab')).toBeNull()
+
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: false } }))
+    await settle(element)
+    expect(element.shadowRoot?.querySelector('.review-fab')).not.toBeNull()
+  })
+
+  it('starts hidden on a page already playing', async () => {
+    localStorage.setItem(STORAGE_KEY, serializeEnvelope([makeNote()]))
+    resetStoreCache()
+    element.remove()
+    document.body.innerHTML = '<main id="wrapper"><p data-mbr-line="4">x</p></main>'
+    document.body.classList.add('slides-container')
+    element = document.createElement('mbr-review')
+    document.body.appendChild(element)
+    await settle(element)
+    expect(element.shadowRoot?.querySelector('.review-fab')).toBeNull()
+  })
+
+  it('never shows in a speaker-view receiver pane, even when not playing', async () => {
+    history.replaceState(null, '', `${location.pathname}?receiver`)
+    await mountWithNote()
+    expect(element.shadowRoot?.querySelector('.review-fab')).toBeNull()
+
+    document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing: false } }))
+    await settle(element)
+    expect(element.shadowRoot?.querySelector('.review-fab')).toBeNull()
+  })
+})
+
 describe('the floating action button position', () => {
   const css = () => {
     const styles = customElements.get('mbr-review') as unknown as { styles: { cssText: string } }

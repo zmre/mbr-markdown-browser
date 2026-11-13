@@ -78,6 +78,7 @@ pub const ICONS: &[(&str, &str)] = &[
         include_str!("../templates/icons/circle-help.svg"),
     ),
     ("code", include_str!("../templates/icons/code.svg")),
+    ("copy", include_str!("../templates/icons/copy.svg")),
     (
         "corner-up-right",
         include_str!("../templates/icons/corner-up-right.svg"),

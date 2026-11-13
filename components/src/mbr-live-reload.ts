@@ -1,26 +1,26 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { announceFileChanged, isOwnWriteEcho, mayBeOwnWriteEcho, wasSelfWrite } from './task-toggle.js';
+import { shouldReloadFor, type LiveReloadChange } from './live-reload-policy.js';
+import {
+  announceFileChanged,
+  isOwnWriteEcho,
+  mayBeOwnWriteEcho,
+  shownSourceVersion,
+  wasSelfWrite,
+} from './task-toggle.js';
 
 /** Whether a page served under `protocol` has a WebSocket endpoint at all. */
 export function isSocketReachable(protocol: string): boolean {
   return protocol === 'http:' || protocol === 'https:';
 }
 
-interface FileChangeEvent {
-  path: string;
-  relative_path: string;
-  /**
-   * `reloaded` is not a file change: the server applied a changed
-   * `.mbr/config.toml` (or now reports one that does not load), so every
-   * page is out of date.
-   */
-  event: 'modified' | 'created' | 'deleted' | 'reloaded';
-}
-
 /**
  * Live reload component that monitors file changes via WebSocket
  * and automatically reloads the page when relevant files change.
+ *
+ * Which changes are relevant is `live-reload-policy.ts`. One reload at a
+ * time: once a reload is scheduled every later event is moot, since the page
+ * that receives it is about to be replaced.
  */
 @customElement('mbr-live-reload')
 export class MbrLiveReloadElement extends LitElement {
@@ -31,7 +31,10 @@ export class MbrLiveReloadElement extends LitElement {
   private _reconnectAttempts = 0;
   private _maxReconnectAttempts = 5;
   private _reconnectDelay = 1000; // Start with 1 second
-  private _currentMarkdownFile: string | null = null;
+  /** The page's own note (`markdown_source`), or null on any other page. */
+  private _source: string | null = null;
+  /** A reload is scheduled; nothing more to decide on this page. */
+  private _reloadPending = false;
 
   static override styles = css`
     :host {
@@ -126,8 +129,7 @@ export class MbrLiveReloadElement extends LitElement {
       return;
     }
 
-    // Get the current markdown file from frontmatter or URL
-    this._currentMarkdownFile = this._detectCurrentMarkdownFile();
+    this._source = this._detectSource();
 
     // Connect to WebSocket
     this._connect();
@@ -141,29 +143,24 @@ export class MbrLiveReloadElement extends LitElement {
     this._disconnect();
   }
 
-  private _detectCurrentMarkdownFile(): string | null {
-    // Try to get from window.frontmatter (injected by server)
-    const frontmatter = (window as any).frontmatter;
-    if (frontmatter?.markdown_source) {
-      return frontmatter.markdown_source;
-    }
-
-    // Fallback: try to infer from URL path
-    const path = window.location.pathname;
-    if (path === '/') {
-      return '/index.md';
-    }
-
-    // Convert URL path to potential markdown file path
-    // e.g., /docs/guide/ -> docs/guide.md or docs/guide/index.md
-    return path.replace(/\/$/, '') + '.md';
+  /**
+   * The note this page renders, as the server injected it. Only note pages
+   * have one; a listing or error page is judged by its URL instead (see
+   * `shouldReloadFor`).
+   */
+  private _detectSource(): string | null {
+    const source = (window as any).frontmatter?.markdown_source;
+    return typeof source === 'string' && source.length > 0 ? source : null;
   }
 
   private _connect() {
     try {
       // Use wss:// for https, ws:// for http
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/.mbr/ws/changes`;
+      // `source` asks the server to fingerprint every change to this page's
+      // own note, so an echo of a save already shown reloads nothing.
+      const query = this._source === null ? '' : `?source=${encodeURIComponent(this._source)}`;
+      const wsUrl = `${protocol}//${window.location.host}/.mbr/ws/changes${query}`;
 
       console.log('[mbr-live-reload] Connecting to:', wsUrl);
       this._ws = new WebSocket(wsUrl);
@@ -193,7 +190,7 @@ export class MbrLiveReloadElement extends LitElement {
 
           // Handle file change events
           if (data.relative_path) {
-            this._handleFileChange(data as FileChangeEvent);
+            this._handleFileChange(data as LiveReloadChange);
           }
         } catch (err) {
           console.error('[mbr-live-reload] Failed to parse message:', err);
@@ -237,7 +234,7 @@ export class MbrLiveReloadElement extends LitElement {
     }, delay);
   }
 
-  private _handleFileChange(event: FileChangeEvent) {
+  private _handleFileChange(event: LiveReloadChange) {
     console.log('[mbr-live-reload] File changed:', event);
 
     const changedPath = event.relative_path;
@@ -247,9 +244,12 @@ export class MbrLiveReloadElement extends LitElement {
     // anywhere, this page's own included.
     announceFileChanged(changedPath);
 
+    // One save arrives as several events; the first that matters decides.
+    if (this._reloadPending) return;
+
     // The server reloaded its configuration: every page renders differently
     // now. The raw `.mbr/config.toml` event before it reloads nothing (see
-    // `_shouldReloadForFile`), so this is the one reload a save causes.
+    // `shouldReloadFor`), so this is the one reload a save causes.
     if (event.event === 'reloaded') {
       this._scheduleReload(changedPath);
       return;
@@ -266,7 +266,8 @@ export class MbrLiveReloadElement extends LitElement {
       return;
     }
 
-    if (!this._shouldReloadForFile(changedPath)) return;
+    const page = { source: this._source, shownHash: shownSourceVersion(), pathname: window.location.pathname };
+    if (!shouldReloadFor(event, page)) return;
 
     // The window above only covers events that arrive promptly. The watcher's
     // echo of an atomic rename can arrive seconds — even minutes — later, and
@@ -278,7 +279,7 @@ export class MbrLiveReloadElement extends LitElement {
       void isOwnWriteEcho(changedPath).then((own) => {
         if (own) {
           console.log('[mbr-live-reload] Skipping reload for a late echo of our own write:', changedPath);
-        } else if (this.isConnected) {
+        } else if (this.isConnected && !this._reloadPending) {
           this._scheduleReload(changedPath);
         }
       });
@@ -288,50 +289,13 @@ export class MbrLiveReloadElement extends LitElement {
   }
 
   private _scheduleReload(changedPath: string) {
+    this._reloadPending = true;
     this._showReloadNotification(changedPath);
 
     // Reload after a short delay to show notification
     setTimeout(() => {
       window.location.reload();
     }, 500);
-  }
-
-  private _shouldReloadForFile(changedPath: string): boolean {
-    // Always reload for template and CSS changes
-    if (changedPath.endsWith('.html') ||
-      changedPath.endsWith('.css') ||
-      changedPath.endsWith('.js')) {
-      return true;
-    }
-
-    // Reload if the current markdown file changed
-    if (this._currentMarkdownFile) {
-      const normalizedCurrent = this._currentMarkdownFile.replace(/^\//, '');
-      const normalizedChanged = changedPath.replace(/^\//, '');
-
-      if (normalizedCurrent === normalizedChanged) {
-        return true;
-      }
-
-      // Also check if changed file is index.md in current directory
-      if (normalizedChanged.endsWith('/index.md') || normalizedChanged === 'index.md') {
-        const currentDir = normalizedCurrent.split('/').slice(0, -1).join('/');
-        const changedDir = normalizedChanged.split('/').slice(0, -1).join('/');
-
-        if (currentDir === changedDir) {
-          return true;
-        }
-      }
-    }
-
-    // Reload for any markdown file if we're on a directory listing
-    if (!this._currentMarkdownFile || this._currentMarkdownFile.endsWith('/')) {
-      if (changedPath.endsWith('.md')) {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   private _showReloadNotification(_file: string) {

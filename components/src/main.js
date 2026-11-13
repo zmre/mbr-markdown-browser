@@ -35,6 +35,9 @@ export * from './mbr-contact-backlinks.ts';
 export * from './mbr-tasks.ts';
 // Trigger, markers and popover; the panel and form live in mbr-review.min.js.
 export * from './mbr-review.ts';
+// The toolbar that follows a selection in the note: Copy markdown (or text) / Copy rich,
+// plus review's Add note when review is on. Also window.mbrCopyPage (Edit menu).
+export * from './mbr-selection-actions.ts';
 // In-document task checkboxes and the #mbr-task-N jump.
 export * from './mbr-task-doc.ts';
 // Dynamic enhancement loaders

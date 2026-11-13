@@ -22,7 +22,7 @@ server-only.
 | `/.mbr/media.json` | GET | Every non-markdown file with its metadata; see [Media catalog](#media-catalog) |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/tasks` | POST | Task query for the task browser and the calendar's task marks (`404` with `--no-tasks`) |
-| `/.mbr/ws/changes` | WS | WebSocket for live reload |
+| `/.mbr/ws/changes` | WS | WebSocket for live reload. Same-origin only. `?source=<note>` (the page's `markdown_source`) adds `content_hash` — the note's current fingerprint, as in `markdown_source_hash` — to frames about that note; frames under the template folder carry `template: true` |
 | `/.mbr/outside/?path=…` | GET | Where a link out of the repository leads; see [Outside links](#outside-links) |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
 

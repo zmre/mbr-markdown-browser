@@ -9,6 +9,10 @@
        server_mode because notes anchor to `data-mbr-line`, which a static build
        does not emit. #}
     {% if server_mode and review_enabled %}<mbr-review></mbr-review>{% endif %}
+    {# The toolbar that follows a selection in the note (Copy plain, Copy rich,
+       and review's Add note when <mbr-review> is here). Every mode: copying
+       needs no server. #}
+    <mbr-selection-actions></mbr-selection-actions>
     {# Calendar (C, the daily-note companion; later c, the calendar overlay).
        A body child on purpose: on a day note under `companion = "auto"` this
        element *is* the docked right column (theme.css, "Daily-note

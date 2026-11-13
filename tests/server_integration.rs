@@ -461,6 +461,41 @@ async fn test_gui_mode_emits_find_bar() {
     assert_html_contains(&html, "guiMode: true");
 }
 
+/// The info panel's absolute file location is a GUI-only value: a served page
+/// must never tell its readers where the repository lives on the host.
+#[tokio::test]
+async fn test_file_location_is_gui_only() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/readme.md", "# Hello\n\nBody.");
+    let canonical_root = repo.path().canonicalize().expect("root canonicalizes");
+    let root_text = mbr::outside_link::display_path(&canonical_root);
+    // As the script payload spells it (JSON-escaped, e.g. Windows' `\`).
+    let root_json = serde_json::to_string(&root_text).expect("serializes");
+    let root_in_script = root_json.trim_matches('"');
+
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/notes/readme/").await;
+    assert_html_contains(&html, "fileLocation: null");
+    assert_html_not_contains(&html, root_in_script);
+
+    let server = TestServer::start_with_config_fn(&repo, |c| {
+        c.gui_mode = true;
+    })
+    .await;
+    let html = server.get_text("/notes/readme/").await;
+    let expected = serde_json::json!({
+        "path": mbr::outside_link::display_path(&canonical_root.join("notes").join("readme.md")),
+        "reveal": mbr::server::REVEAL_IN_FILE_MANAGER,
+    });
+    let line = html
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("fileLocation: "))
+        .expect("fileLocation in the head script")
+        .trim_end_matches(',');
+    let location: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    assert_eq!(location, expected);
+}
+
 #[tokio::test]
 async fn test_server_mode_omits_the_external_link_handler() {
     // `<mbr-link-enhancement>` asks the *host process* to launch applications.
@@ -8433,6 +8468,153 @@ async fn test_websocket_upgrade_requires_same_origin() {
     assert!(
         no_origin.contains("403"),
         "WebSocket upgrade without Origin must be 403, got: {no_origin}"
+    );
+}
+
+/// A live-reload socket opened as a page does (`?source=`, same origin), with
+/// the handshake consumed. Frames are read with [`ws_next_text`].
+#[cfg(feature = "watcher")]
+async fn ws_open_live_reload(port: u16, query: &str) -> (tokio::net::TcpStream, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect failed");
+    let request = format!(
+        "GET /.mbr/ws/changes{query} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Origin: http://127.0.0.1:{port}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write failed");
+    let mut buf = Vec::new();
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        let mut chunk = [0u8; 512];
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .expect("handshake timed out")
+            .expect("read failed");
+        assert!(n > 0, "connection closed during the handshake");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let head = String::from_utf8_lossy(&buf[..end]).to_string();
+    assert!(head.starts_with("HTTP/1.1 101"), "handshake failed: {head}");
+    (stream, buf.split_off(end))
+}
+
+/// The next server text frame (servers never mask; mbr's frames are small).
+#[cfg(feature = "watcher")]
+async fn ws_next_text(stream: &mut tokio::net::TcpStream, buf: &mut Vec<u8>) -> String {
+    use tokio::io::AsyncReadExt;
+
+    loop {
+        if buf.len() >= 2 {
+            let (len, header) = match buf[1] & 0x7f {
+                126 if buf.len() >= 4 => (usize::from(u16::from_be_bytes([buf[2], buf[3]])), 4),
+                126 => (usize::MAX, 0),
+                n => (usize::from(n), 2),
+            };
+            if header > 0 && buf.len() >= header + len {
+                let frame: Vec<u8> = buf.drain(..header + len).collect();
+                if frame[0] & 0x0f == 0x1 {
+                    return String::from_utf8(frame[header..].to_vec()).expect("utf-8 frame");
+                }
+                continue;
+            }
+        }
+        let mut chunk = [0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
+            .await
+            .expect("no frame within 10 s")
+            .expect("read failed");
+        assert!(n > 0, "socket closed");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Regression for "a save reloads the page twice": one save is reported many
+/// times (FSEvents: created + modified x3, late echoes of a rename), and the
+/// page used to reload for each event that reached it — including an echo
+/// arriving on the freshly reloaded page. Every frame about the page's own note
+/// now carries the fingerprint of what is on disk, exactly the
+/// `markdown_source_hash` the reloaded page renders, so `<mbr-live-reload>`
+/// reloads only on a real difference. Frames about other files carry none.
+#[cfg(feature = "watcher")]
+#[tokio::test]
+async fn test_live_reload_frames_carry_the_page_fingerprint_for_its_own_note() {
+    let repo = TestRepo::new();
+    let note = repo.create_markdown("note.md", "# Note\n\none\n");
+    let other = repo.create_markdown("other.md", "# Other\n");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    // The watcher starts on a background thread; give it time to listen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let (mut ws, mut buf) = ws_open_live_reload(server.port, "?source=note.md").await;
+    assert_eq!(
+        ws_next_text(&mut ws, &mut buf).await,
+        r#"{"status":"connected"}"#
+    );
+
+    let edited = "# Note\n\ntwo\n";
+    let write_both = || {
+        std::fs::write(&note, edited).expect("rewrite note");
+        std::fs::write(&other, "# Other\n\nchanged\n").expect("rewrite other");
+    };
+    write_both();
+
+    let mut own_hashes = Vec::new();
+    let mut saw_other = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while own_hashes.is_empty() || !saw_other {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no frames for both files"
+        );
+        // Under a loaded test run the watcher may not be listening yet when the
+        // first write lands, so the save is never reported. Rewriting the same
+        // bytes until both files are seen keeps every note frame's hash equal
+        // to `edited`'s. A cancelled wait loses nothing: bytes already read
+        // stay in `buf`.
+        let Ok(text) =
+            tokio::time::timeout(Duration::from_millis(500), ws_next_text(&mut ws, &mut buf)).await
+        else {
+            write_both();
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("JSON frame");
+        assert!(
+            frame.get("path").is_none(),
+            "absolute path on the wire: {frame}"
+        );
+        match frame["relative_path"].as_str() {
+            Some("note.md") if frame["event"] != "deleted" => own_hashes.push(
+                frame["content_hash"]
+                    .as_str()
+                    .expect("own note hashed")
+                    .to_owned(),
+            ),
+            Some("other.md") => {
+                assert!(frame.get("content_hash").is_none(), "{frame}");
+                saw_other = true;
+            }
+            _ => {}
+        }
+    }
+
+    let page = server.get_text("/note/").await;
+    let rendered = page_source_hash(&page);
+    assert_eq!(rendered, mbr::edit_auth::content_hash(edited.as_bytes()));
+    assert!(
+        own_hashes.iter().all(|hash| *hash == rendered),
+        "every frame for the saved note must match the page it reloads to: {own_hashes:?} vs {rendered}"
     );
 }
 

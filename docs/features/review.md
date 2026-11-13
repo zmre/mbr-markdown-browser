@@ -33,8 +33,8 @@ in the editor can be pasted into the same message.
 
 ## The workflow
 
-1. **Select some text** in the rendered page. A small **Add note** button
-   appears beside the selection.
+1. **Select some text** in the rendered page. A small toolbar appears beside
+   the selection with **Add note** (and the [copy](copying/) buttons).
 2. **Press `r`** (or click the button). A form opens with the note type, a
    comment box, and — for a suggestion — the text to replace.
 3. **Save.** A marker appears in the block the note belongs to, and a chat-bubble
@@ -126,8 +126,9 @@ Notes work in a playing [slide deck](slides/) too: the wash is drawn
 again over the slides when the presentation starts, and you can select text on a
 slide and press `r` to add a note. The markers are hidden while the slides play,
 so they do not sit on the audience's slides; hover the washed text (or tap it on
-a touch screen) to see the note, or open the list with the review button, which
-moves up above the slide arrows. While the note form is
+a touch screen) to see the note, or press `R` for the list. The floating review
+button is hidden while the deck plays, and always in the speaker view's panes,
+so it never sits on the slides or the presenter's notes. While the note form is
 open, every key you type goes into it rather than to the slides (`g`, Space and
 the arrows included).
 

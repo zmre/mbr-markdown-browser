@@ -1042,6 +1042,104 @@ describe('MbrTasksPanelElement', () => {
       expect(assign).not.toHaveBeenCalled()
     })
 
+    /**
+     * Click a checkbox the way a real browser dispatches a user's click.
+     *
+     * A user click runs each listener with an empty JS stack, so the microtask
+     * checkpoint after the card's listener — where Lit renders the optimistic
+     * status — happens *inside* the dispatch, before a cancelled click restores
+     * the box. `HTMLElement.click()` from a test never checkpoints mid-dispatch,
+     * which is how the bug below hid from every other test here. A listener
+     * added after Lit's renders synchronously at exactly that point.
+     */
+    function userClick(el: MbrTasksPanelElement, box: HTMLInputElement) {
+      const renderNow = () => (el as unknown as { performUpdate(): void }).performUpdate()
+      box.addEventListener('click', renderNow, { once: true })
+      box.click()
+    }
+
+    it('unchecking a done task reopens it and leaves the box unchecked', async () => {
+      // Regression: the card used to cancel the browser's flip and rely on Lit
+      // re-committing `.checked`. Lit rendered the optimistic status before
+      // the cancellation restored the box, so its committed value and the DOM
+      // disagreed; the refreshed (same) status was then a no-op and the box
+      // stayed checked — the reader could never visibly uncheck a done task.
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      const done = categoryResponse()
+      done.groups[0].tasks[0].status = 'done'
+      const reopened = categoryResponse()
+      queueResponses([done, reopened])
+      const el = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
+      el.today = TODAY
+      el.locale = 'en-US'
+      el.editEnabled = true
+      el.toggleTask = toggler as unknown as MbrTasksPanelElement['toggleTask']
+      document.body.appendChild(el)
+      element = el
+      await flush(el)
+      expect(checkboxes(el)[0].checked).toBe(true)
+
+      userClick(el, checkboxes(el)[0])
+      // Optimistic: unchecked before the write returns.
+      expect(checkboxes(el)[0].checked).toBe(false)
+      await flush(el)
+
+      expect(toggler).toHaveBeenCalledWith({ path: 'docs/notes.md', line: 4, to: 'open' })
+      expect(checkboxes(el)[0].dataset.mbrTaskStatus).toBe('open')
+      expect(checkboxes(el)[0].checked).toBe(false)
+    })
+
+    it('checking an open task leaves the box checked once the refresh lands', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      const open = categoryResponse()
+      const done = categoryResponse()
+      done.groups[0].tasks[0].status = 'done'
+      queueResponses([open, done])
+      const el = document.createElement('mbr-tasks-panel') as MbrTasksPanelElement
+      el.today = TODAY
+      el.locale = 'en-US'
+      el.editEnabled = true
+      el.toggleTask = toggler as unknown as MbrTasksPanelElement['toggleTask']
+      document.body.appendChild(el)
+      element = el
+      await flush(el)
+
+      userClick(el, checkboxes(el)[0])
+      expect(checkboxes(el)[0].checked).toBe(true)
+      await flush(el)
+
+      expect(toggler).toHaveBeenCalledWith({ path: 'docs/notes.md', line: 4, to: 'done' })
+      expect(checkboxes(el)[0].checked).toBe(true)
+    })
+
+    it('a failed uncheck puts the box back to checked', async () => {
+      const toggler = vi
+        .fn()
+        .mockResolvedValue({ ok: false, kind: 'other', message: 'The task could not be saved.' })
+      const done = categoryResponse()
+      done.groups[0].tasks[0].status = 'done'
+      element = await mountEditable(toggler, true, done)
+
+      userClick(element, checkboxes(element)[0])
+      await flush(element)
+
+      expect(checkboxes(element)[0].dataset.mbrTaskStatus).toBe('done')
+      expect(checkboxes(element)[0].checked).toBe(true)
+    })
+
+    it('left-clicking a canceled task completes it', async () => {
+      const toggler = vi.fn().mockResolvedValue({ ok: true })
+      const canceled = categoryResponse()
+      canceled.groups[0].tasks[0].status = 'canceled'
+      element = await mountEditable(toggler, true, canceled)
+      expect(checkboxes(element)[0].checked).toBe(false)
+
+      userClick(element, checkboxes(element)[0])
+      expect(checkboxes(element)[0].checked).toBe(true)
+      await flush(element)
+      expect(toggler).toHaveBeenCalledWith({ path: 'docs/notes.md', line: 4, to: 'done' })
+    })
+
     it('right-clicking a checkbox cancels and suppresses the context menu', async () => {
       const toggler = vi.fn().mockResolvedValue({ ok: true })
       element = await mountEditable(toggler)
@@ -1067,9 +1165,9 @@ describe('MbrTasksPanelElement', () => {
       checkboxes(element)[0].click()
       await element.updateComplete
       // Optimistic: the write has not returned yet. `checked` is asserted as
-      // well as the attribute because the card cancels the browser's own flip
-      // and relies on Lit re-committing the PROPERTY — an `?checked` attribute
-      // binding would stop reflecting the moment the user interacted.
+      // well as the attribute because the box's state is a PROPERTY bound
+      // with `live()` — an `?checked` attribute binding would stop reflecting
+      // the moment the user interacted.
       expect(checkboxes(element)[0].dataset.mbrTaskStatus).toBe('done')
       expect(checkboxes(element)[0].checked).toBe(true)
 

@@ -215,6 +215,19 @@ const INTERACTION_EVENTS = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as 
  */
 export const SLIDES_STATE_EVENT = 'mbr-slides-state'
 
+/**
+ * True in a speaker-view pane: Reveal's speaker-notes window
+ * (`data-speaker-layout`) or a `?receiver` pane it loads this page into. Such a
+ * page exists only to show the deck, so it plays from the start and carries
+ * none of the page's floating buttons.
+ */
+export function isPresenterPane(
+  body: HTMLElement = document.body,
+  search: string = window.location.search
+): boolean {
+  return body.hasAttribute('data-speaker-layout') || search.includes('receiver')
+}
+
 /** Tell the app bridge (and anyone else) whether a presentation is playing. */
 function announceSlidesState(playing: boolean): void {
   document.dispatchEvent(new CustomEvent(SLIDES_STATE_EVENT, { detail: { playing } }))
@@ -383,9 +396,7 @@ export class MbrSlidesElement extends LitElement {
       // - a Reveal slide hash (`#/3`): the page was reloaded (live reload
       //   after an edit, or by hand) while the deck was playing, so it comes
       //   back playing, on the same slide. `_exitPresentation` strips the hash.
-      const isSpeakerLayout = document.body.hasAttribute('data-speaker-layout')
-      const isReceiver = window.location.search.includes('receiver')
-      this._isPresenterView = isSpeakerLayout || isReceiver
+      this._isPresenterView = isPresenterPane()
       if (this._isSlideDocument && (this._isPresenterView || isSlideHash(window.location.hash))) {
         void this._startPresentation()
       } else if (this._isSlideDocument) {

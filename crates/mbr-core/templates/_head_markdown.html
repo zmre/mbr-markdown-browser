@@ -50,6 +50,7 @@
         fleschReadingEase: {{ flesch_reading_ease | default(value="null") }},
         fleschKincaidGrade: {{ flesch_kincaid_grade | default(value="null") }},
         filePath: {{ file_path_json | default(value='""') | safe }},
+        fileLocation: {{ file_location_json | default(value="null") | safe }},
         modifiedTimestamp: {{ modified_timestamp | default(value=0) }},
         {% if prev_page %}prevPage: {{ prev_page_json | default(value="null") | safe }},{% endif %}
         {% if next_page %}nextPage: {{ next_page_json | default(value="null") | safe }}{% endif %}

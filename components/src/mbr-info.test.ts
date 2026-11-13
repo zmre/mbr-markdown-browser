@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 
 /**
  * site.json arrival is driven manually in this file so the late-resolution
@@ -36,7 +36,7 @@ vi.mock('./shared.js', async (importOriginal) => {
 })
 
 import './mbr-info.js'
-import { isEmptyMetadataValue, setGraphChunkImporter } from './mbr-info.js'
+import { GRAPH_MODAL_CLOSE_EVENT, hasGraphableLinks, isEmptyMetadataValue, setGraphChunkImporter } from './mbr-info.js'
 import { fetchPageLinks } from './graph/links-cache.js'
 import { resolveUrl } from './shared.js'
 
@@ -474,5 +474,283 @@ describe('MbrInfoElement link hrefs in a static build', () => {
 
   it('keeps server-mode targets as they are', async () => {
     expect(await hrefs({ serverMode: true, guiMode: false })).toEqual(['/modes/gui/#menu', '/modes/'])
+  })
+})
+
+describe('MbrInfoElement sections', () => {
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+  })
+
+  it('opens every section by default, links in and out included', async () => {
+    window.frontmatter = { title: 'Note' }
+    window.headings = [{ level: 2, id: 'a', text: 'A' }]
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el._links = {
+      inbound: [{ from: '/b/', text: 'b' }],
+      outbound: [{ to: '/c/', text: 'c', internal: true }],
+      relationships: [],
+    }
+    el.requestUpdate()
+    await el.updateComplete
+    const sections = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('details.info-section'))
+    const titles = sections.map((d) => d.querySelector('summary strong')?.textContent)
+    expect(titles).toEqual(expect.arrayContaining(['Metadata', 'Table of Contents', 'Links Out', 'Links In']))
+    expect(sections.every((d) => d.hasAttribute('open'))).toBe(true)
+  })
+
+  it('opens the loading placeholders too', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el._linksLoading = true
+    el.requestUpdate()
+    await el.updateComplete
+    const sections = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('details.info-section'))
+    expect(sections.length).toBeGreaterThanOrEqual(2)
+    expect(sections.every((d) => d.hasAttribute('open'))).toBe(true)
+  })
+})
+
+describe('MbrInfoElement keyboard scrolling', () => {
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+  })
+
+  function press(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true, ...init })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  it('scrolls the panel, not the page, on j / k / Ctrl+d / Ctrl+u', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el._links = { inbound: [], outbound: [] }
+    el.requestUpdate()
+    await el.updateComplete
+    const pane = (el.shadowRoot as ShadowRoot).querySelector('.info-panel') as HTMLElement
+    Object.defineProperty(pane, 'clientHeight', { value: 600, configurable: true })
+    const paneScroll = vi.fn()
+    pane.scrollBy = paneScroll as unknown as typeof pane.scrollBy
+    const pageScroll = vi.spyOn(window, 'scrollBy').mockImplementation(() => {})
+
+    try {
+      expect(press('j').defaultPrevented).toBe(true)
+      press('k')
+      press('d', { ctrlKey: true })
+      press('u', { ctrlKey: true })
+      expect(paneScroll.mock.calls.map((c) => (c[0] as ScrollToOptions).top)).toEqual([40, -40, 300, -300])
+      expect(pageScroll).not.toHaveBeenCalled()
+
+      // Closed: the keys are the page's again.
+      el._close()
+      await el.updateComplete
+      paneScroll.mockClear()
+      expect(press('j').defaultPrevented).toBe(false)
+      expect(paneScroll).not.toHaveBeenCalled()
+    } finally {
+      pageScroll.mockRestore()
+    }
+  })
+
+  it('leaves keys typed into a field alone', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el.requestUpdate()
+    await el.updateComplete
+    const input = document.body.appendChild(document.createElement('input'))
+    const event = new KeyboardEvent('keydown', { key: 'j', bubbles: true, composed: true, cancelable: true })
+    input.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    input.remove()
+  })
+})
+
+describe('hasGraphableLinks', () => {
+  it('needs an internal link out, a link in or a relationship', () => {
+    expect(hasGraphableLinks({ inbound: [], outbound: [] })).toBe(false)
+    expect(hasGraphableLinks({ inbound: [], outbound: [{ to: 'https://x', internal: false }] } as never)).toBe(false)
+    expect(hasGraphableLinks({ inbound: [], outbound: [{ to: '/a/', internal: true }] } as never)).toBe(true)
+    expect(hasGraphableLinks({ inbound: [{ from: '/a/' }], outbound: [] } as never)).toBe(true)
+    expect(hasGraphableLinks({ inbound: [], outbound: [], relationships: [{}] } as never)).toBe(true)
+  })
+})
+
+/**
+ * Ctrl+Shift+g. The graph element lives in the lazy chunk; a stub with the
+ * same public surface stands in for it (defined here, after every other suite
+ * in this file has run against an undefined `<mbr-mini-graph>`).
+ */
+describe('MbrInfoElement Ctrl+Shift+g full graph', () => {
+  class StubGraph extends HTMLElement {
+    expanded = false
+    openModal(): void {
+      this.expanded = true
+      if (!this.shadowRoot) this.attachShadow({ mode: 'open' })
+      this.shadowRoot!.innerHTML = '<dialog class="graph-modal" open></dialog>'
+    }
+    closeModal(): void {
+      if (!this.expanded) return
+      this.expanded = false
+      this.shadowRoot!.innerHTML = ''
+      this.dispatchEvent(new CustomEvent(GRAPH_MODAL_CLOSE_EVENT))
+    }
+  }
+
+  const LINKS = { inbound: [{ from: '/b/', text: 'b' }], outbound: [] }
+
+  beforeAll(() => {
+    if (!customElements.get('mbr-mini-graph')) customElements.define('mbr-mini-graph', StubGraph)
+  })
+
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+    document.querySelectorAll('.mbr-toast').forEach((el) => el.remove())
+    document.body.classList.remove('slides-container')
+  })
+
+  function pressGraphKey(): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'G', ctrlKey: true, shiftKey: true, bubbles: true, composed: true, cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  async function settle(el: any): Promise<void> {
+    for (let i = 0; i < 4; i++) {
+      await el.updateComplete
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  it('opens a standalone graph without opening the panel, and drops it on close', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._links = LINKS
+    el._graphReady = true
+    expect(pressGraphKey().defaultPrevented).toBe(true)
+    await settle(el)
+
+    expect(el._isOpen).toBe(false)
+    const graph = (el.shadowRoot as ShadowRoot).querySelector('mbr-mini-graph.standalone-graph') as StubGraph
+    expect(graph).not.toBeNull()
+    expect(graph.expanded).toBe(true)
+    // It counts as an open overlay while shown, so page shortcuts stand down.
+    expect(el.isOpen).toBe(true)
+
+    graph.closeModal()
+    await settle(el)
+    expect((el.shadowRoot as ShadowRoot).querySelector('mbr-mini-graph')).toBeNull()
+    expect(el.isOpen).toBe(false)
+  })
+
+  it("expands the open panel's own graph instead of mounting another", async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el._links = LINKS
+    el._graphReady = true
+    el.requestUpdate()
+    await el.updateComplete
+    pressGraphKey()
+    await settle(el)
+    const graphs = (el.shadowRoot as ShadowRoot).querySelectorAll('mbr-mini-graph')
+    expect(graphs).toHaveLength(1)
+    expect((graphs[0] as StubGraph).expanded).toBe(true)
+    expect(el._isOpen).toBe(true)
+  })
+
+  it('does not toggle the panel', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._links = LINKS
+    el._graphReady = true
+    pressGraphKey()
+    await settle(el)
+    expect(el._isOpen).toBe(false)
+  })
+
+  it('says so when link tracking is off', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._linksUnavailable = true
+    pressGraphKey()
+    await settle(el)
+    expect((el.shadowRoot as ShadowRoot).querySelector('mbr-mini-graph')).toBeNull()
+    expect(document.querySelector('.mbr-toast')?.textContent).toContain('link tracking is off')
+  })
+
+  it('says so when the note has nothing to graph', async () => {
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._links = { inbound: [], outbound: [{ to: 'https://example.com', internal: false }] }
+    el._graphReady = true
+    pressGraphKey()
+    await settle(el)
+    expect((el.shadowRoot as ShadowRoot).querySelector('mbr-mini-graph')).toBeNull()
+    expect(document.querySelector('.mbr-toast')?.textContent).toContain('no links')
+  })
+
+  it('stands down while a slide deck plays', async () => {
+    document.body.classList.add('slides-container')
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._links = LINKS
+    el._graphReady = true
+    expect(pressGraphKey().defaultPrevented).toBe(false)
+    await settle(el)
+    expect((el.shadowRoot as ShadowRoot).querySelector('mbr-mini-graph')).toBeNull()
+  })
+})
+
+describe('MbrInfoElement file location (GUI only)', () => {
+  const baseMeta = {
+    wordCount: 10,
+    readingTimeMinutes: 1,
+    fleschReadingEase: null,
+    fleschKincaidGrade: null,
+    filePath: 'notes/a.md',
+    modifiedTimestamp: 0,
+  }
+
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+    delete window.extendedMeta
+  })
+
+  async function openPanel(): Promise<ShadowRoot> {
+    window.frontmatter = { title: 'Note' }
+    const el = document.body.appendChild(document.createElement('mbr-info')) as any
+    el._isOpen = true
+    el.requestUpdate()
+    await el.updateComplete
+    return el.shadowRoot as ShadowRoot
+  }
+
+  const rowLabels = (root: ShadowRoot) =>
+    Array.from(root.querySelectorAll('th[scope="row"]')).map((th) => th.textContent?.trim())
+
+  it('shows no file button outside the GUI', async () => {
+    window.extendedMeta = { ...baseMeta, fileLocation: null }
+    const root = await openPanel()
+    expect(rowLabels(root)).toContain('File')
+    expect(rowLabels(root)).not.toContain('Location')
+    expect(root.querySelector('.file-location-action')).toBeNull()
+  })
+
+  it('puts the reveal button beside the File label in the GUI, with no Location row', async () => {
+    window.extendedMeta = { ...baseMeta, fileLocation: { path: '/Users/me/repo/notes/a.md', reveal: true } }
+    const root = await openPanel()
+    expect(rowLabels(root)).toContain('File')
+    expect(rowLabels(root)).not.toContain('Location')
+    const button = root.querySelector<HTMLElement>('th .file-label .file-location-action')
+    expect(button?.dataset.action).toBe('reveal')
+    // The row still shows the repository-relative path, never the absolute one.
+    expect(root.querySelector('code.file-path')?.textContent).toBe('notes/a.md')
+    expect(root.textContent).not.toContain('/Users/me')
+  })
+
+  it('offers to copy the full path where the GUI cannot reveal', async () => {
+    window.extendedMeta = { ...baseMeta, fileLocation: { path: '/home/me/repo/notes/a.md', reveal: false } }
+    const root = await openPanel()
+    const button = root.querySelector<HTMLElement>('th .file-label .file-location-action')
+    expect(button?.dataset.action).toBe('copy')
+    expect(button?.getAttribute('aria-label')).toBe('Copy full path')
   })
 })

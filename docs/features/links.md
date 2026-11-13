@@ -87,10 +87,12 @@ This enables wiki-style bidirectional link navigation without requiring any spec
 
 ![The info panel open beside a note, with the link graph at the top and the note's metadata below](../images/screens/info-panel.png)
 
-*The info panel (`Ctrl/Cmd+G`): a mini link graph, frontmatter and document stats.*
+*The info panel (`Ctrl+G`): a mini link graph, frontmatter and document stats.*
 
-Press **`Ctrl+G`** (`Cmd+G` on macOS), or use the info button in the header,
-to open the info panel beside the page. It shows:
+Press **`Ctrl+G`** (on macOS too: `Cmd+G` is find-next), or use the info button
+in the header, to open the info panel beside the page. Every section starts
+expanded, and while the panel is open `j` / `k` and `Ctrl+d` / `Ctrl+u` scroll it.
+It shows:
 
 - a **link graph** of the page's neighbourhood: notes it links to and notes
   that link to it, two hops out by default
@@ -100,10 +102,19 @@ to open the info panel beside the page. It shows:
 - its **relationships**, when it has any
   ([Relationships](relationships.md))
 - its **frontmatter**, as a table
-- document stats
+- **Copy page: Markdown · Rich**, which copies the whole note
+  ([Copying](copying/))
+- document stats, including the note's **File** path in the repository. In the
+  [GUI](../modes/gui.md#finding-a-note-on-disk) a folder button beside the
+  **File** label shows the file in Finder, Explorer or your Linux file manager
+  (where it cannot, it copies the note's full path on disk). Server pages and
+  static builds never show the full path
+
+Press **`Ctrl+Shift+G`** to go straight to the full-size graph, whether or not
+the panel is open; `Esc` closes it.
 
 The graph needs link tracking; with `--no-link-tracking` the panel has no
-graph section.
+graph section, and `Ctrl+Shift+G` says so instead.
 
 ![The link graph expanded to a dialog, centred on Mary Doe, with her family, colleagues and meeting notes two hops out](../images/screens/mini-graph-modal.png)
 

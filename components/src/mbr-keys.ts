@@ -4,6 +4,7 @@ import { findOverlay, isAnyOverlayOpen } from './overlay.js'
 import { isGuiMode } from './shared.js'
 import { KBD_CSS } from './controls.js'
 import { calendarKeysEnabled, followPeriodicLink, openTodayDailyNote } from './calendar/periodic-nav.js'
+import { jumpToAdjacentHeading } from './heading-nav.js'
 import type { NavTab } from './mbr-fuzzy-nav.js'
 
 /**
@@ -212,7 +213,7 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: 'G', description: 'Go to bottom' },
       { keys: 'H / L', description: 'Previous / next sibling' },
       { keys: 'd', description: "Today's daily note (else the latest)" },
-      { keys: '[ / ]', description: 'Previous / next periodic note (day, week, month…)' },
+      { keys: '[ / ]', description: 'Previous / next periodic note (day, week, month…), else previous / next heading' },
       { keys: 'Ctrl+o / Ctrl+i', description: 'History back / forward' },
     ],
   },
@@ -222,7 +223,8 @@ const SHORTCUTS: ShortcutCategory[] = [
       { keys: '/', description: 'Open search' },
       { keys: '=', description: 'Open media browser' },
       { keys: '- or F2', description: 'Open file browser' },
-      { keys: 'Ctrl+g', description: 'Toggle info panel' },
+      { keys: 'Ctrl+g', description: 'Toggle info panel (j / k, Ctrl+d / Ctrl+u scroll it)' },
+      { keys: 'Ctrl+Shift+g', description: 'Open the full link graph' },
       { keys: 't', description: 'Open task browser (server/GUI only)' },
       { keys: 'e', description: 'Open editor (when editing enabled)' },
       { keys: 'r', description: 'Add a review note (anchored to the selection)' },
@@ -338,6 +340,7 @@ const SHORTCUTS: ShortcutCategory[] = [
  * - `H/L` for prev/next page navigation (when mbr-nav is present)
  * - `g g` for scroll to top, `G` for scroll to bottom
  * - `d` for today's daily note, `[` / `]` for the previous / next periodic note
+ *   (else the previous / next heading of the note)
  * - `?` for help overlay
  */
 @customElement('mbr-keys')
@@ -423,6 +426,8 @@ export class MbrKeysElement extends LitElement {
           return;
 
         case 'g': // Ctrl+g - toggle info panel (vim file info style)
+          // Ctrl+Shift+g is the full link graph, handled by <mbr-info>.
+          if (e.shiftKey) return;
           e.preventDefault();
           toggleInfoPanel();
           return;
@@ -596,10 +601,14 @@ export class MbrKeysElement extends LitElement {
         }
         break;
 
-      case '[': // Previous periodic note (follows the bar's rel=prev link)
-      case ']': // Next periodic note (rel=next)
-        if (!e.altKey && !isModalOpen() && calendarKeysEnabled()) {
-          if (followPeriodicLink(e.key === '[' ? 'prev' : 'next')) {
+      case '[': // Previous periodic note (follows the bar's rel=prev link), else previous heading
+      case ']': // Next periodic note (rel=next), else next heading
+        if (!e.altKey && !isModalOpen()) {
+          const direction = e.key === '[' ? 'prev' : 'next';
+          if (
+            (calendarKeysEnabled() && followPeriodicLink(direction)) ||
+            jumpToAdjacentHeading(direction)
+          ) {
             e.preventDefault();
           }
         }
