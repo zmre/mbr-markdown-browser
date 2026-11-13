@@ -2,8 +2,9 @@
  * `<mbr-review>` — the trigger and the in-document half of review notes.
  *
  * Ships in the main bundle and stays small: the two keyboard shortcuts, the
- * floating "Add note" button that follows a selection, the chat-bubble FAB, the
- * marker layer, and the re-anchoring pass. The panel and the form live in the
+ * "Add note" action in the selection toolbar (`<mbr-selection-actions>`, which
+ * owns the toolbar and its copy buttons; review only registers the action), the
+ * chat-bubble FAB, the marker layer, and the re-anchoring pass. The panel and the form live in the
  * lazily-imported `mbr-review.min.js` chunk.
  *
  * Deliberately **no button in the page header**: the entry points are `r` on a
@@ -18,7 +19,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit'
 import { customElement, query, state } from 'lit/decorators.js'
 import { isReviewEnabled, subscribeSiteNav } from './shared.js'
-import { isInputTarget, isModalOpen } from './mbr-keys.js'
+import { isInputTarget, isModalOpen, isPresentationPlaying } from './mbr-keys.js'
 import { getMbrAssetBase, scheduleIdleTask, waitForDom } from './dynamic-loader.js'
 // `RawRead` is aliased: `task-toggle.ts`'s `SourceRead` is the *transport*
 // result (`ok`/`lines`/`status`), while `review/types.ts`'s is what the form
@@ -45,7 +46,8 @@ import { displayQuote } from './review/note-model.js'
 import { nextAnchorState } from './review/reanchor.js'
 import { buildTextIndex } from './find-in-page.js'
 import { DEFAULT_NOTE_TYPE, typeDef, type NoteAnchor, type NoteType, type ReviewNote } from './review/types.js'
-import { SLIDES_STATE_EVENT } from './mbr-slides.js'
+import { SLIDES_STATE_EVENT, isPresenterPane } from './mbr-slides.js'
+import { registerSelectionAction } from './mbr-selection-actions.ts'
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -99,15 +101,19 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   /** The note being edited, or null when creating. */
   @state() private _editing: ReviewNote | null = null
 
-  /** Viewport rect of the live selection, when there is a reviewable one. */
-  @state() private _selectionRect: DOMRect | null = null
+  /**
+   * True while a slide deck plays, and always in a speaker-view pane: the FAB
+   * would sit on Reveal's controls and the presenter's notes. The shortcuts and
+   * the markers stay (review notes on slides are a feature).
+   */
+  @state() private _slidesPlaying = false
 
   /**
    * Viewport rect the note form anchors to: the selection being commented on,
    * or the marker of the note being edited.
    *
-   * Kept separately from `_selectionRect` because opening the form clears the
-   * selection highlight but must not lose the place the reader was looking at.
+   * Taken when the form opens, before the form takes focus away from the
+   * selection, so it keeps the place the reader was looking at.
    */
   private _formRect: DOMRect | null = null
 
@@ -117,7 +123,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   private _markers: ReviewMarkerLayer | null = null
   private _unsubscribeStore: (() => void) | null = null
   private _unsubscribeNav: (() => void) | null = null
-  private _selectionFrame = 0
+  private _unregisterAction: (() => void) | null = null
   private _urlPaths: ReadonlySet<string> = new Set()
   private _indexFile = 'index.md'
   /** Marker whose card was opened by a click, and so stays up. */
@@ -140,12 +146,19 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     if (!isReviewEnabled()) return
 
     document.addEventListener('keydown', this._handleKeydown)
-    document.addEventListener('selectionchange', this._onSelectionChange)
-    window.addEventListener('scroll', this._onViewportChange, { passive: true })
-    window.addEventListener('resize', this._onViewportChange)
     window.addEventListener('hashchange', this._revealFromHash)
     document.addEventListener('pointerdown', this._onDocumentPointerDown)
     document.addEventListener(SLIDES_STATE_EVENT, this._onSlidesState)
+    this._slidesPlaying = isPresentationPlaying() || isPresenterPane()
+
+    // The selection toolbar has already checked the selection is a non-empty
+    // one inside the note, which is all `anchorFromSelection` would add.
+    this._unregisterAction = registerSelectionAction({
+      label: 'Add note',
+      title: 'Add a review note (r)',
+      isAvailable: () => !this.isOpen && this._file() !== null,
+      run: () => void this._openForm(anchorFromSelection(this._file() ?? '', window.getSelection())),
+    })
 
     this._unsubscribeStore = subscribe(() => this._onStoreChanged())
     this._unsubscribeNav = subscribeSiteNav((navState) => {
@@ -164,9 +177,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   override disconnectedCallback(): void {
     super.disconnectedCallback()
     document.removeEventListener('keydown', this._handleKeydown)
-    document.removeEventListener('selectionchange', this._onSelectionChange)
-    window.removeEventListener('scroll', this._onViewportChange)
-    window.removeEventListener('resize', this._onViewportChange)
     window.removeEventListener('hashchange', this._revealFromHash)
     document.removeEventListener('pointerdown', this._onDocumentPointerDown)
     document.removeEventListener(SLIDES_STATE_EVENT, this._onSlidesState)
@@ -175,7 +185,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     this._markers?.clear()
     this._popover?.remove()
     this._popover = null
-    if (this._selectionFrame) cancelAnimationFrame(this._selectionFrame)
+    this._unregisterAction?.()
+    this._unregisterAction = null
   }
 
   /**
@@ -288,26 +299,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   }
 
   // ========================================
-  // Selection tracking
+  // Selection
   // ========================================
-
-  /**
-   * Track the selection so the "Add note" button can follow it.
-   *
-   * Coalesced through `requestAnimationFrame`: `selectionchange` fires for
-   * every pointer move of a drag-select, and each handler measures a rect.
-   */
-  private _onSelectionChange = (): void => {
-    if (this._selectionFrame) cancelAnimationFrame(this._selectionFrame)
-    this._selectionFrame = requestAnimationFrame(() => {
-      this._selectionFrame = 0
-      this._measureSelection()
-    })
-  }
-
-  private _onViewportChange = (): void => {
-    if (this._selectionRect !== null) this._measureSelection()
-  }
 
   /** Rect of the live selection right now, or null. */
   private _currentSelectionRect(): DOMRect | null {
@@ -315,22 +308,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
     const rect = selection.getRangeAt(0).getBoundingClientRect()
     return rect.width === 0 && rect.height === 0 ? null : rect
-  }
-
-  private _measureSelection(): void {
-    if (this.isOpen) {
-      this._selectionRect = null
-      return
-    }
-    const file = this._file()
-    const selection = window.getSelection()
-    if (file === null || anchorFromSelection(file, selection) === null) {
-      this._selectionRect = null
-      return
-    }
-    const rect = selection!.getRangeAt(0).getBoundingClientRect()
-    // happy-dom, and a detached range, report all zeros.
-    this._selectionRect = rect.width === 0 && rect.height === 0 ? null : rect
   }
 
   // ========================================
@@ -348,7 +325,9 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
    * `data-mbr-line`s, so every note finds its slide).
    */
   private _onSlidesState = (e: Event): void => {
-    if ((e as CustomEvent<{ playing: boolean }>).detail?.playing !== true) return
+    const playing = (e as CustomEvent<{ playing: boolean }>).detail?.playing === true
+    this._slidesPlaying = playing || isPresenterPane()
+    if (!playing) return
     this._hidePopover()
     this._redraw()
   }
@@ -403,7 +382,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
 
   private async _openPanel(): Promise<void> {
     if (this._panelOpen || !isReviewEnabled()) return
-    this._selectionRect = null
     this._panelOpen = true
     if (await this._ensureChunk()) return
     this._panelOpen = false
@@ -415,8 +393,7 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     if (file === null) return
     // Remember where the reader was looking BEFORE clearing the selection
     // highlight, so the form can open next to the text being commented on.
-    this._formRect = this._selectionRect ?? this._currentSelectionRect()
-    this._selectionRect = null
+    this._formRect = this._currentSelectionRect()
     this._draftAnchor = anchor ?? { file, line: null, endLine: null, quote: null }
     this._editing = null
     this._formOpen = true
@@ -735,27 +712,8 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   // Render
   // ========================================
 
-  private _renderSelectionButton(): TemplateResult | typeof nothing {
-    const rect = this._selectionRect
-    if (rect === null) return nothing
-    // Above the selection when there is room, otherwise below it.
-    const top = rect.top > 44 ? rect.top - 40 : rect.bottom + 8
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - 130))
-    return html`
-      <button
-        class="selection-button"
-        style="top:${top}px;left:${left}px"
-        @mousedown=${(e: Event) => e.preventDefault()}
-        @click=${() => void this._openForm(anchorFromSelection(this._file() ?? '', window.getSelection()))}
-        title="Add a review note (r)"
-      >
-        Add note
-      </button>
-    `
-  }
-
   private _renderFab(): TemplateResult | typeof nothing {
-    if (this._count === 0 || this.isOpen) return nothing
+    if (this._count === 0 || this.isOpen || this._slidesPlaying) return nothing
     return html`
       <button
         class="review-fab"
@@ -775,7 +733,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     if (!isReviewEnabled()) return nothing
 
     return html`
-      ${this._renderSelectionButton()}
       ${this._renderFab()}
       ${this._loading
         ? html`<div class="review-loading" role="status">Loading review notes…</div>`
@@ -813,23 +770,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
   static override styles = css`
     :host {
       display: contents;
-    }
-
-    /* Follows the selection, so it must sit above the content but below any
-     * panel this element itself opens. */
-    .selection-button {
-      position: fixed;
-      z-index: 850;
-      padding: 0.3rem 0.7rem;
-      font-size: 0.85rem;
-      line-height: 1.2;
-      border: 1px solid var(--pico-muted-border-color, #ccc);
-      border-radius: 6px;
-      background: var(--pico-background-color, #fff);
-      color: var(--pico-color, #333);
-      box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.45);
-      cursor: pointer;
-      white-space: nowrap;
     }
 
     /*
@@ -913,7 +853,6 @@ export class MbrReviewElement extends LitElement implements MbrOverlay {
     }
 
     @media print {
-      .selection-button,
       .review-fab,
       .review-loading {
         display: none !important;

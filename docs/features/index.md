@@ -40,6 +40,7 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | [In-Browser Editing](editing/) | Edit, create, rename and move notes from the page (`e`) |
 | [Editing Properties](editing-properties/) | Frontmatter as a form or as YAML, with suggestions from your notes |
 | [Review Notes](review/) | Annotate a page and copy the whole review out as markdown (`r`) |
+| [Copying Text and Pages](copying/) | Copy a selection or the whole note as its markdown source or as rich text, without mbr's buttons and markers |
 
 ## Where each feature works
 
@@ -55,5 +56,6 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | Contacts and relationship charts | ✓ | ✓ | ✓ | ✓ | contact card |
 | Editing and properties | ✓ (on by default) | with `--edit` | | ✓ | |
 | Review notes | ✓ | ✓ | | with a keyboard | |
+| Copy markdown / rich | ✓ (and the Edit menu) | ✓ (markdown with `--edit`, else text) | ✓ (text, not markdown) | ✓ | |
 
 The modes themselves are described in [Modes of Operation](../modes/).

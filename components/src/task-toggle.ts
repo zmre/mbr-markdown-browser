@@ -294,6 +294,17 @@ function renderedVersion(path: string): string | null {
 }
 
 /**
+ * The version of the page's own note this page shows: the render's
+ * `markdown_source_hash`, or the fingerprint its own last write left. `null`
+ * on a page that is not a note, or when the version is unknown.
+ * `<mbr-live-reload>` compares it with the fingerprint a change event carries.
+ */
+export function shownSourceVersion(): string | null {
+  const path = currentDocumentPath()
+  return path === null ? null : renderedVersion(path)
+}
+
+/**
  * The source lines of `path`, fetched at most once per page and per read.
  *
  * Exported as {@link readSourceLines} for the review feature's suggestion
@@ -591,6 +602,19 @@ export function applyCheckboxStatus(input: HTMLInputElement, status: TaskStatus)
  */
 export function readSourceLines(path: string): Promise<SourceRead> {
   return sourceLines(path)
+}
+
+/**
+ * `path`'s lines when this page already holds them, else null — without a
+ * fetch.
+ *
+ * For "Copy markdown" (`copy-content.ts`): a clipboard write must happen in the
+ * task a click began, so a copy whose source is already here is built and
+ * written synchronously, and only a cold one waits for {@link readSourceLines}.
+ * Read-only: callers must not change the array.
+ */
+export function cachedSourceLines(path: string): readonly string[] | null {
+  return lineCache.get(normalizePath(path))?.lines ?? null
 }
 
 /**

@@ -24,7 +24,19 @@ import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
 import { isOutsideLinkTarget } from './link-kinds.ts';
 import { isCardKey } from './contact-meta.js';
-import { isMacPlatform, isPresentationPlaying } from './mbr-keys.js';
+import { isInputTarget, isMacPlatform, isPresentationPlaying } from './mbr-keys.js';
+import type { MbrOverlay } from './overlay.js';
+import { panelScrollAmount } from './panel-scroll.js';
+import { showToast } from './toast.js';
+import {
+  copyDocument,
+  copyOutcomeMessage,
+  copyRoot,
+  markdownSourcePath,
+  prefetchMarkdownSource,
+  type CopyFormat,
+} from './copy-content.ts';
+import { fileLocationFrom, renderFileLocationButton } from './info-file-location.ts';
 import { ICON_BUTTON_CSS } from './controls.ts';
 import { ICON_SM, icon, iconArrowLeft, iconArrowRight, iconArrowUpRight, iconChevronRight, iconInfo, iconX } from './icons.ts';
 
@@ -52,6 +64,8 @@ interface ExtendedMeta {
   fleschReadingEase: number | null;
   fleschKincaidGrade: number | null;
   filePath: string;
+  /** GUI pages only (see `info-file-location.ts`); `null` or absent elsewhere. */
+  fileLocation?: unknown;
   modifiedTimestamp: number;
   prevPage?: PageNavLink;
   nextPage?: PageNavLink;
@@ -82,6 +96,18 @@ export function isEmptyMetadataValue(value: unknown): boolean {
   return false;
 }
 
+/**
+ * Whether links.json gives the graph anything to draw: an internal link out, a
+ * link in, or a relationship. External links are not graph nodes.
+ */
+export function hasGraphableLinks(links: PageLinks): boolean {
+  return (
+    (links.outbound ?? []).some((link) => link.internal) ||
+    (links.inbound ?? []).length > 0 ||
+    (links.relationships ?? []).length > 0
+  );
+}
+
 /** Title/description for a note, built from site.json frontmatter. */
 interface NoteMeta {
   title: string;
@@ -96,10 +122,47 @@ export { setGraphChunkImporter } from './graph-chunk.js';
  * Info panel component - displays document metadata, table of contents, and links.
  * Self-contained with trigger button and slide-out panel.
  */
+/**
+ * `<mbr-mini-graph>`'s close event. A literal rather than an import: the graph
+ * element lives in the lazy chunk, which the main bundle must not import
+ * (mbr-info.test.ts pins it to the chunk's `GRAPH_MODAL_CLOSE_EVENT`).
+ */
+export const GRAPH_MODAL_CLOSE_EVENT = 'mbr-graph-modal-close';
+
+/** What the info panel drives on `<mbr-mini-graph>` (type-only: the element is in the chunk). */
+type ExpandableGraph = HTMLElement & {
+  readonly expanded?: boolean;
+  openModal?: () => void;
+  closeModal?: () => void;
+};
+
+/**
+ * How long a Ctrl+Shift+G graph may wait for two nodes before it is given up
+ * with a message: its neighbours are fetched first, and a note whose links all
+ * lead to unknown pages never gets a graph to show.
+ */
+const STANDALONE_GRAPH_WAIT_MS = 4000;
+
 @customElement('mbr-info')
-export class MbrInfoElement extends LitElement {
+export class MbrInfoElement extends LitElement implements MbrOverlay {
   @state()
   private _isOpen = false;
+
+  /**
+   * True while the full link graph opened by Ctrl+Shift+G with the panel
+   * CLOSED is mounted (`.standalone-graph`, outside the panel). With the panel
+   * open, Ctrl+Shift+G expands the panel's own graph instead.
+   */
+  @state()
+  private _standaloneGraph = false;
+
+  /** The standalone graph has been rendered but not yet told to expand. */
+  private _standalonePending = false;
+
+  private _standaloneTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** In-flight links.json load, so the panel and Ctrl+Shift+G share it. */
+  private _linksPromise: Promise<void> | null = null;
 
   @state()
   private _frontmatter: Frontmatter = {};
@@ -203,23 +266,141 @@ export class MbrInfoElement extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this._handleKeydown);
     this._unsubscribeSiteNav?.();
+    clearTimeout(this._standaloneTimer);
   }
 
   private _handleKeydown = (e: KeyboardEvent) => {
-    // Ctrl+g to toggle. Deliberately NOT Cmd+g: that is Find Next everywhere —
-    // `<mbr-find-bar>`'s Edit-menu accelerator in GUI mode, and the real
-    // browser's find-next in server mode. Same guard `mbr-keys.ts` uses.
-    // Not while a slide deck plays: the panel would open behind it.
-    if (e.ctrlKey && !e.metaKey && e.key === 'g' && !isPresentationPlaying()) {
+    // Ctrl+g to toggle, Ctrl+Shift+g for the full link graph. Deliberately NOT
+    // Cmd+g: that is Find Next everywhere — `<mbr-find-bar>`'s Edit-menu
+    // accelerator in GUI mode, and the real browser's find-next in server
+    // mode. Same guard `mbr-keys.ts` uses. Not while a slide deck plays: the
+    // panel would open behind it. `toLowerCase`: with Shift held, `key` is `G`.
+    if (e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'g' && !isPresentationPlaying()) {
       e.preventDefault();
-      this._toggle();
+      if (e.shiftKey) {
+        void this.openGraph();
+      } else {
+        this._toggle();
+      }
+      return;
     }
-    // Escape to close
+    // Escape to close (an expanded graph claims its own Escape first, in the
+    // capture phase, so this only runs once the graph is closed).
     if (e.key === 'Escape' && this._isOpen) {
       e.preventDefault();
       this._close();
+      return;
+    }
+    // While the panel is open it owns the scroll keys (mbr-keys stands down:
+    // the panel counts in isModalOpen), so j/k and Ctrl+d/u move the panel, not
+    // the darkened page behind it.
+    if (this._isOpen && !this._panelGraph()?.expanded && !isInputTarget(e)) {
+      const pane = this.shadowRoot?.querySelector<HTMLElement>('.info-panel');
+      if (!pane) return;
+      const amount = panelScrollAmount(e, pane.clientHeight, isMacPlatform());
+      if (amount !== null) {
+        e.preventDefault();
+        pane.scrollBy({ top: amount, behavior: 'smooth' });
+      }
     }
   };
+
+  /** True while the panel, or the full graph Ctrl+Shift+G opened without it, is showing. */
+  get isOpen(): boolean {
+    return this._isOpen || this._standaloneGraphShowing();
+  }
+
+  /** Close the panel and any full graph opened without it. */
+  close(): void {
+    this._close();
+    this._closeStandaloneGraph();
+  }
+
+  /** The graph inside the open panel, if rendered and upgraded. */
+  private _panelGraph(): ExpandableGraph | null {
+    return this.shadowRoot?.querySelector<ExpandableGraph>('.info-panel mbr-mini-graph') ?? null;
+  }
+
+  private _standaloneGraphEl(): ExpandableGraph | null {
+    return this.shadowRoot?.querySelector<ExpandableGraph>('mbr-mini-graph.standalone-graph') ?? null;
+  }
+
+  /**
+   * The standalone graph counts as open only once its dialog is on screen: a
+   * graph still waiting for its nodes is invisible, and an invisible "open"
+   * overlay would silence every bare-letter shortcut on the page.
+   */
+  private _standaloneGraphShowing(): boolean {
+    const graph = this._standaloneGraphEl();
+    return graph?.expanded === true && !!graph.shadowRoot?.querySelector('dialog.graph-modal');
+  }
+
+  private _closeStandaloneGraph(): void {
+    clearTimeout(this._standaloneTimer);
+    this._standalonePending = false;
+    this._standaloneGraphEl()?.closeModal?.();
+    this._standaloneGraph = false;
+  }
+
+  /**
+   * Open the full (expanded) link graph — Ctrl+Shift+G. With the panel open
+   * this expands the panel's own graph; otherwise a graph is mounted just for
+   * the dialog and dropped when it closes. Says why when there is nothing to
+   * graph (link tracking off, no links, chunk failed to load).
+   */
+  async openGraph(): Promise<void> {
+    const inPanel = this._isOpen ? this._panelGraph() : null;
+    if (inPanel?.openModal) {
+      inPanel.openModal();
+      return;
+    }
+    if (this._standaloneGraph) return;
+
+    await this._ensureLinks();
+    const links = this._links;
+    if (!links) {
+      showToast('No link graph here: link tracking is off');
+      return;
+    }
+    if (!this._graphReady) {
+      this._graphReady = await loadGraphChunk();
+    }
+    if (!this._graphReady) {
+      showToast('The link graph could not be loaded');
+      return;
+    }
+    if (!hasGraphableLinks(links)) {
+      showToast('This note has no links to graph');
+      return;
+    }
+    // The panel may have opened while links loaded: use its graph then.
+    const lateInPanel = this._isOpen ? this._panelGraph() : null;
+    if (lateInPanel?.openModal) {
+      lateInPanel.openModal();
+      return;
+    }
+    this._standalonePending = true;
+    this._standaloneGraph = true;
+    clearTimeout(this._standaloneTimer);
+    this._standaloneTimer = setTimeout(() => {
+      if (this._standaloneGraph && !this._standaloneGraphShowing()) {
+        this._closeStandaloneGraph();
+        showToast('No linked notes to graph');
+      }
+    }, STANDALONE_GRAPH_WAIT_MS);
+  }
+
+  override updated(): void {
+    // Expand the standalone graph as soon as it exists — before its first
+    // render, so its mini canvas is never drawn.
+    if (this._standalonePending) {
+      const graph = this._standaloneGraphEl();
+      if (graph?.openModal) {
+        this._standalonePending = false;
+        graph.openModal();
+      }
+    }
+  }
 
   private _toggle() {
     if (this._isOpen) {
@@ -240,9 +421,18 @@ export class MbrInfoElement extends LitElement {
   private _open() {
     this._isOpen = true;
     // Load links data when panel opens (if not already loaded)
-    if (!this._links && !this._linksLoading && !this._linksUnavailable) {
-      void this._loadLinks();
+    void this._ensureLinks();
+  }
+
+  /** Load links.json (and the graph chunk) once; concurrent callers share the load. */
+  private _ensureLinks(): Promise<void> {
+    if (this._links || this._linksUnavailable) return Promise.resolve();
+    if (!this._linksPromise) {
+      this._linksPromise = this._loadLinks().finally(() => {
+        this._linksPromise = null;
+      });
     }
+    return this._linksPromise;
   }
 
   private _close() {
@@ -506,7 +696,13 @@ export class MbrInfoElement extends LitElement {
               ` : nothing}
               ${meta.filePath ? html`
                 <tr>
-                  <th scope="row">File</th>
+                  <th scope="row">
+                    <span class="file-label">File${renderFileLocationButton(
+                      fileLocationFrom(meta.fileLocation),
+                      meta.filePath,
+                      { report: (message) => showToast(message) },
+                    )}</span>
+                  </th>
                   <td><code class="file-path">${meta.filePath}</code></td>
                 </tr>
               ` : nothing}
@@ -638,7 +834,7 @@ export class MbrInfoElement extends LitElement {
   private _renderLinksOutSection(): TemplateResult | typeof nothing {
     if (this._linksLoading) {
       return html`
-        <details class="info-section">
+        <details class="info-section" open>
           <summary>${SUMMARY_CHEVRON}<strong>Links Out</strong></summary>
           <div class="info-content">
             <p class="loading-text">Loading...</p>
@@ -656,7 +852,7 @@ export class MbrInfoElement extends LitElement {
     }
 
     return html`
-      <details class="info-section">
+      <details class="info-section" open>
         <summary>${SUMMARY_CHEVRON}<strong>Links Out</strong> <span class="link-count">(${outbound.length})</span></summary>
         <div class="info-content">
           ${internalLinks.length > 0 ? html`
@@ -703,7 +899,7 @@ export class MbrInfoElement extends LitElement {
   private _renderLinksInSection(): TemplateResult | typeof nothing {
     if (this._linksLoading) {
       return html`
-        <details class="info-section">
+        <details class="info-section" open>
           <summary>${SUMMARY_CHEVRON}<strong>Links In</strong></summary>
           <div class="info-content">
             <p class="loading-text">Loading...</p>
@@ -719,7 +915,7 @@ export class MbrInfoElement extends LitElement {
     }
 
     return html`
-      <details class="info-section">
+      <details class="info-section" open>
         <summary>${SUMMARY_CHEVRON}<strong>Links In</strong> <span class="link-count">(${inbound.length})</span></summary>
         <div class="info-content">
           <ul class="links-list">
@@ -778,9 +974,30 @@ export class MbrInfoElement extends LitElement {
     if (!this._links || !this._graphReady) {
       return nothing;
     }
+    return this._renderGraph('');
+  }
 
+  /**
+   * The full graph Ctrl+Shift+G opens with the panel closed: the same element,
+   * mounted only for its dialog (top layer, so the zero-size host never shows)
+   * and dropped when the dialog closes.
+   */
+  private _renderStandaloneGraph(): TemplateResult | typeof nothing {
+    if (!this._standaloneGraph || !this._links || !this._graphReady) {
+      return nothing;
+    }
+    return this._renderGraph('standalone-graph', () => {
+      clearTimeout(this._standaloneTimer);
+      this._standalonePending = false;
+      this._standaloneGraph = false;
+    });
+  }
+
+  private _renderGraph(className: string, onClose?: () => void): TemplateResult {
     return html`
       <mbr-mini-graph
+        class=${className}
+        @mbr-graph-modal-close=${onClose}
         .focusPath=${getCanonicalPath()}
         .depth=${getGraphDepth()}
         .maxNodes=${DEFAULT_MAX_NODES}
@@ -789,6 +1006,36 @@ export class MbrInfoElement extends LitElement {
         .getMeta=${this._getMeta}
         .resolveHref=${resolveUrl}
       ></mbr-mini-graph>
+    `;
+  }
+
+  /**
+   * "Copy page: Markdown · Rich" between Metadata and Document Info — the
+   * whole note as its markdown source (frontmatter dropped) or as rich text
+   * (`copy-content.ts`). "Markdown" reads "Text" where the page cannot read
+   * its source (static builds, editing off). Absent on a page with no note body.
+   */
+  private _renderCopyPage(): TemplateResult | typeof nothing {
+    if (copyRoot() === null) return nothing;
+    const hasSource = markdownSourcePath() !== null;
+    // Warm the shared source cache, so the click can write synchronously.
+    if (hasSource) prefetchMarkdownSource();
+    const copy = async (format: CopyFormat): Promise<void> => {
+      showToast(copyOutcomeMessage(await copyDocument(format), 'page'));
+    };
+    return html`
+      <div class="info-section copy-page" role="group" aria-label="Copy page">
+        <strong>Copy page</strong>
+        <span class="copy-page-buttons">
+          <button
+            class="mbr-icon-btn sm labeled copy-page-markdown"
+            data-kind=${hasSource ? 'markdown' : 'text'}
+            @click=${() => void copy('markdown')}
+            title=${hasSource ? 'Copy the whole note as markdown (without its frontmatter)' : 'Copy the whole note as plain text'}
+          >${hasSource ? 'Markdown' : 'Text'}</button>
+          <button class="mbr-icon-btn sm labeled copy-page-rich" @click=${() => void copy('rich')} title="Copy the whole note with its formatting">Rich</button>
+        </span>
+      </div>
     `;
   }
 
@@ -805,6 +1052,7 @@ export class MbrInfoElement extends LitElement {
 
           ${this._renderGraphSection()}
           ${this._renderMetadataSection()}
+          ${this._renderCopyPage()}
           ${this._renderDocumentInfoSection()}
           ${this._renderRelationshipsSection()}
           ${this._renderTocSection()}
@@ -820,6 +1068,7 @@ export class MbrInfoElement extends LitElement {
     return html`
       ${this._renderTrigger()}
       ${this._isOpen ? this._renderPanel() : nothing}
+      ${this._renderStandaloneGraph()}
     `;
   }
 
@@ -828,6 +1077,14 @@ export class MbrInfoElement extends LitElement {
   // ========================================
 
   static override styles = [ICON_BUTTON_CSS, css`
+    /* Holds only a top-layer dialog: no box of its own in the header. */
+    .standalone-graph {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+
     :host {
       display: contents;
     }
@@ -885,6 +1142,40 @@ export class MbrInfoElement extends LitElement {
       margin-top: 0;
       margin-bottom: 1.5rem;
       color: var(--pico-color, #333);
+    }
+
+    /* A section box like the others, one row: the label where a summary's
+     * would be, the buttons at the end. Two classes, to outrank the
+     * .info-section padding declared below. */
+    .info-section.copy-page {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.5rem 0.5rem 0.5rem 1rem;
+      color: var(--pico-color, #333);
+    }
+
+    .copy-page-buttons {
+      display: flex;
+      gap: 0.25rem;
+    }
+
+    .copy-page .mbr-icon-btn {
+      width: auto;
+      padding: 0 0.5rem;
+      font-size: 0.85rem;
+    }
+
+    /* The reveal / copy-path button beside the File label (GUI only). */
+    .file-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .file-label .mbr-icon-btn {
+      margin: -0.25rem 0;
     }
 
     /* Close button */

@@ -17,6 +17,8 @@ import './mbr-tasks.js'
 import './mbr-review.js'
 import './mbr-flashcards.js'
 import './mbr-calendar.js'
+import './mbr-info.js'
+import { resetHeadingJump } from './heading-nav.js'
 import { setCalendarChunkImporter } from './calendar-chunk.js'
 import { setTasksChunkImporter } from './mbr-tasks.js'
 import { setReviewChunkImporter } from './mbr-review.js'
@@ -161,6 +163,8 @@ const OVERLAY_CASES: ReadonlyArray<{ tag: OverlayTag; create: () => MbrOverlay &
   },
   // The companion drawer (not docked: no `mbr-has-companion` body class).
   { tag: 'mbr-calendar', create: () => document.createElement('mbr-calendar') },
+  // The info panel (Ctrl+g): while open it owns j/k and Ctrl+d/u.
+  { tag: 'mbr-info', create: () => document.createElement('mbr-info') },
 ]
 
 describe('isModalOpen', () => {
@@ -580,5 +584,154 @@ describe('MbrKeysElement help overlay', () => {
     const event = await press('Escape', input)
     expect(helpIsOpen()).toBe(false)
     expect(event.defaultPrevented).toBe(true)
+  })
+})
+
+/**
+ * The info panel is an overlay: while it is open the page's scroll keys stand
+ * down (the panel scrolls itself), and Ctrl+Shift+g is left to <mbr-info>.
+ */
+describe('MbrKeysElement with the info panel open', () => {
+  let scrollBy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.headings = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }),
+    )
+    document.body.appendChild(document.createElement('mbr-keys'))
+    scrollBy = vi.spyOn(window, 'scrollBy').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    scrollBy.mockRestore()
+    vi.unstubAllGlobals()
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  function press(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true, ...init })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  it('does not scroll the page on j / k / Ctrl+d / Ctrl+u while the panel is open', async () => {
+    const info = document.body.appendChild(document.createElement('mbr-info'))
+    await info.updateComplete
+    info.open()
+    await info.updateComplete
+
+    press('j')
+    press('k')
+    press('d', { ctrlKey: true })
+    press('u', { ctrlKey: true })
+    expect(scrollBy).not.toHaveBeenCalled()
+
+    info.close()
+    await info.updateComplete
+    press('j')
+    expect(scrollBy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not toggle the info panel on Ctrl+Shift+g', async () => {
+    const info = document.body.appendChild(document.createElement('mbr-info'))
+    await info.updateComplete
+    press('G', { ctrlKey: true, shiftKey: true })
+    await info.updateComplete
+    expect(info.isOpen).toBe(false)
+  })
+})
+
+/**
+ * `[` / `]` follow a periodic note's prev / next link, and on any other page
+ * step through the note's headings.
+ */
+describe('MbrKeysElement [ / ] heading navigation', () => {
+  let scrollTo: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    resetHeadingJump()
+    document.body.appendChild(document.createElement('mbr-keys'))
+    scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    scrollTo.mockRestore()
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  function press(key: string): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  /** A note whose headings sit at the given viewport tops (happy-dom has no layout). */
+  function note(tops: number[]): HTMLElement[] {
+    const main = document.body.appendChild(document.createElement('main'))
+    main.id = 'wrapper'
+    return tops.map((top, i) => {
+      const h = main.appendChild(document.createElement(i === 0 ? 'h1' : 'h2'))
+      h.textContent = `Heading ${i}`
+      h.getBoundingClientRect = () => ({ top, bottom: top + 20, left: 0, right: 100, width: 100, height: 20, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+      return h
+    })
+  }
+
+  it('scrolls to the next heading below the current one on ]', () => {
+    note([-300, 10, 400, 900])
+    Object.defineProperty(document.documentElement, 'scrollHeight', { value: 5000, configurable: true })
+    const event = press(']')
+    delete (document.documentElement as unknown as Record<string, unknown>).scrollHeight
+    expect(event.defaultPrevented).toBe(true)
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+    const options = scrollTo.mock.calls[0][0] as ScrollToOptions
+    // happy-dom: scrollY 0, no scroll-padding, so the target is the heading's top.
+    expect(options.top).toBe(10)
+  })
+
+  it('scrolls to the previous heading above the current one on [', () => {
+    note([-300, -100, 400])
+    const event = press('[')
+    expect(event.defaultPrevented).toBe(true)
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the key alone when there is no heading that way', () => {
+    note([50, 400])
+    const event = press('[')
+    expect(event.defaultPrevented).toBe(false)
+    expect(scrollTo).not.toHaveBeenCalled()
+  })
+
+  it('follows the periodic bar instead when the page has one', () => {
+    note([10, 400])
+    const bar = document.body.appendChild(document.createElement('nav'))
+    bar.className = 'mbr-calendar-nav'
+    const next = bar.appendChild(document.createElement('a'))
+    next.rel = 'next'
+    next.href = '#next-period'
+    const click = vi.fn((e: Event) => e.preventDefault())
+    next.addEventListener('click', click)
+
+    const event = press(']')
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(scrollTo).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('does nothing while an overlay owns the keyboard', async () => {
+    note([10, 400])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }))
+    const info = document.body.appendChild(document.createElement('mbr-info'))
+    await info.updateComplete
+    info.open()
+    const event = press(']')
+    expect(event.defaultPrevented).toBe(false)
+    expect(scrollTo).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
   })
 })

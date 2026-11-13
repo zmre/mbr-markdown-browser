@@ -128,15 +128,21 @@ async function mount(): Promise<MbrLiveReloadElement> {
   return el
 }
 
-/** Deliver a file-change frame exactly as watcher.rs broadcasts it. */
+/**
+ * Deliver a file-change frame as the server sends it (`live_reload.rs`):
+ * changes under `.mbr/` are flagged `template`, and `contentHash` stands for
+ * the fingerprint the server adds to frames about the page's own note.
+ */
 async function fileChanged(
   relativePath: string,
   kind: 'modified' | 'created' | 'deleted' | 'reloaded' = 'modified',
+  contentHash?: string,
 ): Promise<void> {
   latestSocket().emitMessage({
-    path: `/Users/someone/notes/${relativePath}`,
     relative_path: relativePath,
     event: kind,
+    ...(relativePath.startsWith('.mbr/') ? { template: true } : {}),
+    ...(contentHash === undefined ? {} : { content_hash: contentHash }),
   })
   await element?.updateComplete
 }
@@ -185,11 +191,20 @@ afterEach(() => {
 // ============================================================================
 
 describe('MbrLiveReloadElement connection', () => {
-  it('dials the live-reload endpoint over ws:// on an http page', async () => {
+  it('dials the live-reload endpoint over ws:// on an http page, naming its note', async () => {
     await mount()
 
     expect(sockets).toHaveLength(1)
-    expect(sockets[0].url).toBe('ws://localhost:5200/.mbr/ws/changes')
+    // `source` asks the server to fingerprint changes to this page's note.
+    expect(sockets[0].url).toBe('ws://localhost:5200/.mbr/ws/changes?source=docs%2Fguide.md')
+  })
+
+  it('names no source on a page that is not a note', async () => {
+    window.frontmatter = undefined
+
+    await mount()
+
+    expect(latestSocket().url).toBe('ws://localhost:5200/.mbr/ws/changes')
   })
 
   it('upgrades to wss:// on an https page', async () => {
@@ -197,7 +212,7 @@ describe('MbrLiveReloadElement connection', () => {
 
     await mount()
 
-    expect(latestSocket().url).toBe('wss://notes.example.com/.mbr/ws/changes')
+    expect(latestSocket().url).toBe('wss://notes.example.com/.mbr/ws/changes?source=docs%2Fguide.md')
   })
 
   it('keeps the page host and port, which is what the server is bound to', async () => {
@@ -207,7 +222,7 @@ describe('MbrLiveReloadElement connection', () => {
 
     await mount()
 
-    expect(latestSocket().url).toBe('ws://127.0.0.1:5873/.mbr/ws/changes')
+    expect(latestSocket().url).toBe('ws://127.0.0.1:5873/.mbr/ws/changes?source=docs%2Fguide.md')
   })
 
   it('opens no socket in a static build', async () => {
@@ -461,14 +476,105 @@ describe('MbrLiveReloadElement message handling', () => {
     })
   }
 
-  it('reloads when the sibling index.md of the current note changes', async () => {
-    // The folder landing page contributes to this page's navigation.
+  it('ignores the sibling index.md of the current note', async () => {
+    // Regression ("the page I'm previewing refreshes when I save a completely
+    // different file"): a note page renders nothing from its folder's index.
     await mount()
     latestSocket().emitOpen()
 
     await fileChanged('docs/index.md')
 
+    expectNoReload()
+  })
+
+  for (const path of ['site/page.html', 'docs/styles.css', 'docs/script.js', 'index.md', 'docs/guide.md~', 'docs/4913']) {
+    it(`ignores ${path}, which this note does not render`, async () => {
+      // `.html`/`.css`/`.js` anywhere used to reload every page; only the
+      // template folder (flagged by the server) affects a render.
+      await mount()
+      latestSocket().emitOpen()
+
+      await fileChanged(path)
+
+      expectNoReload()
+    })
+  }
+
+  it('reloads once for one save reported as several events', async () => {
+    // FSEvents reports one in-place write as created + modified x3; each used
+    // to schedule its own reload.
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('docs/guide.md', 'created', 'h2')
+    await fileChanged('docs/guide.md', 'modified', 'h2')
+    await fileChanged('docs/guide.md', 'modified', 'h2')
+    await fileChanged('docs/guide.md', 'modified', 'h2')
+
     expectReload()
+    vi.advanceTimersByTime(60_000)
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reload again for an echo of the save it already shows', async () => {
+    // Regression ("on slides, a save reloads twice"): the reloaded page
+    // receives a late echo of the same save. The server's fingerprint equals
+    // the one the page was rendered from, so nothing has changed.
+    window.frontmatter = { markdown_source: 'docs/guide.md', markdown_source_hash: 'h2' }
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('docs/guide.md', 'modified', 'h2')
+    await fileChanged('docs/guide.md', 'created', 'h2')
+    expectNoReload()
+
+    // A later save that really changes the note still reloads.
+    await fileChanged('docs/guide.md', 'modified', 'h3')
+    expectReload()
+  })
+
+  it('reloads when the server could not fingerprint the note', async () => {
+    window.frontmatter = { markdown_source: 'docs/guide.md', markdown_source_hash: 'h2' }
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('docs/guide.md')
+
+    expectReload()
+  })
+
+  it('reloads when its note is deleted, whatever the fingerprint', async () => {
+    window.frontmatter = { markdown_source: 'docs/guide.md', markdown_source_hash: 'h2' }
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('docs/guide.md', 'deleted', 'h2')
+
+    expectReload()
+  })
+
+  it('skips an echo of its own task write by fingerprint, without reading the file', async () => {
+    resetTaskToggleState()
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false, editEnabled: true }
+    window.frontmatter = { markdown_source: 'docs/guide.md', markdown_source_hash: 'h1' }
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      String(url).startsWith('/.mbr/raw/')
+        ? Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'X-MBR-Content-Hash': 'h1' }), text: () => Promise.resolve('- [ ] a\n') })
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ line: 1, text: '- [x] a', hash: 'h2' }) }),
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    await toggleTask({ path: 'docs/guide.md', line: 1, to: 'done' })
+    await mount()
+    latestSocket().emitOpen()
+    const calls = fetchMock.mock.calls.length
+
+    vi.advanceTimersByTime(10_000) // past the self-write window
+    await fileChanged('docs/guide.md', 'modified', 'h2')
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(reload).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls.length, 'decided by fingerprint, no /.mbr/raw read').toBe(calls)
+    resetTaskToggleState()
   })
 
   it('ignores an index.md in an unrelated folder', async () => {
@@ -514,29 +620,28 @@ describe('MbrLiveReloadElement message handling', () => {
     expectReload()
   })
 
-  /**
-   * DEFECT (characterised, not fixed): on a directory listing the page has no
-   * `markdown_source`, so `_detectCurrentMarkdownFile()` guesses by appending
-   * ".md" to the URL — `/docs/` becomes `docs.md`, a file that does not exist.
-   * Nothing under `docs/` can ever match it, so section pages never live-reload
-   * when their contents change.
-   *
-   * `_shouldReloadForFile` has a branch for exactly this case (`!current ||
-   * current.endsWith('/')`), but the guess above guarantees it is unreachable.
-   *
-   * Fix: return null from `_detectCurrentMarkdownFile()` for a directory URL
-   * (or keep the trailing slash) so the directory-listing branch can fire.
-   */
-  it('DEFECT: a directory listing does not reload when a file inside it changes', async () => {
+  it('a directory listing reloads when a note directly inside it changes', async () => {
+    // Used to guess `docs.md` for `/docs/`, so a listing never followed its
+    // folder.
     window.frontmatter = undefined
     setLocation({ pathname: '/docs/' })
     await mount()
     latestSocket().emitOpen()
 
-    await fileChanged('docs/index.md')
-    expectNoReload()
+    await fileChanged('docs/guide.md', 'created')
 
-    await fileChanged('docs/guide.md')
+    expectReload()
+  })
+
+  it('a directory listing ignores notes in other folders and deeper down', async () => {
+    window.frontmatter = undefined
+    setLocation({ pathname: '/docs/' })
+    await mount()
+    latestSocket().emitOpen()
+
+    await fileChanged('recipes/soup.md')
+    await fileChanged('docs/deep/er/note.md')
+
     expectNoReload()
   })
 })

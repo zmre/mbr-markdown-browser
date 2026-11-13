@@ -12,6 +12,7 @@
  * every theme and dark-mode override for free.
  */
 import { html, nothing, type TemplateResult } from 'lit'
+import { live } from 'lit/directives/live.js'
 import { chipDatetime, formatChipLabel, isOverdue, priorityDot } from './task-format.js'
 import type { TaskHit, TaskStatus } from './types.js'
 import { icon, iconCalendar, iconCalendarClock, iconCheck } from '../icons.js'
@@ -84,7 +85,7 @@ export function renderTaskCard(options: TaskCardOptions): TemplateResult {
             class="mbr-task-check ${editable ? 'mbr-task-editable' : ''}"
             data-mbr-task-line=${hit.line}
             data-mbr-task-status=${status}
-            .checked=${status === 'done'}
+            .checked=${live(status === 'done')}
             ?disabled=${!editable}
             aria-label=${taskDisplayText(hit.text)}
             title=${editable ? 'Click to complete · right-click to cancel' : nothing}
@@ -92,11 +93,18 @@ export function renderTaskCard(options: TaskCardOptions): TemplateResult {
               // The card behind opens the file; a click on the box must not.
               e.stopPropagation()
               if (!editable) return
-              // Cancel the browser's own flip and let the render decide instead.
-              // Safe here (unlike in the document, see `mbr-task-doc.ts`) because
-              // `checked` is a PROPERTY binding: Lit re-commits it from `status`
-              // on the very next render, after the cancellation has restored it.
-              e.preventDefault()
+              // Never `preventDefault()` here (as in `mbr-task-doc.ts`). The
+              // browser's own flip IS the optimistic one: a click only ever
+              // asks done ↔ open, or canceled → done, so the box lands where
+              // the new status draws it. Cancelling used to break unchecking:
+              // a user's click checkpoints microtasks after each listener, so
+              // Lit rendered the optimistic status *inside* the dispatch, the
+              // cancellation then restored the box behind Lit's back, and the
+              // refreshed status matched what Lit had committed — a no-op that
+              // left a reopened task checked (and a completed one unchecked).
+              // `live()` compares against the box itself, so whatever moved it
+              // (this flip, a click ignored while a write is in flight, a
+              // failed write reverting) the next render puts it right.
               options.onToggle?.()
             }}
             @contextmenu=${(e: Event) => {

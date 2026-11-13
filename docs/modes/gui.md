@@ -25,14 +25,14 @@ mbr provides platform-appropriate menus:
 **macOS:**
 - **mbr** menu: About, Preferences, Quit (Cmd+Q)
 - **File**: Open… (Cmd+O)
-- **Edit**: Copy, Paste, Select All, Find… (Cmd+F), Find Next (Cmd+G), Find Previous (Shift+Cmd+G)
+- **Edit**: Copy, Paste, Select All, Copy Page as Rich Text, Copy Page as Markdown, Find… (Cmd+F), Find Next (Cmd+G), Find Previous (Shift+Cmd+G)
 - **View**: Reload (Cmd+R), Toggle DevTools (Cmd+Option+I)
 - **History**: Back (Cmd+[), Forward (Cmd+])
 - **Window**: Minimize, Zoom, Close (Cmd+W)
 
 **Windows/Linux:**
 - **File**: Open…, Exit
-- **Edit**: Copy, Paste, Select All, Find… (Ctrl+F), Find Next (F3), Find Previous (Shift+F3)
+- **Edit**: Copy, Paste, Select All, Copy Page as Rich Text, Copy Page as Markdown, Find… (Ctrl+F), Find Next (F3), Find Previous (Shift+F3)
 - **View**: Reload, Toggle DevTools
 - **History**: Back, Forward
 
@@ -117,6 +117,30 @@ A link in a note to a file outside the open folder (`~/src/app/TODO.md`, or a
 `../` path above the folder's root) leads to a page with an **Open…** button,
 which shows this same dialog starting in that file's folder; see
 [Links outside the folder](../features/links.md#links-outside-the-folder).
+
+### Finding a Note on Disk
+
+When something else launched mbr on a note (an editor, a script, an AI tool),
+the window may be the only place you can see it. In the info panel (`Ctrl+G`),
+the **File** label under Document Info has a folder button beside it that shows
+the file selected in your file manager:
+
+| Platform | What the button does |
+|----------|----------------------|
+| macOS | Reveals the file in **Finder** (`NSWorkspace`) |
+| Windows | Opens its folder in **Explorer** with the file selected (`SHOpenFolderAndSelectItems`) |
+| Linux | Asks the file manager to show it (`org.freedesktop.FileManager1`, which Nautilus, Dolphin, Nemo, Caja and Thunar implement); without one, opens the containing folder with your default handler |
+
+On any other platform it is a copy button instead, and copies the note's full
+path on disk (the row itself shows the path inside the folder). Like the external-link
+hand-off it calls the platform directly and never runs a command.
+
+The button exists only in the GUI. A page served by `mbr -s` or written by a build
+never includes the full path, so publishing or sharing notes does not reveal
+where they live on your disk. The button sends the window only the note's path
+*inside* the open folder; mbr resolves it there and refuses anything outside
+the folder (a link out of it, a hidden file), so a note's own scripts cannot use
+it to open other places on your machine.
 
 ### External Links
 

@@ -311,6 +311,12 @@ impl Templates {
             .unwrap_or_else(|| "\"\"".to_string());
         let prev_page_json = nav_page_json(extra_context.get("prev_page"));
         let next_page_json = nav_page_json(extra_context.get("next_page"));
+        // GUI pages only (the server sets `file_location` in GUI mode alone);
+        // `null` everywhere else, so no served or built page names a local path.
+        let file_location_json = extra_context
+            .get("file_location")
+            .map(json_for_script)
+            .unwrap_or_else(|| "null".to_string());
 
         let mut context = Context::new();
         frontmatter.iter().for_each(|(k, v)| {
@@ -338,6 +344,7 @@ impl Templates {
         context.insert("frontmatter_json", &frontmatter_json);
         context.insert("headings_json", &headings_json);
         context.insert("file_path_json", &file_path_json);
+        context.insert("file_location_json", &file_location_json);
         context.insert("prev_page_json", &prev_page_json);
         context.insert("next_page_json", &next_page_json);
 
@@ -1238,6 +1245,18 @@ mod tests {
         assert_eq!(next["title"], json!("Plain"));
     }
 
+    /// The GUI's absolute note location reaches the page as script-safe JSON,
+    /// even for a path holding quotes or a script terminator.
+    #[test]
+    fn test_file_location_is_json_serialized() {
+        let location = json!({"path": r#"/Users/me/My "notes"/</script>.md"#, "reveal": true});
+        let extra = HashMap::from([("file_location".to_string(), location.clone())]);
+        let html = render_page(SimpleMetadata::new(), extra);
+
+        assert_eq!(parse_js_value(&html, "fileLocation: "), location);
+        assert!(!js_value(&html, "fileLocation: ").contains("</script>"));
+    }
+
     /// Headings were emitted as a hand-built multi-line JS literal with
     /// `| escape`, so `&` arrived at the frontend as `&amp;` and a `"` in a
     /// heading broke the script.
@@ -1274,6 +1293,7 @@ mod tests {
         let html = render_page(SimpleMetadata::new(), HashMap::new());
         assert_eq!(parse_js_value(&html, "window.headings = "), json!([]));
         assert_eq!(parse_js_value(&html, "filePath: "), json!(""));
+        assert_eq!(parse_js_value(&html, "fileLocation: "), json!(null));
         assert!(!html.contains("prevPage:"));
         assert!(!html.contains("nextPage:"));
         // Numeric fields keep their unquoted-key literal form.

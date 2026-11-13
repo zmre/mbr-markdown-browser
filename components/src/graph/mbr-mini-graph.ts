@@ -129,6 +129,9 @@ function endpoint(value: SimNode | string | number): SimNode | null {
   return typeof value === 'object' ? value : null
 }
 
+/** Fired on the element (not bubbling) when its expanded dialog closes. */
+export const GRAPH_MODAL_CLOSE_EVENT = 'mbr-graph-modal-close'
+
 @customElement('mbr-mini-graph')
 export class MbrMiniGraphElement extends LitElement {
   /**
@@ -588,18 +591,23 @@ export class MbrMiniGraphElement extends LitElement {
     if (changed.has('_expanded')) {
       this._modalViewport?.destroy()
       this._modalViewport = null
-      if (this._expanded) {
-        const dialog = this.shadowRoot?.querySelector<HTMLDialogElement>('dialog.graph-modal')
-        if (dialog && !dialog.open) {
-          // showModal() promotes the dialog into the top layer, so it floats
-          // above the info drawer regardless of the drawer's transform/overflow.
-          // Guarded: a webview lacking showModal() still opens non-modally.
-          try {
-            dialog.showModal()
-          } catch {
-            dialog.setAttribute('open', '')
-          }
+    }
+    // Not only when `_expanded` changes: `openModal()` may run before the graph
+    // has two nodes (Ctrl+Shift+G on a page whose links.json is still loading),
+    // in which case the dialog first exists on a LATER render.
+    if (this._expanded && !this.inline) {
+      const dialog = this.shadowRoot?.querySelector<HTMLDialogElement>('dialog.graph-modal')
+      if (dialog && !dialog.open) {
+        // showModal() promotes the dialog into the top layer, so it floats
+        // above the info drawer regardless of the drawer's transform/overflow.
+        // Guarded: a webview lacking showModal() still opens non-modally.
+        try {
+          dialog.showModal()
+        } catch {
+          dialog.setAttribute('open', '')
         }
+      }
+      if (!this._modalViewport) {
         const canvas = this.shadowRoot?.querySelector<HTMLElement>('.graph-modal-canvas')
         const svgEl = canvas?.querySelector('svg')
         if (canvas && svgEl instanceof SVGSVGElement) {
@@ -757,6 +765,25 @@ export class MbrMiniGraphElement extends LitElement {
   // Expanded modal
   // =====================================================================
 
+  /** True while the expanded (full-size) graph dialog is open. */
+  get expanded(): boolean {
+    return this._expanded
+  }
+
+  /**
+   * Open the expanded graph. Public for `<mbr-info>`'s Ctrl+Shift+G, which
+   * opens it with or without the info panel. Safe before the BFS has produced
+   * a graph: the dialog appears once there are two nodes to show.
+   */
+  openModal(): void {
+    this._openModal()
+  }
+
+  /** Close the expanded graph (no-op when it is not open). */
+  closeModal(): void {
+    this._closeModal()
+  }
+
   private _openModal(): void {
     if (this._expanded) return
     this._expanded = true
@@ -770,10 +797,16 @@ export class MbrMiniGraphElement extends LitElement {
     if (!this._expanded) return
     this._expanded = false
     document.removeEventListener('keydown', this._onEscapeCapture, true)
+    // Tells a host that created this element only for the dialog (mbr-info's
+    // standalone Ctrl+Shift+G graph) that it can drop it.
+    this.dispatchEvent(new CustomEvent(GRAPH_MODAL_CLOSE_EVENT))
   }
 
   private _onEscapeCapture = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape' || !this._expanded) return
+    // Expanded but not yet drawn (openModal() before the graph had two nodes):
+    // nothing is on screen, so Escape belongs to whatever is.
+    if (!this.shadowRoot?.querySelector('dialog.graph-modal')) return
     e.stopImmediatePropagation()
     e.preventDefault()
     this._closeModal()

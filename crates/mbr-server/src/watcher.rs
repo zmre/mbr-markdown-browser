@@ -46,6 +46,9 @@ pub enum WatcherError {
 /// reload rather than risk exhausting the host's watches for the root itself.
 pub const MAX_WATCHED_MOUNTS: usize = 32;
 
+/// The repository's template folder, relative to its root.
+const MBR_DIR: &str = ".mbr";
+
 /// One watched mount: events under `target` are reported at `location`.
 #[derive(Debug, Clone)]
 struct WatchedMount {
@@ -167,6 +170,19 @@ impl FileWatcher {
         // testing anything (see `is_ignored`), and rebasing here would make the
         // exemption the one check in it that reasons about absolute paths.
         let exempt_hidden_dirs: Vec<PathBuf> = explicit_hidden_dirs.to_vec();
+        // `.mbr/` and the template folder hold the templates and the assets
+        // every page loads (`theme.css`, `user.css`, `components/*.js`). The
+        // repository's ignore rules describe *notes* — the default globs skip
+        // `*.css` and `*.js` — so applied here they silently dropped every
+        // stylesheet and script change, and live reload never saw one. Only
+        // the hidden-name rule (editor swap files) still applies there.
+        let template_roots: Vec<PathBuf> = std::iter::once(base_dir.join(MBR_DIR))
+            .chain(template_folder.map(|folder| {
+                folder
+                    .canonicalize()
+                    .unwrap_or_else(|_| folder.to_path_buf())
+            }))
+            .collect();
 
         let tx_clone = tx.clone();
         let base_dir_clone = base_dir.clone();
@@ -190,6 +206,9 @@ impl FileWatcher {
                     // what the Nix Linux sandbox does with its `TMPDIR=/build`.
                     let relative = pathdiff::diff_paths(path, &base_dir_clone)
                         .unwrap_or_else(|| path.to_path_buf());
+                    if template_roots.iter().any(|root| path.starts_with(root)) {
+                        return should_ignore(&relative, &[], &[], &exempt_hidden_dirs);
+                    }
                     let under_ignored_dir = relative.components().any(|comp| {
                         ignore_set.contains(comp.as_os_str().to_string_lossy().as_ref())
                     });
@@ -594,6 +613,53 @@ mod tests {
         assert!(
             !saw_log,
             "Should NOT see debug.log (matches *.log ignore glob)"
+        );
+    }
+
+    /// Regression: the default `ignore_globs` (`*.css`, `*.js`) are rules for
+    /// notes, and applied to `.mbr/` they dropped every stylesheet and script
+    /// change, so editing `.mbr/user.css` never live-reloaded.
+    #[tokio::test]
+    async fn test_watcher_reports_template_assets_despite_ignore_globs() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+        fs::create_dir_all(base_path.join(".mbr/components")).unwrap();
+        let ignore_globs = vec!["*.css".to_string(), "*.js".to_string()];
+        let (_watcher, mut rx) =
+            FileWatcher::new(base_path, None, &[], &ignore_globs, &[]).unwrap();
+        wait_until_live(base_path, &mut rx).await;
+
+        fs::write(base_path.join("notes.css"), "a{}").unwrap();
+        fs::write(base_path.join(".mbr/user.css"), "body{}").unwrap();
+        fs::write(base_path.join(".mbr/components/x.js"), "1").unwrap();
+        // A swap file is still hidden, template folder or not.
+        fs::write(base_path.join(".mbr/.user.css.swp"), "x").unwrap();
+
+        let wanted = [".mbr/user.css", ".mbr/components/x.js"];
+        let mut seen: Vec<String> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(WATCH_TIMEOUT_SECS);
+        // Everything until both template files were reported, then a little
+        // longer: `notes.css` and the swap file were written in between.
+        let mut settle = None;
+        loop {
+            let until = settle.unwrap_or(deadline);
+            match tokio::time::timeout_at(until, rx.recv()).await {
+                Ok(Ok(event)) => seen.push(event.relative_path.replace('\\', "/")),
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+            }
+            if settle.is_none() && wanted.iter().all(|w| seen.iter().any(|s| s == w)) {
+                settle = Some(tokio::time::Instant::now() + Duration::from_millis(500));
+            }
+        }
+        for w in wanted {
+            assert!(seen.iter().any(|s| s == w), "no event for {w}: {seen:?}");
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|s| s.ends_with("notes.css") || s.ends_with(".swp")),
+            "{seen:?}"
         );
     }
 

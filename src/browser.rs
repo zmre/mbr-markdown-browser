@@ -5,6 +5,7 @@ use crate::errors::BrowserError;
 use crate::external_open::{
     OutsideOpenRequest, SiteOrigin, apply_decision, decide_without_frame_info, gui_active,
     mark_gui_active, open_external, parse_ipc_open_outside_request, parse_ipc_open_request,
+    parse_ipc_reveal_request, resolve_reveal_target, reveal_in_file_manager,
 };
 use crate::live::LiveServer;
 use muda::{
@@ -66,6 +67,33 @@ const FIND_PREV_SCRIPT: &str = "(()=>{\
     if(e&&typeof e.findPrevious==='function')e.findPrevious();\
     })()";
 
+/// The page global the Edit menu's "Copy Page as …" items call
+/// (`components/src/copy-content.ts`, `COPY_PAGE_GLOBAL`). It names a JS
+/// function from a Rust string, so nothing checks it at compile time; a test
+/// here and one in `copy-content.test.ts` pin both halves of the spelling.
+#[cfg(test)]
+const COPY_PAGE_GLOBAL: &str = "mbrCopyPage";
+
+/// Copy the whole note as rich text (HTML + plain text) through
+/// `window.mbrCopyPage`, polling while the deferred bundle loads, like
+/// `FIND_OPEN_SCRIPT`. WKWebView runs `evaluateJavaScript` as a user gesture,
+/// which the page's clipboard write needs; the first attempt is synchronous so
+/// that holds whenever the bundle is already there.
+const COPY_PAGE_RICH_SCRIPT: &str = "(()=>{let n=0;const go=()=>{\
+    const f=window.mbrCopyPage;\
+    if(typeof f==='function'){f('rich');return;}\
+    if(++n<40)setTimeout(go,25);\
+    };go();})()";
+
+/// Copy the whole note as its markdown source (frontmatter dropped), or as
+/// plain text where the page cannot read its source. See
+/// `COPY_PAGE_RICH_SCRIPT`.
+const COPY_PAGE_MARKDOWN_SCRIPT: &str = "(()=>{let n=0;const go=()=>{\
+    const f=window.mbrCopyPage;\
+    if(typeof f==='function'){f('markdown');return;}\
+    if(++n<40)setTimeout(go,25);\
+    };go();})()";
+
 /// Custom user events for the event loop
 enum UserEvent {
     MenuEvent(MenuEvent),
@@ -94,6 +122,12 @@ enum UserEvent {
     ServerFailed {
         path: PathBuf,
     },
+    /// The info panel's reveal button: show this repository-relative file in
+    /// the platform's file manager. Validated by
+    /// [`crate::external_open::parse_ipc_reveal_request`]; resolved against the
+    /// *current* server's repository in the event loop, the only place that
+    /// knows which one that is.
+    Reveal(crate::vault::VaultPath),
 }
 
 /// Context needed to launch and manage the browser window
@@ -197,6 +231,12 @@ struct FindMenuItems {
     prev: MenuItem,
 }
 
+/// Edit menu items copying the whole note (`window.mbrCopyPage`).
+struct CopyPageMenuItems {
+    rich: MenuItem,
+    markdown: MenuItem,
+}
+
 /// Handles to menu items needed for event matching after the menu bar is built
 struct MenuHandles {
     menu_bar: Menu,
@@ -205,6 +245,7 @@ struct MenuHandles {
     print_item: MenuItem,
     history_items: HistoryMenuItems,
     find_items: FindMenuItems,
+    copy_page_items: CopyPageMenuItems,
     window_menu: Submenu,
 }
 
@@ -338,6 +379,13 @@ fn build_menu_bar() -> MenuHandles {
         Some(find_prev_accelerator),
     );
 
+    // No accelerators: every Cmd/Ctrl+Shift+C/Option+C chord is already
+    // somebody's (devtools, the page), and these are occasional.
+    let copy_page_rich_item =
+        MenuItem::with_id("copy_page_rich", "Copy Page as &Rich Text", true, None);
+    let copy_page_markdown_item =
+        MenuItem::with_id("copy_page_markdown", "Copy Page as &Markdown", true, None);
+
     // Edit menu with standard clipboard operations
     let edit_menu = Submenu::new("&Edit", true);
     log_menu_result(
@@ -350,6 +398,9 @@ fn build_menu_bar() -> MenuHandles {
             &PredefinedMenuItem::copy(None),
             &PredefinedMenuItem::paste(None),
             &PredefinedMenuItem::select_all(None),
+            &PredefinedMenuItem::separator(),
+            &copy_page_rich_item,
+            &copy_page_markdown_item,
             &PredefinedMenuItem::separator(),
             &find_item,
             &find_next_item,
@@ -469,6 +520,11 @@ fn build_menu_bar() -> MenuHandles {
         prev: find_prev_item,
     };
 
+    let copy_page_items = CopyPageMenuItems {
+        rich: copy_page_rich_item,
+        markdown: copy_page_markdown_item,
+    };
+
     MenuHandles {
         menu_bar,
         open_item,
@@ -476,6 +532,7 @@ fn build_menu_bar() -> MenuHandles {
         print_item,
         history_items,
         find_items,
+        copy_page_items,
         window_menu,
     }
 }
@@ -512,6 +569,26 @@ fn spawn_open_picker(proxy: EventLoopProxy<UserEvent>) {
             let _ = proxy.send_event(UserEvent::PathSelected(path));
         }
     });
+}
+
+/// Shows a note in the platform's file manager, if it is a file the current
+/// server serves (see [`resolve_reveal_target`]). Anything else is refused
+/// quietly: the request came from page content.
+fn reveal_note(server: Option<&LiveServer>, path: &crate::vault::VaultPath) {
+    let Some(server) = server else {
+        return;
+    };
+    let current = server.current();
+    let repo = current.repo();
+    let Some(target) =
+        resolve_reveal_target(repo.vault().as_ref(), repo.exempt_hidden_dirs(), path)
+    else {
+        tracing::debug!("Refusing to reveal {path}: not a file this repository serves");
+        return;
+    };
+    if let Err(e) = reveal_in_file_manager(&target) {
+        tracing::warn!("Could not reveal {}: {e}", target.display());
+    }
 }
 
 /// Whether an outside link's Open… panel is up. A page can post the request
@@ -725,6 +802,8 @@ enum Shortcut {
     FindOpen,
     FindNext,
     FindPrev,
+    CopyPageRich,
+    CopyPageMarkdown,
     /// Quit, or close the only window — the same thing in a one-window app.
     ///
     /// Linux-only, and the one variant with no menu item behind it: Quit and
@@ -750,6 +829,8 @@ struct ShortcutIds {
     find: muda::MenuId,
     find_next: muda::MenuId,
     find_prev: muda::MenuId,
+    copy_page_rich: muda::MenuId,
+    copy_page_markdown: muda::MenuId,
 }
 
 fn shortcut_for_menu_id(id: &muda::MenuId, ids: &ShortcutIds) -> Option<Shortcut> {
@@ -762,6 +843,8 @@ fn shortcut_for_menu_id(id: &muda::MenuId, ids: &ShortcutIds) -> Option<Shortcut
         (&ids.find, Shortcut::FindOpen),
         (&ids.find_next, Shortcut::FindNext),
         (&ids.find_prev, Shortcut::FindPrev),
+        (&ids.copy_page_rich, Shortcut::CopyPageRich),
+        (&ids.copy_page_markdown, Shortcut::CopyPageMarkdown),
     ];
     table
         .into_iter()
@@ -821,6 +904,14 @@ fn perform_shortcut(
         Shortcut::FindPrev => {
             tracing::debug!("Find previous requested");
             let _ = webview.evaluate_script(FIND_PREV_SCRIPT);
+        }
+        Shortcut::CopyPageRich => {
+            tracing::debug!("Copy page as rich text requested");
+            let _ = webview.evaluate_script(COPY_PAGE_RICH_SCRIPT);
+        }
+        Shortcut::CopyPageMarkdown => {
+            tracing::debug!("Copy page as markdown requested");
+            let _ = webview.evaluate_script(COPY_PAGE_MARKDOWN_SCRIPT);
         }
         #[cfg(target_os = "linux")]
         Shortcut::Quit => {
@@ -967,6 +1058,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         print_item,
         history_items,
         find_items,
+        copy_page_items,
         window_menu: _window_menu,
     } = build_menu_bar();
 
@@ -1142,6 +1234,8 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
             ) {
                 // Only positions a native panel; see `spawn_outside_open_picker`.
                 spawn_outside_open_picker(ipc_proxy.clone(), outside);
+            } else if let Some(path) = parse_ipc_reveal_request(gui_active(), request.body()) {
+                let _ = ipc_proxy.send_event(UserEvent::Reveal(path));
             } else {
                 tracing::debug!("Ignoring unrecognized IPC message from the page");
             }
@@ -1180,6 +1274,8 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         find: find_items.open.id().clone(),
         find_next: find_items.next.id().clone(),
         find_prev: find_items.prev.id().clone(),
+        copy_page_rich: copy_page_items.rich.id().clone(),
+        copy_page_markdown: copy_page_items.markdown.id().clone(),
     };
 
     // Track modifier state for Alt+arrow handling
@@ -1273,6 +1369,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 None => reload_page(&webview, &current_url),
             },
             Event::UserEvent(UserEvent::ReloadPage) => reload_page(&webview, &current_url),
+            Event::UserEvent(UserEvent::Reveal(path)) => reveal_note(live_server.as_deref(), &path),
             Event::UserEvent(UserEvent::ServerFailed { path }) => {
                 // Off-thread because a modal dialog spins its own run loop, and
                 // this one is the event loop it would spin inside.
@@ -1478,6 +1575,19 @@ fn load_icon() -> Result<Icon, BrowserError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The menu names `window.mbrCopyPage` in a string; `copy-content.ts`
+    /// defines it. `copy-content.test.ts` pins the other half.
+    #[test]
+    fn copy_page_scripts_call_the_page_global_with_their_format() {
+        for (script, format) in [
+            (COPY_PAGE_RICH_SCRIPT, "'rich'"),
+            (COPY_PAGE_MARKDOWN_SCRIPT, "'markdown'"),
+        ] {
+            assert!(script.contains(&format!("window.{COPY_PAGE_GLOBAL};")));
+            assert!(script.contains(&format!("f({format})")));
+        }
+    }
 
     // `auto` is passed in rather than read from `MENU_BAR_AUTO_VISIBLE`, so both
     // platform conventions are covered no matter which host runs the suite.

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import './mbr-mini-graph.ts'
+import { GRAPH_MODAL_CLOSE_EVENT } from './mbr-mini-graph.ts'
+import { GRAPH_MODAL_CLOSE_EVENT as INFO_GRAPH_MODAL_CLOSE_EVENT } from '../mbr-info.ts'
 import type { MbrMiniGraphElement, NoteMeta } from './mbr-mini-graph.ts'
 import type { PageLinks } from './relationship-graph.ts'
 
@@ -407,6 +408,67 @@ describe('mbr-mini-graph expanded modal', () => {
     } finally {
       document.removeEventListener('keydown', outerEscape)
     }
+  })
+})
+
+describe('mbr-mini-graph public modal API (Ctrl+Shift+G)', () => {
+  it('opens and closes through openModal() / closeModal(), firing the close event', async () => {
+    const { element } = await createGraph()
+    const closed = vi.fn()
+    element.addEventListener(GRAPH_MODAL_CLOSE_EVENT, closed)
+
+    expect(element.expanded).toBe(false)
+    element.openModal()
+    await element.updateComplete
+    expect(element.expanded).toBe(true)
+    expect(shadow(element).querySelector('dialog.graph-modal')).not.toBeNull()
+    // The mini canvas is replaced by the dialog, never drawn beside it.
+    expect(shadow(element).querySelector('.mini-canvas')).toBeNull()
+
+    element.closeModal()
+    await element.updateComplete
+    expect(element.expanded).toBe(false)
+    expect(closed).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the dialog once the graph arrives when opened before it', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const map = chainMap()
+    const element = document.createElement('mbr-mini-graph')
+    element.setAttribute('static-layout', '')
+    element.focusPath = '/a/'
+    element.fetchLinks = async (path: string) => {
+      await gate
+      return map[path] ?? null
+    }
+    element.isKnownNote = (p) => p in map
+    element.resolveHref = (p) => p
+    // Expanded BEFORE the first render, as <mbr-info> does for a standalone graph.
+    element.openModal()
+    document.body.appendChild(element)
+    created.push(element)
+    await settle(element)
+    expect(shadow(element).querySelector('dialog.graph-modal')).toBeNull()
+    expect(shadow(element).querySelector('.mini-canvas')).toBeNull()
+
+    // While nothing is drawn, Escape belongs to whatever IS on screen.
+    const outer = vi.fn()
+    document.addEventListener('keydown', outer)
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    document.removeEventListener('keydown', outer)
+    expect(outer).toHaveBeenCalledTimes(1)
+    expect(element.expanded).toBe(true)
+
+    release()
+    await settle(element)
+    const dialog = shadow(element).querySelector<HTMLDialogElement>('dialog.graph-modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.open).toBe(true)
+  })
+
+  it("keeps mbr-info's literal close-event name in step", () => {
+    expect(INFO_GRAPH_MODAL_CLOSE_EVENT).toBe(GRAPH_MODAL_CLOSE_EVENT)
   })
 })
 

@@ -138,8 +138,8 @@ a custom `.mbr/index.html` needs `{% include "_calendar_nav.html" %}` inside its
 | Key | Action |
 |-----|--------|
 | `d` | Today's daily note (by your local date), else the most recent one before today, else the earliest one. A short message says so when there are no daily notes |
-| `[` | The previous periodic note of the same kind (follows the bar's ‹ link). Does nothing on other pages |
-| `]` | The next periodic note of the same kind |
+| `[` | The previous periodic note of the same kind (follows the bar's ‹ link). On other pages it moves to the previous heading instead ([Keyboard Shortcuts](../reference/keyboard-shortcuts/#page-navigation)) |
+| `]` | The next periodic note of the same kind (on other pages, the next heading) |
 
 Turn all of this off with `[calendar] enabled = false`; notes keep their
 dates.

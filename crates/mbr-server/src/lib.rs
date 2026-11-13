@@ -16,6 +16,7 @@ pub mod file_write;
 pub mod link_grep;
 pub mod link_rewrite;
 pub mod live;
+pub mod live_reload;
 pub mod server;
 mod vault_body;
 #[cfg(feature = "watcher")]

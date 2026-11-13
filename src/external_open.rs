@@ -53,6 +53,7 @@
 
 use crate::errors::ExternalOpenError;
 use crate::url_path::url_scheme;
+use crate::vault::{EntryKind, Vault, VaultPath, has_hidden_segment};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -155,6 +156,66 @@ pub fn parse_ipc_open_outside_request(
             file_name: None,
         }),
     }
+}
+
+/// The message `components/src/mbr-info.ts` posts when the reader presses the
+/// File row's reveal button, followed by the note's **repository-relative**
+/// path (`extendedMeta.filePath`). [`parse_ipc_reveal_request`] reads it; the
+/// two strings must change together.
+///
+/// Relative on purpose: the page never has to name an absolute path for this
+/// to work, and the path can only be resolved inside the served repository.
+pub const IPC_REVEAL_PREFIX: &str = "mbr:reveal:";
+
+/// Validates a reveal request from the info panel.
+///
+/// Page-controlled like every IPC message, so all it can yield is a
+/// [`VaultPath`] — root-relative and lexically unable to leave the root (a
+/// leading `/`, a drive, a UNC share or `..` past the root are refused by
+/// [`VaultPath::new`]). Containment against symlinks and hidden files is
+/// [`resolve_reveal_target`]'s job, against the live repository.
+///
+/// Inert (`None`) unless `gui_active`, for the same reason as
+/// [`parse_ipc_open_outside_request`]: a server process must never open
+/// windows on its host because a page asked.
+pub fn parse_ipc_reveal_request(gui_active: bool, payload: &str) -> Option<VaultPath> {
+    if !gui_active {
+        return None;
+    }
+    let raw = payload.strip_prefix(IPC_REVEAL_PREFIX)?;
+    if raw.is_empty() || raw.len() > MAX_OUTSIDE_PATH_BYTES || raw.chars().any(char::is_control) {
+        return None;
+    }
+    VaultPath::new(raw).ok().filter(|path| !path.is_root())
+}
+
+/// Where a validated reveal request lands on disk, or `None` when it must not
+/// be revealed.
+///
+/// The same rules the server applies before serving a file: no hidden segment
+/// (outside the CLI-named `exempt` chain) before or after resolving links, the
+/// vault's own [`Vault::canonicalize`] as the symlink boundary (a link out of
+/// the repository is `OutsideRoot` unless it is an accepted read-only mount,
+/// which comes back as an in-vault path), and the result must be an existing
+/// file with a real local path. Revealing never reads the file; it only shows
+/// it in the platform's file manager.
+pub fn resolve_reveal_target(
+    vault: &dyn Vault,
+    exempt: &[VaultPath],
+    path: &VaultPath,
+) -> Option<PathBuf> {
+    if has_hidden_segment(path, exempt) {
+        return None;
+    }
+    let canonical = vault.canonicalize(path).ok()?;
+    if has_hidden_segment(&canonical, exempt) {
+        return None;
+    }
+    let entry = vault.stat(&canonical).ok()??;
+    if entry.kind != EntryKind::File {
+        return None;
+    }
+    vault.local_path(&canonical)
 }
 
 /// Whether a GUI window is running in this process (see [`GUI_ACTIVE`]).
@@ -437,6 +498,137 @@ where
     }
 
     launch(url)
+}
+
+/// Shows `path` selected in the platform's file manager: Finder on macOS,
+/// Explorer on Windows, the `org.freedesktop.FileManager1` service on Linux
+/// (else the containing folder, opened with its default handler).
+///
+/// Behind the same GUI-only latch as [`open_external`] — revealing is
+/// something a window does for the person in front of it — and, like it, never
+/// a subprocess. `path` must come from [`resolve_reveal_target`].
+///
+/// The platforms with an implementation are exactly those for which
+/// `mbr_server::server::REVEAL_IN_FILE_MANAGER` is true; elsewhere the page
+/// draws a copy-path button and never posts a reveal.
+pub(crate) fn reveal_in_file_manager(path: &Path) -> Result<(), ExternalOpenError> {
+    let shown = crate::outside_link::display_path(path);
+    open_external_guarded(gui_active(), &shown, |_| reveal_impl(path))
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_impl(path: &Path) -> Result<(), ExternalOpenError> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSWorkspace::sharedWorkspace()
+        .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_impl(path: &Path) -> Result<(), ExternalOpenError> {
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+
+    // The shell parses display paths; the canonical root's `\\?\` verbatim
+    // prefix is not one.
+    let shown = crate::outside_link::display_path(path);
+    let wide: Vec<u16> = shown.encode_utf16().chain(std::iter::once(0)).collect();
+    let failed = |reason: String| ExternalOpenError::LaunchFailed {
+        url: shown.clone(),
+        reason,
+    };
+
+    // SAFETY: `wide` is a nul-terminated buffer that outlives every call that
+    // reads it. The ITEMIDLIST `ILCreateFromPathW` allocates is freed exactly
+    // once with `ILFree`, after its only use. COM is initialized for this
+    // thread (the event loop's, usually already initialized by tao, in which
+    // case the call reports S_FALSE or RPC_E_CHANGED_MODE) and uninitialized
+    // only when this call's own initialization succeeded, as COM requires.
+    // With `cidl` 0 and a null `apidl`, `SHOpenFolderAndSelectItems` opens the
+    // folder containing the fully specified item and selects it.
+    unsafe {
+        let init = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        let pidl = ILCreateFromPathW(wide.as_ptr());
+        let result = if pidl.is_null() {
+            Err(failed("the shell could not parse the path".to_string()))
+        } else {
+            let hr = SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0);
+            ILFree(pidl);
+            if hr >= 0 {
+                Ok(())
+            } else {
+                Err(failed(format!(
+                    "SHOpenFolderAndSelectItems failed with HRESULT {hr:#010x}"
+                )))
+            }
+        };
+        if init >= 0 {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reveal_impl(path: &Path) -> Result<(), ExternalOpenError> {
+    // Off the GTK thread: the D-Bus call may have to start the file manager,
+    // and nothing that waits should run on the event loop.
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        if let Err(e) = show_items_over_dbus(&path) {
+            tracing::debug!(
+                "org.freedesktop.FileManager1 did not answer ({e}); opening the folder instead"
+            );
+            let Some(parent) = path.parent() else {
+                return;
+            };
+            let uri = gio::prelude::FileExt::uri(&gio::File::for_path(parent));
+            if let Err(e) =
+                gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>)
+            {
+                tracing::warn!("Could not open {}: {e}", parent.display());
+            }
+        }
+    });
+    Ok(())
+}
+
+/// `org.freedesktop.FileManager1.ShowItems`, the freedesktop.org interface
+/// Nautilus, Dolphin, Nemo, Caja, Thunar and PCManFM-Qt implement to show a
+/// file selected in its folder.
+#[cfg(target_os = "linux")]
+fn show_items_over_dbus(path: &Path) -> Result<(), gio::glib::Error> {
+    use gio::glib::ToVariant;
+
+    const FILE_MANAGER: &str = "org.freedesktop.FileManager1";
+    let connection = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>)?;
+    let uri = gio::prelude::FileExt::uri(&gio::File::for_path(path)).to_string();
+    let arguments = (vec![uri], String::new()).to_variant();
+    connection.call_sync(
+        Some(FILE_MANAGER),
+        "/org/freedesktop/FileManager1",
+        FILE_MANAGER,
+        "ShowItems",
+        Some(&arguments),
+        None,
+        gio::DBusCallFlags::NONE,
+        5_000,
+        None::<&gio::Cancellable>,
+    )?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn reveal_impl(path: &Path) -> Result<(), ExternalOpenError> {
+    Err(ExternalOpenError::LaunchFailed {
+        url: path.display().to_string(),
+        reason: "mbr has no file manager integration for this platform".to_string(),
+    })
 }
 
 /// Extracts `scheme://authority` from a URL, lowercased for case-insensitive
@@ -1227,5 +1419,169 @@ mod tests {
     fn outside_prefix_matches_the_component() {
         // `components/src/mbr-outside-link.ts` posts exactly this.
         assert_eq!(IPC_OPEN_OUTSIDE_PREFIX, "mbr:open-outside:");
+    }
+
+    // ------------------------------------------------------------------
+    // Reveal in the file manager (`mbr:reveal:`)
+    // ------------------------------------------------------------------
+
+    fn reveal(payload: &str) -> Option<String> {
+        parse_ipc_reveal_request(true, payload).map(|path| path.as_str().to_string())
+    }
+
+    #[test]
+    fn reveal_prefix_matches_the_component() {
+        // `components/src/info-file-location.ts` posts exactly this.
+        assert_eq!(IPC_REVEAL_PREFIX, "mbr:reveal:");
+    }
+
+    #[test]
+    fn reveal_accepts_a_repository_relative_path() {
+        assert_eq!(
+            reveal("mbr:reveal:notes/a.md").as_deref(),
+            Some("notes/a.md")
+        );
+        // The server's `file_path` is the host's own spelling; on Windows
+        // that is `\`-separated.
+        assert_eq!(
+            reveal(r"mbr:reveal:notes\a.md").as_deref(),
+            Some("notes/a.md")
+        );
+        assert_eq!(reveal("mbr:reveal:./x/../a.md").as_deref(), Some("a.md"));
+        assert_eq!(
+            reveal("mbr:reveal:My Notes/é ü.md").as_deref(),
+            Some("My Notes/é ü.md")
+        );
+    }
+
+    #[test]
+    fn reveal_is_inert_without_a_gui() {
+        assert_eq!(
+            parse_ipc_reveal_request(false, "mbr:reveal:notes/a.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_refuses_anything_that_could_name_a_path_outside_the_root() {
+        for payload in [
+            "mbr:reveal:",
+            "mbr:reveal:.",
+            "mbr:reveal:/etc/passwd",
+            r"mbr:reveal:\\server\share\x",
+            "mbr:reveal:C:/Windows/notepad.exe",
+            "mbr:reveal:../outside.md",
+            "mbr:reveal:a/../../outside.md",
+            "mbr:reveal:a\nb.md",
+            "mbr:reveal:a\u{0}b.md",
+            "mbr:open-external:https://example.com/",
+            "reveal:a.md",
+            "MBR:REVEAL:a.md",
+        ] {
+            assert_eq!(reveal(payload), None, "{payload:?}");
+        }
+        let long = format!("mbr:reveal:{}", "a".repeat(MAX_OUTSIDE_PATH_BYTES + 1));
+        assert_eq!(reveal(&long), None);
+    }
+
+    fn vault_path(path: &str) -> VaultPath {
+        VaultPath::new(path).expect("valid vault path")
+    }
+
+    #[test]
+    fn reveal_target_is_an_existing_file_inside_the_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join("notes")).expect("mkdir");
+        std::fs::write(root.join("notes/a.md"), "# A").expect("write");
+        let vault = crate::vault::LocalVault::new(&root);
+
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("notes/a.md")),
+            Some(root.join("notes").join("a.md"))
+        );
+        // Missing files and folders are not revealed.
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("notes/missing.md")),
+            None
+        );
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("notes")),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_target_refuses_hidden_files_unless_exempt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir");
+        std::fs::write(root.join(".git/config"), "[remote]").expect("write");
+        std::fs::create_dir_all(root.join(".scratch")).expect("mkdir");
+        std::fs::write(root.join(".scratch/a.md"), "# A").expect("write");
+        std::fs::write(root.join(".env"), "TOKEN=x").expect("write");
+        let vault = crate::vault::LocalVault::new(&root);
+
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path(".git/config")),
+            None
+        );
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path(".env")),
+            None
+        );
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path(".scratch/a.md")),
+            None
+        );
+        // The CLI-named hidden chain is served, so it may be revealed.
+        assert_eq!(
+            resolve_reveal_target(
+                &vault,
+                &[vault_path(".scratch")],
+                &vault_path(".scratch/a.md")
+            ),
+            Some(root.join(".scratch").join("a.md"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_target_refuses_a_link_out_of_the_repository() {
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outside.path().join("secret.md"), "# S").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), root.join("link.md"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(outside.path(), root.join("out")).expect("symlink");
+        // A link to a hidden file inside the repository is judged by where
+        // it leads, not by its own name.
+        std::fs::write(root.join(".env"), "TOKEN=x").expect("write");
+        std::os::unix::fs::symlink(root.join(".env"), root.join("env.md")).expect("symlink");
+        let vault = crate::vault::LocalVault::new(&root);
+
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("link.md")),
+            None
+        );
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("out/secret.md")),
+            None
+        );
+        assert_eq!(
+            resolve_reveal_target(&vault, &[], &vault_path("env.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_refuses_when_gui_is_not_running() {
+        // `reveal_in_file_manager` goes through the same latch as
+        // `open_external`; with no window, the launcher never runs.
+        let seen = RefCell::new(Vec::new());
+        let result = open_external_guarded(false, "/repo/notes/a.md", recording_launcher(&seen));
+        assert!(matches!(result, Err(ExternalOpenError::GuiOnly { .. })));
+        assert!(seen.borrow().is_empty(), "nothing may reach the OS");
     }
 }

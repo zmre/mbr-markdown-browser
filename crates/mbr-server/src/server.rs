@@ -1201,6 +1201,26 @@ fn is_within_served_roots(
         || within_mount_targets(&canonical, &mount_targets())
 }
 
+/// Whether the GUI on this platform can show a file in the file manager (the
+/// root crate's `external_open::reveal_in_file_manager`: Finder, Explorer,
+/// `org.freedesktop.FileManager1`). Where it cannot, the info panel offers to
+/// copy the path instead of a reveal button that would do nothing.
+pub const REVEAL_IN_FILE_MANAGER: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux"
+));
+
+/// The `file_location` template value (`window.extendedMeta.fileLocation`):
+/// the note's absolute path as a reader writes it, and whether the page may
+/// offer to reveal it. Only ever built for a GUI page.
+fn file_location_json(md_path: &Path, reveal: bool) -> serde_json::Value {
+    serde_json::json!({
+        "path": mbr_core::outside_link::display_path(md_path),
+        "reveal": reveal,
+    })
+}
+
 pub struct Server {
     pub router: Router,
     pub port: u16,
@@ -3415,9 +3435,14 @@ impl Server {
     /// file-change feed in real time. Upgrades must therefore be same-origin,
     /// and a handshake with **no** `Origin` is rejected as well (browsers
     /// always send one on a WebSocket upgrade).
+    ///
+    /// `?source=` names the page's own note (its `markdown_source`), so frames
+    /// about it can carry its current fingerprint: see
+    /// [`crate::live_reload`].
     pub async fn websocket_handler(
         ws: WebSocketUpgrade,
         State(config): State<ServerState>,
+        extract::Query(params): extract::Query<crate::live_reload::LiveReloadParams>,
         headers: HeaderMap,
     ) -> Response {
         if !headers.contains_key(header::ORIGIN) || !Self::is_same_origin(&headers) {
@@ -3428,12 +3453,21 @@ impl Server {
             )
                 .into_response();
         }
-        ws.on_upgrade(|socket| Self::handle_websocket(socket, config))
+        ws.on_upgrade(|socket| Self::handle_websocket(socket, config, params))
             .into_response()
     }
 
-    async fn handle_websocket(socket: axum::extract::ws::WebSocket, config: ServerState) {
+    async fn handle_websocket(
+        socket: axum::extract::ws::WebSocket,
+        config: ServerState,
+        params: crate::live_reload::LiveReloadParams,
+    ) {
         let (mut sender, mut receiver) = socket.split();
+        let scope = crate::live_reload::LiveReloadScope::new(
+            params,
+            Arc::clone(config.repo.vault()),
+            config.template_folder.as_deref(),
+        );
 
         // If file watcher is not initialized, close the connection
         let Some(file_change_tx) = config.file_change_tx else {
@@ -3480,7 +3514,7 @@ impl Server {
                         LiveReloadAction::Close => break,
                     };
 
-                    let json = match serde_json::to_string(&change_event) {
+                    let json = match scope.frame(&change_event).await {
                         Ok(j) => j,
                         Err(e) => {
                             tracing::error!("Failed to serialize change event: {}", e);
@@ -8077,6 +8111,15 @@ impl Server {
             "edit_enabled".to_string(),
             serde_json::Value::Bool(edit_enabled),
         );
+        // Where the note is on disk, for the info panel's File row — GUI only:
+        // a served page must never tell its readers the host's filesystem
+        // layout. `md_path` is the index key, i.e. under the canonical root.
+        if config.gui_mode {
+            extra_context.insert(
+                "file_location".to_string(),
+                file_location_json(md_path, REVEAL_IN_FILE_MANAGER),
+            );
+        }
         if contact.is_some() {
             let relationships = if config.relationship_tracking {
                 config.repo.relationship_index.get(&current_url)
