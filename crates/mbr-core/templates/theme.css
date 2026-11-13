@@ -3706,6 +3706,7 @@ main li.mbr-agenda-next {
   min-height: 45vh;
   padding: 1em;
   background-color: var(--pico-primary-background);
+  --r-heading-color: var(--pico-color);
 }
 
 .kanban h1,
