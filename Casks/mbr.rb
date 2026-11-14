@@ -1,6 +1,6 @@
 cask "mbr" do
-  version "0.7.2"
-  sha256 "1816724409125b677a19329d3cc28837b1e8764652ec3f2fff1b04a5250fa584"
+  version "0.7.3"
+  sha256 "8a2887f61d6ecee69db19a2b62bb806c71f5daea5b3489c0289fef66b6c6a777"
 
   url "https://github.com/zmre/mbr-markdown-browser/releases/download/v#{version}/mbr-macos-arm64.dmg"
   name "MBR"
