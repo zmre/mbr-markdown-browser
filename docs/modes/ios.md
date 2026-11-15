@@ -123,7 +123,11 @@ something opens them. MBR handles this:
 
 - **A note that is not downloaded yet** shows a "Downloading from iCloud…" page
   with the note's name. MBR asks for the file and the page appears by itself
-  when it arrives.
+  when it arrives, with everything its frontmatter adds: title, tags, the
+  contact card's relationships and the relationship charts.
+- **Other notes that are not downloaded** are known by file name only until
+  they are opened (or the vault is kept downloaded), so a chart may show a
+  relative's name without their own relatives yet.
 - **Offline**, that page says so ("You're offline") and the note downloads once
   you are back online.
 - **A folder that has never been opened on this device** may list only some of

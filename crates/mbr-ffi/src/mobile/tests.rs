@@ -510,6 +510,65 @@ fn not_downloaded_mbr_files_are_requested_at_open_and_picked_up_by_refresh() {
     assert!(get(&app, "/.mbr/user.css").text().contains("papayawhip"));
 }
 
+/// Regression (iOS, vault in iCloud Drive): a note the provider had not
+/// downloaded when the vault was scanned was indexed by name alone, and
+/// opening it (which downloads it) did not tell the index. Its page then had
+/// no relationship rows on the contact card, and `site.json` — which the
+/// relationship charts read — had no relationships for it, so a person or
+/// organization page drew no chart until the next refresh. The page render
+/// indexes a note that arrived since the scan before rendering it.
+#[test]
+fn a_note_downloaded_since_the_scan_is_indexed_when_its_page_is_rendered() {
+    if !cfg!(target_vendor = "apple") {
+        return; // placeholders are only mapped on Apple platforms
+    }
+    const ALICE: &str = "---\ntype: person\ntitle: Alice\nrelationships:\n  - type: parent\n    to: \"[[Carol]]\"\n---\nAlice.\n";
+    let dir = vault();
+    std::fs::write(
+        dir.path().join("Carol.md"),
+        "---\ntype: person\n---\nCarol.\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".Alice.md.icloud"), "plist").unwrap();
+    let (app, _coordinator) = open_coordinated(dir.path());
+    block_on(app.wait_until_ready()).unwrap();
+    let alice = |app: &MbrApp| -> serde_json::Value {
+        let site: serde_json::Value =
+            serde_json::from_slice(&get(app, "/.mbr/site.json").body).unwrap();
+        site["markdown_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["url_path"] == "/Alice/")
+            .cloned()
+            .expect("Alice is listed")
+    };
+    assert_eq!(alice(&app)["frontmatter"]["type"], serde_json::Value::Null);
+
+    // The provider delivers the note the reader opened.
+    std::fs::remove_file(dir.path().join(".Alice.md.icloud")).unwrap();
+    std::fs::write(dir.path().join("Alice.md"), ALICE).unwrap();
+    let page = navigate(&app, "/Alice/");
+    assert_eq!(page.status, 200);
+    assert!(page.text().contains("<mbr-genealogy>"));
+    assert!(
+        page.text().contains("data-predicate=\"parent\""),
+        "the contact card lists the relationship"
+    );
+
+    let indexed = alice(&app);
+    assert_eq!(indexed["frontmatter"]["type"], "person");
+    let relationships = indexed["relationships"].as_array().expect("relationships");
+    assert!(
+        relationships
+            .iter()
+            .any(|r| r["neighbor"] == "/Carol/" && r["resolved"] == true),
+        "{relationships:?}"
+    );
+    // Applied once: the next refresh has nothing left to report for it.
+    assert!(refresh(&app).changed_pages.is_empty());
+}
+
 // ---- the index cache and refresh ---------------------------------------------
 
 fn open_cached(dir: &Path, cache: &Path) -> Arc<MbrApp> {

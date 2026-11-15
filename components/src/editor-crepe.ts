@@ -17,7 +17,18 @@ import { editorViewCtx, remarkCtx, schemaCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx';
-import { documentToSave, frontmatterRewrites, openDocument, withAuthoredBlankLines } from './editor-frontmatter.js';
+import { remarkPreserveEmptyLinePlugin } from '@milkdown/kit/preset/commonmark';
+import {
+  documentToSave,
+  frontmatterRewrites,
+  openDocument,
+  toLf,
+  withAuthoredBlankLines,
+  withLineEnding,
+  type OpenedDocument,
+} from './editor-frontmatter.js';
+import { createSourceEditor, type SourceEditor } from './editor-source.js';
+import { preferredEditorMode, rememberEditorMode, type EditorMode } from './editor-mode-pref.js';
 import { PICKER_CSS, createNestedModal } from './editor-picker-shared.js';
 import { FM_CHANGE_EVENT } from './frontmatter/properties-form.js';
 import { openFrontmatter } from './frontmatter/model.js';
@@ -62,7 +73,9 @@ import { NOTE_DOWNLOADING_MESSAGE } from './stale-note.js';
 import {
   ICON_SM,
   iconElement,
+  iconCode,
   iconEllipsis,
+  iconFileText,
   iconFolderInput,
   iconFootnote,
   iconImage,
@@ -195,8 +208,21 @@ export const MARKDOWN_EXTENSION_PLUGINS: readonly (MilkdownPlugin | MilkdownPlug
   minimalEscapesPlugin,
 ];
 
-/** Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`. */
+/**
+ * Installs {@link MARKDOWN_EXTENSION_PLUGINS} on `crepe`, before `create()`,
+ * and takes out Milkdown's `remarkPreserveEmptyLine`.
+ *
+ * That plugin is half of a pair: Milkdown prints an empty paragraph as a
+ * `<br />` placeholder, and the plugin folds a lone `<br />` back into one on
+ * load. The editor must never write HTML the author did not type, so an empty
+ * paragraph prints as nothing (`authored-style.ts`, `paragraphContent`) — and
+ * then a `<br />` on load can only be one the author wrote, which must stay
+ * HTML: folded, it was rewritten as `<br />`, or dropped outright in a table
+ * cell. Without the plugin installed the paragraph's placeholder is off too
+ * (Milkdown checks for the plugin before writing one).
+ */
 export function useMarkdownExtensions(crepe: Crepe): void {
+  void crepe.editor.remove(remarkPreserveEmptyLinePlugin);
   for (const plugin of MARKDOWN_EXTENSION_PLUGINS) crepe.editor.use(plugin);
 }
 
@@ -410,6 +436,19 @@ const MODAL_CSS = `
 }
 .mbr-editor-modal .mbr-editor-token.show { display: inline-block; }
 .mbr-editor-loading { padding: 2rem; text-align: center; opacity: 0.7; }
+/* Mode switching hides whole regions and bar buttons whose own rules set a display. */
+.mbr-editor-modal [hidden] { display: none !important; }
+/* Source mode: the file in CodeMirror, as tall as the rich document, the text
+   at a readable measure on a wide screen. It grows with its text inside the
+   body scroller (no scroller of its own). */
+.mbr-editor-source { flex: 1 0 auto; display: flex; flex-direction: column; }
+.mbr-editor-source .cm-editor { flex: 1 0 auto; min-height: min(36rem, 70vh); min-height: min(36rem, 70svh); font-size: 0.95rem; }
+@media (min-width: 601px) {
+  .mbr-editor-source .cm-scroller { padding: 0 max(0px, calc((100% - 56rem) / 2)); }
+}
+.mbr-editor-modal .mbr-editor-tool[aria-pressed="true"] {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
 `;
 
 /**
@@ -438,6 +477,9 @@ export const NARROW_CSS = `
   .mbr-editor-footer .status:empty { display: none; }
   .mbr-editor-modal .mbr-editor-token { min-width: 0; flex: 1 1 100%; font-size: 16px; }
   .mbr-editor-fm summary { min-height: 44px; display: flex; align-items: center; }
+  /* 16px stops iOS zooming the page when the source gets focus. */
+  .mbr-editor-source .cm-editor { font-size: 16px; }
+  .mbr-editor-source .cm-line { padding: 0 14px; }
   .mbr-picker-field input[type="text"], .mbr-picker-field textarea { font-size: 16px; }
   /* A card at a fixed distance below the top inset (the native bar in the
    * app, the notch in a browser), never a bottom sheet: the list shrinks as
@@ -666,6 +708,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     if (crepe) {
       try { crepe.destroy(); } catch { /* ignore */ }
     }
+    destroySource();
     document.removeEventListener('keydown', onKeydown);
     closeMenu();
     backdrop.remove();
@@ -675,6 +718,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // Replaced once the editor is up (it needs the dirty check and the save).
   // Before that there is nothing to lose, so closing is immediate.
   let requestClose: () => Promise<void> = async () => close();
+  // Bound once the bars and both editors exist.
+  let switchMode: (next: EditorMode) => Promise<void> = async () => {};
+  let destroySource: () => void = () => {};
   let saveFromShortcut: () => void = () => {};
 
   const onKeydown = (e: KeyboardEvent) => {
@@ -760,9 +806,13 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   }
 
   // The editor works in LF; a CRLF file is saved back as CRLF (`currentContent`).
-  // `bodyLineOffset`: lines before the body, so body lines can be shown as file lines.
-  const opened = openDocument(raw);
-  const { frontmatter, body, bodyLineOffset } = opened;
+  // Reopened from the source text when source mode hands back to the rich editor.
+  let opened = openDocument(raw);
+  // The file as it is on disk: as loaded, then as last saved.
+  let diskText = raw;
+  // Rich (Crepe + the properties editor) or source (the whole file in CodeMirror).
+  let mode: EditorMode = preferredEditorMode();
+  let source: SourceEditor | null = null;
   loading.remove();
 
   // Build modal chrome: Cancel | title | ⋯ Save, as a native editing sheet.
@@ -813,7 +863,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     });
     return item;
   };
+  // Labelled for the mode it switches to (`applyModeChrome`).
+  const modeMenuItem = menuItem('', '', () => void switchMode(mode === 'source' ? 'rich' : 'source'), iconCode);
   const menuItems = [
+    modeMenuItem,
     menuItem('New note…', 'Create a new markdown file', () => void handleNew(), iconSquarePen),
     menuItem('Rename…', 'Rename this file', () => void handleMove('basename'), iconTextCursorInput),
     menuItem('Move…', 'Move this file to another folder', () => void handleMove('folder'), iconFolderInput),
@@ -875,11 +928,15 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // property is edited, and then changed only where it was edited.
   const fmDetails = document.createElement('details');
   fmDetails.className = 'mbr-editor-fm';
-  if (frontmatter) fmDetails.open = true;
   const fmSummary = document.createElement('summary');
-  fmSummary.textContent = frontmatter ? 'Properties' : 'Add properties';
   const fmEditor = document.createElement('mbr-fm-editor');
-  fmEditor.model = openFrontmatter(frontmatter ?? '');
+  /** Opens the properties editor on `doc`'s frontmatter (at open, and when source mode hands back). */
+  const loadProperties = (doc: OpenedDocument): void => {
+    fmDetails.open = doc.frontmatter !== null;
+    fmSummary.textContent = doc.frontmatter ? 'Properties' : 'Add properties';
+    fmEditor.model = openFrontmatter(doc.frontmatter ?? '');
+  };
+  loadProperties(opened);
   fmEditor.catalog = builtinCatalog({ tagSources: opts.tagSources });
   fmEditor.widgets = MBR_WIDGETS;
   fmEditor.actorMemory = PAGE_ACTOR_MEMORY;
@@ -909,6 +966,10 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   const crepeHost = document.createElement('div');
   crepeHost.className = 'mbr-editor-crepe';
   bodyWrap.appendChild(crepeHost);
+  // Source mode: the whole file, frontmatter included, in place of both.
+  const sourceHost = document.createElement('div');
+  sourceHost.className = 'mbr-editor-source';
+  bodyWrap.appendChild(sourceHost);
   modal.appendChild(bodyWrap);
 
   // Footer: the format bar, status and the token field.
@@ -955,9 +1016,12 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   mediaBtn.title = 'Insert a media embed — double-click an existing embed to edit';
   mediaBtn.setAttribute('aria-label', 'Insert media');
   mediaBtn.addEventListener('click', () => void handleMedia());
+  // Rich editor ⇄ markdown source. A toggle: pressed while the source is shown.
+  const modeBtn = toolButton(iconMarkup(iconCode), 'Markdown', 'mbr-editor-mode');
+  modeBtn.addEventListener('click', () => void switchMode(mode === 'source' ? 'rich' : 'source'));
   const tools = document.createElement('div');
   tools.className = 'mbr-editor-tools';
-  tools.append(footnoteBtn, mediaBtn);
+  tools.append(modeBtn, footnoteBtn, mediaBtn);
   footer.append(tools, status, tokenInput);
   modal.appendChild(footer);
 
@@ -971,13 +1035,18 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
    * which lines the editor would spell differently (kept unless edited) and
    * which any save rewrites. Dismissible; nothing else depends on it.
    */
+  let notice: HTMLElement | null = null;
   const showRoundTripNotice = (saverInfo: BodySaver): void => {
+    notice?.remove();
+    notice = null;
+    const { bodyLineOffset } = opened;
     const { ifEdited, onSave } = saverInfo.rewritten;
     const fmRewrites = frontmatterRewrites(opened);
     if (ifEdited.length === 0 && onSave.length === 0 && fmRewrites.length === 0) return;
-    const notice = document.createElement('div');
-    notice.className = 'mbr-editor-notice';
-    notice.setAttribute('role', 'note');
+    const box = document.createElement('div');
+    notice = box;
+    box.className = 'mbr-editor-notice';
+    box.setAttribute('role', 'note');
     const text = document.createElement('p');
     const parts: string[] = [];
     if (ifEdited.length > 0) {
@@ -999,9 +1068,9 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
     dismiss.className = 'mbr-editor-notice-dismiss';
     dismiss.append(iconElement(iconX, { size: ICON_SM }));
     dismiss.setAttribute('aria-label', 'Dismiss');
-    dismiss.addEventListener('click', () => notice.remove());
-    notice.append(text, dismiss);
-    bodyWrap.prepend(notice);
+    dismiss.addEventListener('click', () => box.remove());
+    box.append(text, dismiss);
+    bodyWrap.prepend(box);
   };
 
   // Reflects context on the media button: when an embed is the current target
@@ -1017,11 +1086,15 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       : 'Insert a media embed — double-click an existing embed to edit';
   };
 
-  // Instantiate Crepe (see CREPE_FEATURES for why CodeMirror/LaTeX are off).
-  try {
+  // What a save writes in the rich editor: unedited blocks as loaded (the
+  // safety net, `editor-minimal-diff.ts`), captured before any edit.
+  let saver: BodySaver | null = null;
+
+  /** Crepe on `doc`'s body (see CREPE_FEATURES for why CodeMirror/LaTeX are off). Throws when Crepe does. */
+  const mountRich = async (doc: OpenedDocument): Promise<void> => {
     crepe = new Crepe({
       root: crepeHost,
-      defaultValue: body,
+      defaultValue: doc.body,
       features: CREPE_FEATURES,
       // Route the ImageBlock uploader to our server endpoint. Crepe falls back
       // `inlineOnUpload ?? onUpload` and `blockOnUpload ?? onUpload`, and its
@@ -1062,19 +1135,55 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       }),
     );
     await crepe.create();
-  } catch (err) {
-    console.error('Crepe failed to initialize:', err);
-    setStatus(`Failed to start editor: ${(err as Error).message}`, 'error');
-    return;
-  }
+    saver = createBodySaver(crepe, doc.body);
+    showRoundTripNotice(saver);
+  };
+  const unmountRich = (): void => {
+    if (crepe) {
+      try { crepe.destroy(); } catch { /* ignore */ }
+    }
+    crepe = null;
+    saver = null;
+    crepeHost.replaceChildren();
+    notice?.remove();
+    notice = null;
+  };
+  /** The source editor on `text` (LF). */
+  const mountSource = (text: string): void => {
+    source = createSourceEditor({ parent: sourceHost, doc: text });
+  };
+  const unmountSource = (): void => {
+    source?.destroy();
+    source = null;
+    sourceHost.replaceChildren();
+  };
+  destroySource = unmountSource;
 
-  // What a save writes: unedited blocks as loaded (the safety net,
-  // `editor-minimal-diff.ts`). Captured before any edit.
-  const saver = createBodySaver(crepe, body);
-  showRoundTripNotice(saver);
+  /** Shows the chrome of the current mode: its editor, its tools, the toggle's state. */
+  const applyModeChrome = (): void => {
+    const inSource = mode === 'source';
+    modal.classList.toggle('mbr-editor-source-mode', inSource);
+    fmDetails.hidden = inSource;
+    crepeHost.hidden = inSource;
+    sourceHost.hidden = !inSource;
+    // Both act on the rich editor's document.
+    footnoteBtn.hidden = inSource;
+    mediaBtn.hidden = inSource;
+    modeBtn.setAttribute('aria-pressed', String(inSource));
+    modeBtn.title = inSource ? 'Back to the rich editor' : 'Edit the markdown source, frontmatter included';
+    const label = inSource ? 'Rich text' : 'Markdown source';
+    modeMenuItem.replaceChildren(iconElement(inSource ? iconFileText : iconCode, { size: ICON_SM }), label);
+    modeMenuItem.title = modeBtn.title;
+  };
+
   let wholeBody = false;
   const currentContent = (): string => {
-    if (!crepe) return savedContent;
+    // Source mode: the text as typed, in the file's own line ending — no printer in between.
+    if (mode === 'source') {
+      wholeBody = false;
+      return source ? withLineEnding(source.text, opened.lineEnding) : savedContent;
+    }
+    if (!crepe || !saver) return savedContent;
     const next = saver.body();
     wholeBody = next.whole;
     return documentToSave(opened, fmEditor.text, next.body);
@@ -1083,27 +1192,90 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
   // loaded file itself when the round trip is exact). A property edit still
   // being typed (an open "Edit as YAML", a tag without Enter, a rename) is
   // not in `fmEditor.text` yet, but it is unsaved.
-  const isDirty = (): boolean => ready && (fmEditor.hasPendingEdits || currentContent() !== savedContent);
+  const isDirty = (): boolean =>
+    ready && ((mode === 'rich' && fmEditor.hasPendingEdits) || currentContent() !== savedContent);
   /** Puts those pending property edits into the text a save writes; false (and why, on the status line) when one is invalid. */
   const flushProperties = (): boolean => {
+    if (mode === 'source') return true;
     const problem = fmEditor.flushPending();
     if (problem === null) return true;
     fmDetails.open = true;
     setStatus(problem, 'error');
     return false;
   };
+
+  /**
+   * Switches between the rich editor and the source, carrying unsaved edits
+   * across: the source starts from the text a save would write (the file as
+   * on disk when nothing is unsaved), and the rich editor and the properties
+   * editor are reopened on the source text. With nothing unsaved the new mode
+   * takes its own printing as the baseline, as opening the editor does, so a
+   * switch alone never makes the note dirty.
+   */
+  let switching = false;
+  switchMode = async (next: EditorMode): Promise<void> => {
+    if (next === mode || switching || !ready || saveBtn.hasAttribute('aria-busy')) return;
+    if (!flushProperties()) return;
+    switching = true;
+    const clean = !isDirty();
+    const text = toLf(clean ? diskText : currentContent());
+    try {
+      if (next === 'source') {
+        unmountRich();
+        mode = 'source';
+        applyModeChrome();
+        mountSource(text);
+      } else {
+        unmountSource();
+        opened = openDocument(withLineEnding(text, opened.lineEnding));
+        loadProperties(opened);
+        mode = 'rich';
+        applyModeChrome();
+        try {
+          await mountRich(opened);
+        } catch (err) {
+          // Keep the text: back to the source, which cannot fail to load.
+          console.error('Crepe failed to initialize:', err);
+          unmountRich();
+          mode = 'source';
+          applyModeChrome();
+          mountSource(text);
+          setStatus(`Could not open the rich editor: ${(err as Error).message}`, 'error');
+          return;
+        }
+      }
+      if (clean) savedContent = currentContent();
+      rememberEditorMode(next);
+      setStatus('');
+    } finally {
+      switching = false;
+    }
+  };
+
+  applyModeChrome();
+  if (mode === 'source') {
+    mountSource(toLf(raw));
+  } else {
+    try {
+      await mountRich(opened);
+    } catch (err) {
+      console.error('Crepe failed to initialize:', err);
+      setStatus(`Failed to start editor: ${(err as Error).message}`, 'error');
+      return;
+    }
+  }
   savedContent = currentContent();
   ready = true;
 
   const doSave = async (): Promise<boolean> => {
-    if (!crepe || !ready || !flushProperties()) return false;
+    if (!ready || !flushProperties()) return false;
     // Belt and braces alongside the `input` listener: a value set some way that
     // fires no input event still reaches the request and the main bundle.
     sessionToken = tokenInput.value.trim();
     opts.onToken?.(sessionToken);
     const content = currentContent();
-    if (wholeBody && saver.rewritten.onSave.length + saver.rewritten.ifEdited.length > 0) {
-      const lines = formatLineRanges([...saver.rewritten.onSave, ...saver.rewritten.ifEdited], bodyLineOffset);
+    if (wholeBody && saver && saver.rewritten.onSave.length + saver.rewritten.ifEdited.length > 0) {
+      const lines = formatLineRanges([...saver.rewritten.onSave, ...saver.rewritten.ifEdited], opened.bodyLineOffset);
       const proceed = window.confirm(
         `This save rewrites the whole note in the editor's markdown, which also changes lines you did not edit: ${lines}. Save anyway?`,
       );
@@ -1125,6 +1297,7 @@ export async function openEditor(opts: OpenEditorOptions): Promise<void> {
       if (resp.ok) {
         baseHash = resp.headers.get('X-MBR-Content-Hash') ?? baseHash;
         savedContent = content;
+        diskText = content;
         setStatus('Saved. The page will reload.', 'ok');
         return true;
       }

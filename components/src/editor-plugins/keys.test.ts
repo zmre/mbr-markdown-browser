@@ -34,9 +34,9 @@ describe('Enter, every plugin installed', () => {
   });
 
   it('at the start of a task item inserts the open task above and keeps the status', async () => {
-    // `<br />` is how Milkdown prints any empty paragraph.
+    // The new item is empty: its box alone, never Milkdown's `<br />` placeholder.
     expect(await afterKey('* [-] cancelled\n', 'cancelled', 0, 'Enter', 'new')).toBe(
-      '* [ ] <br />\n* [-] newcancelled\n',
+      '* [ ]\n* [-] newcancelled\n',
     );
   });
 

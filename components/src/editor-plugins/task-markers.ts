@@ -263,6 +263,8 @@ function listItemWithTaskMarker(node: TaskListItem, parent: Parents | undefined,
   const tracker = state.createTracker(info);
   if (checkable) tracker.move(checkbox);
   const value = printListItem(node, parent, state, { ...info, ...tracker.current() });
+  // An empty task (Enter at the start of one): its box alone, which is still a task.
+  if (marker !== undefined && !node.children?.length && !wasPrintedAsTyped(node)) return `${value.trimEnd()} [${marker}]`;
   // GFM's pattern only knows `1.`; `1)` items are tasks too. An item printed as typed has its box.
   return checkable && !wasPrintedAsTyped(node) ? value.replace(/^(?:[*+-]|\d+[.)])(?:[\r\n]| {1,3})/, (bullet) => bullet + checkbox) : value;
 }

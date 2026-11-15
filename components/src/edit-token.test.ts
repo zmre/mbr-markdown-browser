@@ -394,6 +394,9 @@ describe('durable web storage across the whole frontend', () => {
     //   calendar/companion-pref.ts — one UI preference flag: the reader
     //     dismissed the docked daily-note companion. Nothing from the page,
     //     nothing secret, scoped by repo id; `_head.html` reads it before paint.
+    //   editor-mode-pref.ts  — one UI preference word: the reader last chose the
+    //     editor's markdown source mode over the rich editor. Nothing from the
+    //     page or the note, nothing secret.
     //   mbr-browse.ts        — recently viewed pages and pinned shortcuts (URLs)
     //   mbr-video-extras.ts  — playback position per video, in seconds
     //   genealogy/selector.ts — which genealogy chart the reader last picked
@@ -412,6 +415,7 @@ describe('durable web storage across the whole frontend', () => {
     // of the review feature that does.
     expect(modulesUsing('localStorage')).toEqual([
       'calendar/companion-pref.ts',
+      'editor-mode-pref.ts',
       'genealogy/selector.ts',
       'mbr-browse.ts',
       'mbr-video-extras.ts',

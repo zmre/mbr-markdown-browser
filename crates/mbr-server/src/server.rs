@@ -2137,6 +2137,10 @@ pub struct ServerState {
     /// Serializes read-patch-write cycles on one file across the in-place
     /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
     pub file_write_locks: Arc<FileWriteLocks>,
+    /// Applies index changes; a page render uses it to index a note that
+    /// arrived from a file provider since the scan (see
+    /// [`Server::index_note_if_arrived`]).
+    changes: ChangeApplier,
 }
 
 /// JSON body for `POST /.mbr/edit/{*path}`.
@@ -3218,6 +3222,7 @@ impl Server {
             edit_token_hash,
             upload_max_bytes,
             config_problem,
+            changes: change_applier.clone(),
         };
 
         let router = Router::new()
@@ -7883,11 +7888,41 @@ impl Server {
             .map(|d| d.as_secs())
     }
 
+    /// Indexes the note about to be rendered when the index recorded it as not
+    /// downloaded and its bytes have arrived ([`Repo::diff_arrived`]), so the
+    /// page and the `site.json` its scripts read next carry its frontmatter:
+    /// its relationships (the contact card's rows and the relationship
+    /// charts, which render nothing for a note with none), title, type and
+    /// tags. Without it a note that was in the cloud at scan time — most of an
+    /// iCloud vault on iOS — was indexed by name alone until the app's next
+    /// refresh. A no-op without change tracking (the desktop: one branch).
+    async fn index_note_if_arrived(md_path: &Path, config: &ServerState) {
+        if !config.repo.tracks_changes() {
+            return;
+        }
+        let repo = Arc::clone(&config.repo);
+        let key = md_path.to_path_buf();
+        let diff = tokio::task::spawn_blocking(move || repo.diff_arrived(&key))
+            .await
+            .unwrap_or_default();
+        if diff.is_empty() {
+            return;
+        }
+        tracing::debug!("indexing {} (downloaded since the scan)", md_path.display());
+        let root = config.repo.vault().root().to_path_buf();
+        config
+            .changes
+            .apply(diff.events(&root), ChangeSource::Diff)
+            .await;
+        config.repo.record_file_stamps(&diff);
+    }
+
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
         edit_enabled: bool,
     ) -> Result<Response<Body>, MbrError> {
+        Self::index_note_if_arrived(md_path, config).await;
         let root_path = config.base_dir.as_path();
 
         // Determine if this is an index file (which doesn't need ../ prefix for links)

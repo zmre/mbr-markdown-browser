@@ -157,8 +157,7 @@ export const definitionDescriptionSchema = $nodeSchema('definition_description',
         ...styleProps(node),
       });
       // An empty `:` parses to a definition holding one empty paragraph
-      // (the schema needs a block); print it as the bare `:` it came from
-      // rather than the paragraph's `<br />` placeholder.
+      // (the schema needs a block); print it as the bare `:` it came from.
       if (!isEmptyDefinition(node)) state.next(node.content);
       state.closeNode();
     },
@@ -169,21 +168,17 @@ export const definitionDescriptionSchema = $nodeSchema('definition_description',
  * A list item whose first block is a definition list (`- Term\n  : def`, a
  * card nested in a list) cannot exist in Milkdown: its `list_item` must start
  * with a paragraph, so parsing fills one in, empty — which would print as a
- * `<br />` line above the term. When the list is about to be written as the
+ * blank line above the term. When the list is about to be written as the
  * item's second child and the first is that empty filler, drop the filler.
- * (A literal `<br />` line there folds into the same empty paragraph on load,
- * so the two are indistinguishable; the filler is by far the likelier.)
+ * (An empty paragraph prints as nothing anyway — `authored-style.ts`,
+ * `paragraphContent` — so this is a guard; a `<br />` the author wrote there
+ * is HTML, not a filler, and stays.)
  */
 function dropListItemFiller(state: SerializerState): void {
   const parent = state.top();
   if (parent?.type !== 'listItem' || parent.children?.length !== 1) return;
-  const only = parent.children[0] as { type: string; children?: { type: string; value?: unknown }[] };
-  const inline = only.children ?? [];
-  const isFiller =
-    only.type === 'paragraph' &&
-    (inline.length === 0 ||
-      (inline.length === 1 && inline[0].type === 'html' && /^<br\s*\/?>$/i.test(String(inline[0].value))));
-  if (isFiller) parent.pop();
+  const only = parent.children[0] as { type: string; children?: unknown[] };
+  if (only.type === 'paragraph' && (only.children ?? []).length === 0) parent.pop();
 }
 
 /** A paragraph's inline content, minus a trailing hard break (Milkdown's `serializeText`). */

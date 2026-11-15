@@ -76,12 +76,32 @@ included. For remote access, see [Remote editing](#remote-editing).
 
 The editor is laid out like a native editing sheet at every width: **Cancel**
 on the left, the note's name (with its folder underneath) in the middle, and a
-**⋯** menu plus **Save** on the right. The ⋯ menu holds the file actions —
-**New note…**, **Rename…** and **Move…** (see
+**⋯** menu plus **Save** on the right. The ⋯ menu holds **Markdown source**
+(see [Editing the markdown source](#editing-the-markdown-source)) and the file
+actions — **New note…**, **Rename…** and **Move…** (see
 [below](#creating--renaming--and-moving-files)). The bar along the bottom holds
-the formatting tools that are not in Crepe's own menus: **Footnote** and
-**Media**. On a phone the editor fills the screen, and the path pickers open as
+the **Markdown** toggle and the formatting tools that are not in Crepe's own
+menus: **Footnote** and **Media**. On a phone the editor fills the screen, and the path pickers open as
 sheets from the bottom.
+
+### Editing the markdown source
+
+The **Markdown** button in the bottom bar (or **⋯ → Markdown source**) swaps
+the rich editor for the note's plain text — the whole file, frontmatter
+included — with markdown highlighting and soft-wrapped lines. Press it again
+(or **⋯ → Rich text**) to go back.
+
+- **A save writes exactly what you typed.** Nothing re-prints the markdown in
+  this mode; only the file's own line ending is kept (a CRLF file stays CRLF).
+- **Unsaved edits come with you** both ways: the source starts from what a save
+  would write, and going back reopens the rich editor and the Properties form
+  on the text as you left it.
+- Save, `Cmd+S` / `Ctrl+S`, Cancel/`Esc` (with the unsaved-changes question)
+  and the edit token work the same in both modes.
+- **Your choice is remembered** on this device: once you switch to the source,
+  the editor opens in it next time, until you switch back.
+
+On a phone the text is 16px, so focusing it does not zoom the page.
 
 ### mbr syntax in the editor
 
@@ -154,6 +174,15 @@ line), and the end of the note (no final line break, or blank lines after the
 last line).
 
 ### What a save writes
+
+The editor never adds HTML to a note. A blank line you make with Enter — the
+usual way to leave a gap on a phone — is saved as a blank line between blocks,
+not as a `<br />`; Shift+Enter (a line break inside a paragraph) is saved as a
+markdown hard break, written with two trailing spaces when the note already
+breaks lines that way and with `\` otherwise; and spaces typed at the start
+of a line are dropped rather than saved as `&#x20;`. HTML you wrote yourself —
+a `<br>` on its own line, inside a paragraph, a list or a table cell — is
+kept as you wrote it.
 
 A save rewrites only the blocks you changed. Every other top-level block —
 paragraph, list, table, code block, definition list — is written back exactly
