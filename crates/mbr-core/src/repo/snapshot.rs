@@ -477,6 +477,13 @@ impl Repo {
                 folders.insert(key.clone());
             }
         }
+        self.record_file_stamps(diff);
+    }
+
+    /// The stamps half of [`Self::record_diff`]: the file stamps a diff found,
+    /// leaving the not-downloaded folders alone (a one-file diff from
+    /// [`Self::diff_arrived`] listed no folder).
+    pub fn record_file_stamps(&self, diff: &RepoDiff) {
         let Some(stamps) = &self.stamps else {
             return;
         };
@@ -487,6 +494,46 @@ impl Repo {
         for key in &diff.deleted {
             stamps.remove(key);
         }
+    }
+
+    /// A one-file [`Self::diff_vault`] for a note that is being read: when the
+    /// index recorded `key` as not downloaded and its bytes are here now, the
+    /// diff reports it `modified`, so applying it reads the frontmatter the
+    /// scan could not (type, title, relationships). Empty in every other case
+    /// — without change tracking (the desktop: one branch, no I/O), for a file
+    /// the index has as downloaded, or one still in the cloud.
+    ///
+    /// Why: a file provider (iCloud Drive on iOS) keeps most notes dataless
+    /// until something opens one, so the scan indexes them by name alone.
+    /// Opening a note downloads it, but nothing told the index until the next
+    /// [`Self::diff_vault`] (a foreground or a Refresh), so the page rendered
+    /// without its relationships and every page script read a `site.json`
+    /// that had none. Blocking (one `stat`).
+    pub fn diff_arrived(&self, key: &Path) -> RepoDiff {
+        let mut diff = RepoDiff::default();
+        let Some(stamps) = &self.stamps else {
+            return diff;
+        };
+        let was_not_downloaded = stamps
+            .pin()
+            .get(key)
+            .is_some_and(|stamp| stamp.not_downloaded);
+        if !was_not_downloaded {
+            return diff;
+        }
+        let Some((vault, path)) = self.locate(key) else {
+            return diff;
+        };
+        let Ok(Some(entry)) = vault.stat(&path) else {
+            return diff;
+        };
+        let stamp = FileStamp::of(&entry);
+        if stamp.not_downloaded {
+            return diff;
+        }
+        diff.modified.push(key.to_path_buf());
+        diff.stamps.push((key.to_path_buf(), stamp));
+        diff
     }
 
     /// Every file of `vault` the scan would index, by the scan's own rules:
@@ -778,6 +825,53 @@ mod tests {
             .cloned()
             .unwrap();
         assert!(info.frontmatter.is_some());
+    }
+
+    #[test]
+    fn diff_arrived_reports_only_a_note_downloaded_since_it_was_listed() {
+        let vault = vault();
+        vault.set_availability("docs/b.md", Availability::NotDownloaded);
+        let repo = scanned(Arc::clone(&vault));
+        let root = vault.root().to_path_buf();
+        let b = root.join("docs/b.md");
+
+        // Still in the cloud, or indexed with its contents: nothing to do.
+        assert!(repo.diff_arrived(&b).is_empty());
+        assert!(repo.diff_arrived(&root.join("a.md")).is_empty());
+        assert!(repo.diff_arrived(&root.join("missing.md")).is_empty());
+
+        vault.set_availability("docs/b.md", Availability::Local);
+        let diff = repo.diff_arrived(&b);
+        assert_eq!(keys(&diff.modified, &root), ["docs/b.md"]);
+        assert!(diff.created.is_empty() && diff.deleted.is_empty());
+
+        // Recorded once applied: neither it nor the next full diff repeats it,
+        // and the not-downloaded folder count is left alone.
+        repo.record_file_stamps(&diff);
+        assert!(repo.diff_arrived(&b).is_empty());
+        assert!(repo.diff_vault().is_empty());
+    }
+
+    #[test]
+    fn diff_arrived_is_a_no_op_without_change_tracking() {
+        let vault = vault();
+        vault.set_availability("docs/b.md", Availability::NotDownloaded);
+        let repo = Repo::init_with_vault(
+            Arc::clone(&vault) as Arc<dyn Vault>,
+            "static",
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+            &[],
+            &[],
+        );
+        repo.scan_all().unwrap();
+        vault.set_availability("docs/b.md", Availability::Local);
+        assert!(
+            repo.diff_arrived(&vault.root().join("docs/b.md"))
+                .is_empty()
+        );
     }
 
     #[test]

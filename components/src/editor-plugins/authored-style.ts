@@ -48,7 +48,7 @@ import {
   type State,
 } from 'mdast-util-to-markdown';
 import type { Blockquote, Break, Code, Heading, List, ListItem, Parents, RootContent, Table, TableRow, ThematicBreak } from 'mdast';
-import type { Node as ProseNode } from '@milkdown/kit/prose/model';
+import { Fragment, type Node as ProseNode } from '@milkdown/kit/prose/model';
 import type { NodeSchema, ParserState, SerializerState } from '@milkdown/kit/transformer';
 import type { $NodeSchema } from '@milkdown/kit/utils';
 import { $remark } from '@milkdown/kit/utils';
@@ -62,7 +62,7 @@ import {
   paragraphSchema,
 } from '@milkdown/kit/preset/commonmark';
 import { footnoteDefinitionSchema, tableSchema } from '@milkdown/kit/preset/gfm';
-import { minimizeBlockEscapes, sameBlockMeaning, samePhrasing } from './minimal-escapes.js';
+import { documentOf, minimizeBlockEscapes, sameBlockMeaning, samePhrasing } from './minimal-escapes.js';
 import { addRemarkExtensions, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
 
 // ============================================================================
@@ -163,7 +163,7 @@ export interface RuleStyle {
   trailing?: string;
 }
 
-/** The whitespace before a hard break's line ending (`'  '`); a `\` break has none. */
+/** The whitespace before a hard break's line ending (`'  '`); a `\` break has none (`''`). */
 export interface BreakStyle {
   spaces: string;
 }
@@ -203,8 +203,7 @@ export interface BlockSource {
 
 /**
  * A list item's spelling. `empty`: an item with nothing in it, and what
- * followed its marker on the line (`''`, `' '`) — printed as typed instead of
- * Milkdown's `<br />` placeholder. `indent`: the whitespace its lines after
+ * followed its marker on the line (`''`, `' '`) — printed as typed. `indent`: the whitespace its lines after
  * the first begin with, relative to the item's own marker line (a tab, four
  * spaces where two would do), so nested lists keep their indentation.
  */
@@ -619,7 +618,10 @@ export function ruleStyleFrom(source: string, rule: Positioned): RuleStyle | und
 }
 
 export function breakStyleFrom(source: string, hardBreak: Positioned): BreakStyle | undefined {
-  const spaces = /^([ \t]+)\r?\n/.exec(sliceOf(hardBreak, source) ?? '')?.[1];
+  const text = sliceOf(hardBreak, source) ?? '';
+  // A `\\` break is recorded too (no spaces), so a note's own breaks say which spelling it uses.
+  if (text.startsWith('\\')) return { spaces: '' };
+  const spaces = /^([ \t]+)\r?\n/.exec(text)?.[1];
   return spaces ? { spaces } : undefined;
 }
 
@@ -1148,22 +1150,15 @@ function authoredItemGapsHold(list: List): boolean {
   return loose === Boolean(list.spread);
 }
 
-/** Milkdown's stand-in for an empty paragraph (`remarkPreserveEmptyLine`). */
-const EMPTY_LINE_PLACEHOLDER = /^<br\s*\/?\s*>$/i;
-
 /**
  * Whether flow content is empty as far as the source goes: no blocks, or one
- * paragraph that is empty or only Milkdown's `<br />` placeholder (the editor
- * puts an empty paragraph in every container it loads empty).
+ * empty paragraph. (The editor puts an empty paragraph in every container it
+ * loads empty; it prints as nothing — `paragraphContent` — so this mostly sees
+ * none. A `<br />` there is the author's, `useMarkdownExtensions`.)
  */
 function isEmptyFlow(children: readonly RootContent[] | undefined): boolean {
   if (!children || children.length === 0) return true;
-  if (children.length !== 1 || children[0].type !== 'paragraph') return false;
-  const inline = children[0].children ?? [];
-  return (
-    inline.length === 0 ||
-    (inline.length === 1 && inline[0].type === 'html' && EMPTY_LINE_PLACEHOLDER.test(inline[0].value.trim()))
-  );
+  return children.length === 1 && children[0].type === 'paragraph' && (children[0].children ?? []).length === 0;
 }
 
 /**
@@ -1465,11 +1460,37 @@ function withAuthoredFence(value: string, fence: string | undefined, fenceChar: 
   return fence + inner + fence;
 }
 
+/**
+ * A hard break as typed — two spaces or `\\` — and a new one (Shift+Enter) as
+ * the note writes them: trailing spaces when every authored hard break in it
+ * uses them ({@link noteBreakSpaces}), else `\\`.
+ */
 const printBreak: Handle<Break> = (node, parent, state, info) => {
   const value = defaultHandlers.break(node, parent, state, info);
+  if (value !== '\\\n') return value;
   const style = styleOf<BreakStyle>(node);
-  return style && value === '\\\n' ? `${style.spaces}\n` : value;
+  const spaces = style ? style.spaces : noteBreakSpaces(documentOf(state));
+  return spaces ? `${spaces}\n` : value;
 };
+
+const breakSpacesByRoot = new WeakMap<MdNode, string>();
+
+/** The trailing whitespace every authored hard break in `root` ends with, or `''` (none, or some use `\\`). */
+function noteBreakSpaces(root: MdNode | undefined): string {
+  if (!root) return '';
+  let spaces = breakSpacesByRoot.get(root);
+  if (spaces !== undefined) return spaces;
+  const styles: BreakStyle[] = [];
+  const visit = (node: MdNode): void => {
+    const style = node.type === 'break' ? styleOf<BreakStyle>(node) : undefined;
+    if (style) styles.push(style);
+    node.children?.forEach(visit);
+  };
+  visit(root);
+  spaces = styles.length > 0 && styles.every((s) => s.spaces) ? styles[0].spaces : '';
+  breakSpacesByRoot.set(root, spaces);
+  return spaces;
+}
 
 /**
  * A blockquote: `> ` before each line, or `>` before a line that is itself a
@@ -1480,7 +1501,7 @@ export const printBlockquote: Handle<Blockquote> = (node, parent, state, info) =
   const style = styleOf<BlockquoteStyle>(node);
   const typed = quoteAsTyped(node, parent, style?.typed);
   if (typed !== undefined) return typed;
-  // An empty quote: as typed, not `> <br />` (Milkdown's empty paragraph).
+  // An empty quote: as typed (`>`).
   if (isEmptyFlow(node.children)) return `>${style?.empty ?? ''}`;
   const compact = Boolean(style?.compact);
   const exit = state.enter('blockquote');
@@ -1771,25 +1792,90 @@ export const remarkAuthoredStyle = $remark('mbrAuthoredStyle', () => function au
   };
 });
 
+/** Whether a ProseMirror node is a hard break that is not a link's text. */
+function isPlainHardBreak(node: ProseNode): boolean {
+  return node.type.name === 'hardbreak' && !node.marks.some((mark) => mark.type.name === 'link');
+}
+
 /**
- * Milkdown's paragraph drops a trailing hard break (the editor's Shift+Enter
- * at the end of a line), but one inside a link is the link's text —
- * `[a  ⏎](url)`, or a link that is only a break, which went with it.
+ * A paragraph's inline content as markdown can say it, or `null` when it says
+ * nothing at all. The editor must never write HTML the author did not type
+ * (`editor-no-html.test.ts`), and three things here would:
+ *
+ * - **An empty paragraph** — Enter on a blank line, the usual way to leave a
+ *   gap on a phone — which Milkdown prints as a `<br />` placeholder. With
+ *   `remarkPreserveEmptyLine` removed (`useMarkdownExtensions`) it would be an
+ *   empty line instead; it is dropped, so it contributes only the blank line
+ *   between its neighbours, which is all markdown can mean by it. Whitespace
+ *   and hard breaks alone are as empty.
+ * - **Whitespace at the start of a line** (of the paragraph, or after a hard
+ *   break), which a paragraph does not mean and remark writes as `&#x20;` /
+ *   `&#x9;` to keep. Dropped, unless it is code (`startsLine`: false for a
+ *   task item's paragraph, which follows its box). A reference the author
+ *   wrote is not whitespace here: it loads as its own node (`escapes.ts`).
+ * - **Hard breaks at the end** (Shift+Enter twice at the end of a line): a
+ *   trailing `\` reads as a literal backslash. Milkdown already dropped the
+ *   last one; every one goes. A hard break that is a link's text
+ *   (`[a  ⏎](url)`, or a link that is only a break) is the link's and stays.
  */
-const paragraphKeepingLinkedBreak = paragraphSchema.extendSchema((prev) => (ctx) => {
+export function paragraphContent(node: ProseNode, startsLine = true): Fragment | null {
+  const content = lineContent(node, startsLine);
+  return content.size === 0 ? null : content;
+}
+
+/** {@link paragraphContent} for any textblock, an empty one as an empty fragment. */
+function lineContent(node: ProseNode, startsLine = true): Fragment {
+  const kept: ProseNode[] = [];
+  let lineStart = startsLine;
+  node.content.forEach((child) => {
+    if (child.isText && lineStart && !child.marks.some((mark) => mark.type.name === 'inlineCode')) {
+      const text = (child.text ?? '').replace(/^[ \t]+/, '');
+      if (text) kept.push(text === child.text ? child : child.type.schema.text(text, child.marks));
+      lineStart = text === '';
+      return;
+    }
+    kept.push(child);
+    lineStart = child.type.name === 'hardbreak';
+  });
+  while (kept.length > 0) {
+    const last = kept[kept.length - 1];
+    if (isPlainHardBreak(last) || (last.isText && !last.marks.some((mark) => mark.type.name === 'inlineCode') && !last.text?.trim())) kept.pop();
+    else break;
+  }
+  return Fragment.fromArray(kept);
+}
+
+/** Milkdown's paragraph, printing {@link paragraphContent}: nothing for an empty one. */
+const paragraphWithoutAddedHtml = paragraphSchema.extendSchema((prev) => (ctx) => {
   const base: NodeSchema = prev(ctx);
   return {
     ...base,
     toMarkdown: {
       match: base.toMarkdown.match,
       runner: (state, node: ProseNode) => {
-        const last = node.lastChild;
-        if (last?.type.name !== 'hardbreak' || !last.marks.some((mark) => mark.type.name === 'link')) {
-          base.toMarkdown.runner(state, node);
-          return;
-        }
+        // A task item's first paragraph follows its box on the line (`- [ ]  x`).
+        const parent = state.top() as { type?: string; props?: { checked?: unknown }; children?: unknown[] } | undefined;
+        const afterBox = parent?.type === 'listItem' && parent.props?.checked != null && !parent.children?.length;
+        const content = paragraphContent(node, !afterBox);
+        if (content === null) return;
         state.openNode('paragraph');
-        state.next(node.content);
+        state.next(content);
+        state.closeNode();
+      },
+    },
+  };
+});
+
+/** Milkdown's heading, printing {@link lineContent}: `# x`, never `# &#x20;x`. */
+const headingWithoutAddedHtml = headingSchema.extendSchema((prev) => (ctx) => {
+  const base: NodeSchema = prev(ctx);
+  return {
+    ...base,
+    toMarkdown: {
+      match: base.toMarkdown.match,
+      runner: (state, node: ProseNode) => {
+        state.openNode('heading', undefined, { depth: node.attrs.level as number });
+        state.next(lineContent(node));
         state.closeNode();
       },
     },
@@ -1803,11 +1889,11 @@ const paragraphKeepingLinkedBreak = paragraphSchema.extendSchema((prev) => (ctx)
  * through {@link printBlockquote} (it owns the `blockquote` handler).
  */
 export const authoredStyleSchemas = [
-  carryAuthoredStyle(paragraphKeepingLinkedBreak),
+  carryAuthoredStyle(paragraphWithoutAddedHtml),
   carryAuthoredStyle(bulletListSchema),
   carryAuthoredStyle(orderedListSchema),
   carryAuthoredStyle(hrSchema),
-  carryAuthoredStyle(headingSchema),
+  carryAuthoredStyle(headingWithoutAddedHtml),
   carryAuthoredStyle(codeBlockSchema),
   carryAuthoredStyle(hardbreakSchema),
   carryAuthoredStyle(tableSchema),

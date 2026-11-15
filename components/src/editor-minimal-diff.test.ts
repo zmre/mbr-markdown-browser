@@ -173,8 +173,8 @@ describe('property: an edit rewrites its own block and nothing else', () => {
       return 'delete';
     }
     if (roll < 0.3) {
-      // Not after the empty paragraph the editor keeps at the end: that one
-      // prints as `<br />` once it is not last, a second new block.
+      // Not after the empty paragraph the editor keeps at the end: once it
+      // is not last it is a second new block (which prints as nothing).
       const trailingEmpty = doc.lastChild?.type.name === 'paragraph' && doc.lastChild.content.size === 0;
       const index = Math.floor(random() * (doc.childCount + (trailingEmpty ? 0 : 1)));
       let at = 0;

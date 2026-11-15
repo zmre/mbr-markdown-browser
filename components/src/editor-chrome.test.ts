@@ -53,6 +53,17 @@ describe('editor chrome', () => {
     expect(editorSource).not.toMatch(/footer\.append\([^)]*saveBtn/)
   })
 
+  it('toggles the markdown source from the footer and the ⋯ menu, a pressed-state button', () => {
+    expect(editorSource).toContain("toolButton(iconMarkup(iconCode), 'Markdown', 'mbr-editor-mode')")
+    expect(editorSource).toContain('tools.append(modeBtn, footnoteBtn, mediaBtn)')
+    expect(editorSource).toContain("modeBtn.setAttribute('aria-pressed', String(inSource))")
+    expect(editorSource).toContain('modeMenuItem,')
+    // Hidden regions really hide (bar buttons set their own display).
+    expect(cssBlock('MODAL_CSS')).toContain('.mbr-editor-modal [hidden] { display: none !important; }')
+    // 16px on a phone, or iOS zooms the page when the source gets focus.
+    expect(cssBlock('NARROW_CSS')).toContain('.mbr-editor-source .cm-editor { font-size: 16px; }')
+  })
+
   it('puts New / Rename / Move in a real menu behind ⋯', () => {
     expect(editorSource).toContain("menu.setAttribute('role', 'menu')")
     expect(editorSource).toContain("item.setAttribute('role', 'menuitem')")
@@ -110,11 +121,11 @@ describe('editor chrome', () => {
 
   it('edits frontmatter with the properties editor, inside the collapsible details', () => {
     expect(editorSource).toContain("document.createElement('mbr-fm-editor')")
-    expect(editorSource).toContain("fmEditor.model = openFrontmatter(frontmatter ?? '')")
+    expect(editorSource).toContain("fmEditor.model = openFrontmatter(doc.frontmatter ?? '')")
     expect(editorSource).toContain('fmDetails.append(fmSummary, fmEditor)')
     // Open when the note has frontmatter, an "Add properties" affordance when not.
-    expect(editorSource).toContain('if (frontmatter) fmDetails.open = true;')
-    expect(editorSource).toContain("fmSummary.textContent = frontmatter ? 'Properties' : 'Add properties'")
+    expect(editorSource).toContain('fmDetails.open = doc.frontmatter !== null;')
+    expect(editorSource).toContain("fmSummary.textContent = doc.frontmatter ? 'Properties' : 'Add properties'")
     // The save (and the dirty check, which compares the same string) reads the
     // editor's text, so untouched frontmatter is written as loaded (doc.head).
     expect(editorSource).toContain('return documentToSave(opened, fmEditor.text, next.body);')

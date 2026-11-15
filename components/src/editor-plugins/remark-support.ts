@@ -56,3 +56,21 @@ export const LAZY_LINE = '\u0000mbr-lazy\u0000';
 export function withoutLazyMarks(text: string): string {
   return text.includes(LAZY_LINE) ? text.split(LAZY_LINE).join('') : text;
 }
+
+/** Containers of flow content: what `mdast-util-to-markdown` reads `children` of without checking. */
+const FLOW_CONTAINERS = new Set(['blockquote', 'list', 'listItem', 'footnoteDefinition', 'defList', 'defListDescription']);
+
+/**
+ * Gives every flow container in `tree` a `children` array. Milkdown's
+ * serializer leaves `children` off a node it pushed nothing into, and an
+ * empty paragraph (a list item's or quote's only block) pushes nothing
+ * (`authored-style.ts`, `paragraphContent`); remark's joins would then read
+ * `children.length` of `undefined`.
+ */
+export function fillContainerChildren(tree: MdNode): void {
+  if (!tree.children) {
+    if (FLOW_CONTAINERS.has(tree.type)) tree.children = [];
+    return;
+  }
+  for (const child of tree.children) fillContainerChildren(child);
+}

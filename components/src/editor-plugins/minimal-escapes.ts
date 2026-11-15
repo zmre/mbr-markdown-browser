@@ -26,7 +26,7 @@ import type { Parents, Root } from 'mdast';
 import type { Ctx } from '@milkdown/kit/ctx';
 import { remarkCtx } from '@milkdown/kit/core';
 import { $remark } from '@milkdown/kit/utils';
-import { addRemarkExtensions, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
+import { addRemarkExtensions, fillContainerChildren, LAZY_LINE, withoutLazyMarks, type MdNode } from './remark-support.js';
 
 /** Beyond this many escapes in one block, leave the block as printed. */
 export const MAX_CANDIDATES = 32;
@@ -257,8 +257,18 @@ export function editorCanonical(state: State): Canonical | undefined {
   return (state.options as MinimizeOptions).mbrCanonical;
 }
 
-/** Records the document's definitions for {@link minimizeBlockEscapes}, then prints it. */
+/** The document `state` is printing, while it prints (see {@link printRoot}). */
+const rootsByState = new WeakMap<State, MdNode>();
+
+/** The whole document `state` is printing, for a printer whose spelling depends on the rest of the note; `undefined` without the plugin. */
+export function documentOf(state: State): MdNode | undefined {
+  return rootsByState.get(state);
+}
+
+/** Records the document (and its definitions, for {@link minimizeBlockEscapes}), then prints it. */
 function printRoot(node: Root, parent: Parents | undefined, state: State, info: Info): string {
+  fillContainerChildren(node as unknown as MdNode);
+  rootsByState.set(state, node as unknown as MdNode);
   definitionsByState.set(state, collectDefinitions(node as unknown as MdNode));
   // Lazy-line marks (`authored-style.ts`) have done their work in the containers.
   return withoutLazyMarks(defaultHandlers.root(node, parent, state, info));

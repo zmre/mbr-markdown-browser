@@ -116,8 +116,8 @@ export function placeInEmpty(view: EditorView, name: string): void {
 }
 
 /** Presses `key` through the editor's keymaps; returns whether anything handled it. */
-export function press(view: EditorView, key: string): boolean {
-  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+export function press(view: EditorView, key: string, init: KeyboardEventInit = {}): boolean {
+  const event = new KeyboardEvent('keydown', { ...init, key, bubbles: true, cancelable: true });
   return Boolean(view.someProp('handleKeyDown', (handle) => handle(view, event)));
 }
 
