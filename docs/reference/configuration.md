@@ -634,6 +634,10 @@ components or site index. In `404.html` the asset folder, the site root
 anchored at `base_url`: `/.mbr/` by default, `/my-repo/.mbr/` with
 `base_url = "/my-repo/"`.
 
+The build's link check judges root-relative links the way the host will serve
+them: `/my-repo/docs/` is the output's `docs/`, and a root-relative link
+outside `/my-repo/` is reported as escaping the site root.
+
 ```toml
 # GitHub Pages project site: https://user.github.io/my-repo/
 base_url = "/my-repo/"

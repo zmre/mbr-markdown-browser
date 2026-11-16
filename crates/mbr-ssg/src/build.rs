@@ -216,7 +216,8 @@ pub enum BrokenLinkReason {
     Missing,
     /// A `..` climbed above the site root. Browsers clamp the excess segments
     /// (RFC 3986 §5.2.4), so the reader lands on an unrelated page rather than
-    /// seeing an error.
+    /// seeing an error. Also a root-relative href outside
+    /// [`Config::base_url`], the path the site is deployed at.
     EscapesSiteRoot,
     /// The href reaches a *markdown page* (`<dir>/index.html` rendered from a
     /// note) but does not end in `/`. The page is served, so this looks fine —
@@ -273,6 +274,21 @@ fn classify_link_target(
         return non_canonical.then_some(BrokenLinkReason::MissingTrailingSlash);
     }
     Some(BrokenLinkReason::Missing)
+}
+
+/// The site-relative part of a root-relative `href` (fragment and query
+/// already removed) on a site deployed at `base_url`, which is normalized
+/// ([`mbr_core::config::normalize_base_url`]): the output folder is served at
+/// `base_url`, so output file `x` answers `{base_url}x`. With `/my-repo/`,
+/// `/my-repo/a/` → `a/` and `/my-repo` → `""`; `/a/` → `None`, because it
+/// lies outside the deployment. With `/` every root-relative href is inside.
+fn strip_base_url<'a>(href: &'a str, base_url: &str) -> Option<&'a str> {
+    let rest = href.strip_prefix(base_url.trim_end_matches('/'))?;
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix('/')
+    }
 }
 
 /// Records the first error observed across parallel (rayon) workers.
@@ -2627,6 +2643,12 @@ impl Builder {
             }
         }
 
+        // The URL path the output folder is deployed at, which root-relative
+        // hrefs are judged against (`404.html` anchors its links there). An
+        // invalid value has already failed the build in `generate_404_page`.
+        let base_url = mbr_core::config::normalize_base_url(&self.config.base_url)
+            .unwrap_or_else(|_| "/".to_string());
+
         // The folders rendered from notes: the only targets a missing trailing
         // slash is reported for (see `BrokenLinkReason::MissingTrailingSlash`).
         let markdown_page_dirs: HashSet<PathBuf> = self
@@ -2689,7 +2711,21 @@ impl Builder {
                             .unwrap_or_default()
                             .to_string();
 
-                        if let Some(resolved) = self.resolve_link(path, href)
+                        // A root-relative href outside the deployment leaves
+                        // the site as surely as a `..` past its root does: it
+                        // 404s once deployed, whatever the output holds there.
+                        if href_path.starts_with('/')
+                            && strip_base_url(&href_path, &base_url).is_none()
+                        {
+                            broken.push(BrokenLink {
+                                source_page: source_page.clone(),
+                                link_url: href.to_string(),
+                                reason: BrokenLinkReason::EscapesSiteRoot,
+                            });
+                            continue;
+                        }
+
+                        if let Some(resolved) = self.resolve_link(path, href, &base_url)
                             && let Some(reason) = classify_link_target(
                                 &resolved,
                                 &href_path,
@@ -2714,9 +2750,12 @@ impl Builder {
 
     /// Resolves a link URL relative to the source file's directory.
     ///
+    /// A root-relative href is resolved against `base_url`, the normalized URL
+    /// path the output directory is deployed at (see [`strip_base_url`]).
+    ///
     /// Returns the absolute path within the output directory, or None if the link
-    /// cannot be resolved.
-    fn resolve_link(&self, source_file: &Path, href: &str) -> Option<PathBuf> {
+    /// cannot be resolved (including a root-relative href outside `base_url`).
+    fn resolve_link(&self, source_file: &Path, href: &str, base_url: &str) -> Option<PathBuf> {
         // Strip anchor from href (e.g., "/page/#section" -> "/page/")
         let href = href.split('#').next().unwrap_or(href);
         // Strip query string (e.g., "/page/?foo=bar" -> "/page/")
@@ -2726,21 +2765,23 @@ impl Builder {
             return None;
         }
 
+        // Absolute path within site: matched against `base_url` before decoding,
+        // since the base is written into hrefs verbatim.
+        if href.starts_with('/') {
+            let path = strip_base_url(href, base_url)?;
+            let path = percent_decode_str(path).decode_utf8_lossy();
+            return Some(self.output_dir.join(path.trim_start_matches('/')));
+        }
+
         // URL-decode the href to handle percent-encoded characters (e.g., %20 -> space)
         // HTML links are percent-encoded by escape_href, but filesystem paths have literal characters
         let href = percent_decode_str(href).decode_utf8_lossy();
 
-        if href.starts_with('/') {
-            // Absolute path within site
-            let path = href.trim_start_matches('/');
-            Some(self.output_dir.join(path))
-        } else {
-            // Relative path - resolve from source file's parent directory
-            let source_dir = source_file.parent()?;
-            let resolved = source_dir.join(href.as_ref());
-            // Normalize the path manually (handle ../ without requiring existence)
-            Some(normalize_path(&resolved))
-        }
+        // Relative path - resolve from source file's parent directory
+        let source_dir = source_file.parent()?;
+        let resolved = source_dir.join(href.as_ref());
+        // Normalize the path manually (handle ../ without requiring existence)
+        Some(normalize_path(&resolved))
     }
 
     /// Recursively copies the repository's `.mbr/` folder into the output.
@@ -3304,7 +3345,7 @@ mod tests {
 
         // Absolute path within site
         let source = temp_path.join("docs").join("index.html");
-        let result = builder.resolve_link(&source, "/readme/");
+        let result = builder.resolve_link(&source, "/readme/", "/");
 
         assert_eq!(result, Some(temp_path.join("readme/")));
     }
@@ -3324,11 +3365,11 @@ mod tests {
         let source = docs_dir.join("index.html");
 
         // Relative path - sibling
-        let result = builder.resolve_link(&source, "guide/");
+        let result = builder.resolve_link(&source, "guide/", "/");
         assert_eq!(result, Some(docs_dir.join("guide")));
 
         // Relative path - parent
-        let result = builder.resolve_link(&source, "../readme/");
+        let result = builder.resolve_link(&source, "../readme/", "/");
         assert_eq!(result, Some(temp_path.join("readme")));
     }
 
@@ -3343,11 +3384,11 @@ mod tests {
         let source = temp_path.join("index.html");
 
         // Anchor should be stripped
-        let result = builder.resolve_link(&source, "/docs/#section");
+        let result = builder.resolve_link(&source, "/docs/#section", "/");
         assert_eq!(result, Some(temp_path.join("docs/")));
 
         // Just anchor returns None (empty after stripping)
-        let result = builder.resolve_link(&source, "#section");
+        let result = builder.resolve_link(&source, "#section", "/");
         // Note: "#section" starts with "#" so it's filtered in validate_links,
         // but resolve_link strips it to empty and returns None
         assert_eq!(result, None);
@@ -3364,7 +3405,7 @@ mod tests {
         let source = temp_path.join("index.html");
 
         // Query string should be stripped
-        let result = builder.resolve_link(&source, "/search/?q=test");
+        let result = builder.resolve_link(&source, "/search/?q=test", "/");
         assert_eq!(result, Some(temp_path.join("search/")));
     }
 
@@ -3379,7 +3420,7 @@ mod tests {
         let source = temp_path.join("index.html");
 
         // URL-encoded spaces should be decoded
-        let result = builder.resolve_link(&source, "/my%20file/");
+        let result = builder.resolve_link(&source, "/my%20file/", "/");
         assert_eq!(result, Some(temp_path.join("my file/")));
     }
 
@@ -3394,8 +3435,92 @@ mod tests {
         let source = PathBuf::from("/some/source.html");
 
         // Empty href returns None
-        let result = builder.resolve_link(&source, "");
+        let result = builder.resolve_link(&source, "", "/");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_strip_base_url() {
+        for (href, base_url, expected) in [
+            ("/a/b/", "/", Some("a/b/")),
+            ("/", "/", Some("")),
+            ("/my-repo/a/", "/my-repo/", Some("a/")),
+            ("/my-repo/", "/my-repo/", Some("")),
+            ("/my-repo", "/my-repo/", Some("")),
+            ("/a/b/c/", "/a/b/", Some("c/")),
+            ("/a/", "/my-repo/", None),
+            ("/my-repository/", "/my-repo/", None),
+            ("/my-repox", "/my-repo/", None),
+            ("/a/c/", "/a/b/", None),
+        ] {
+            assert_eq!(
+                strip_base_url(href, base_url),
+                expected,
+                "{href:?} under {base_url:?}"
+            );
+        }
+    }
+
+    /// A site deployed at `base_url` serves output file `x` at `{base_url}x`.
+    #[test]
+    fn test_resolve_link_honours_base_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+
+        let builder = test_builder(temp_path.clone(), root);
+        let source = temp_path.join("index.html");
+
+        assert_eq!(
+            builder.resolve_link(&source, "/my-repo/docs/#x", "/my-repo/"),
+            Some(temp_path.join("docs/"))
+        );
+        assert_eq!(
+            builder.resolve_link(&source, "/my-repo/", "/my-repo/"),
+            Some(temp_path.clone())
+        );
+        assert_eq!(
+            builder.resolve_link(&source, "/my-repo/my%20file/", "/my-repo/"),
+            Some(temp_path.join("my file/"))
+        );
+        assert_eq!(builder.resolve_link(&source, "/docs/", "/my-repo/"), None);
+        // Relative links do not involve the base.
+        assert_eq!(
+            builder.resolve_link(&source, "docs/", "/my-repo/"),
+            Some(temp_path.join("docs/"))
+        );
+    }
+
+    /// Under a `base_url`, a root-relative link into the deployment resolves
+    /// and one outside it escapes the site, even when the output has a file at
+    /// the unprefixed path (it would 404 once deployed).
+    #[test]
+    fn test_validate_links_honours_base_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join(".mbr")).unwrap();
+        std::fs::create_dir_all(temp_path.join("docs")).unwrap();
+        std::fs::write(temp_path.join("docs/index.html"), "<html></html>").unwrap();
+        std::fs::write(temp_path.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(
+            temp_path.join("test.html"),
+            r#"<html><body>
+            <a href="/my-repo/">Home</a>
+            <a href="/my-repo/docs/">Docs</a>
+            <a href="/docs/">Outside</a>
+        </body></html>"#,
+        )
+        .unwrap();
+
+        let mut builder = test_builder(temp_path, root);
+        builder.config.base_url = "my-repo".to_string();
+        let broken = builder.validate_links();
+
+        assert_eq!(broken.len(), 1, "got: {broken:?}");
+        assert_eq!(broken[0].link_url, "/docs/");
+        assert_eq!(broken[0].reason, BrokenLinkReason::EscapesSiteRoot);
     }
 
     // -------------------- classify_link_target tests ----------------------
