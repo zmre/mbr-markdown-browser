@@ -42,6 +42,12 @@ jobs:
         run: nix build -L .#mbr
 
       - name: Build documentation site
+        env:
+          # The site is a GitHub project page, served under /mbr-markdown-browser/.
+          # 404.html is served at whatever URL was missing, so it anchors its
+          # assets, site.json and Home link at base_url; left at the default "/"
+          # it loads nothing (no styles, no "did you mean" suggestions).
+          MBR_BASE_URL: /mbr-markdown-browser/
         run: |
           ./result/bin/mbr -b --oembed-timeout-ms 1000 --output ./docs-build ./docs
           echo "Documentation built successfully"
