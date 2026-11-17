@@ -363,7 +363,7 @@ all of it:
 | A closed `<details>` written literally in the markdown | Forced open (see the caveat below) |
 | Marginalia (`>>>` sidenotes) shown on hover | Printed inline where they occur |
 | Oembed link cards clamped to 200px | Full height, nothing clipped |
-| Kanban boards (`85vh`, side-scrolling columns) | Flattened to one column so no card is cut off |
+| Kanban boards (side-scrolling columns) | Flattened to one column so no card is cut off |
 | Theater-mode video figures sized to the viewport | Unconstrained, so the caption survives |
 | Heading permalink anchors | Hidden — they only exist to be hovered |
 | `<video>` / `media-player` | Replaced by `[Video content - see digital version]` |
