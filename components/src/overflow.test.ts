@@ -286,28 +286,51 @@ describe('theme.css: nothing widens the page', () => {
 describe('kanban print rules', () => {
   // Same specificity as the screen rules and `@media print` adds none, so the
   // print block wins only by coming later. It once sat earlier and lost, and a
-  // printed board kept its 85vh columns and dropped cards.
+  // printed board kept its side-scrolling columns and dropped cards.
   it('come after the screen rules they override', () => {
     const rules = parseRules(__MBR_THEME_CSS__)
-    const lastIndex = (pred: (r: Rule) => boolean) =>
-      rules.reduce((last, r, i) => (pred(r) ? i : last), -1)
     const isPrint = (r: Rule) => r.conditions.some((c) => /^@media\s+print/.test(c))
-    const lastScreen = lastIndex(
-      (r: Rule) => r.selector === '.kanban' && r.conditions.length === 0
+    const lastScreen = rules.reduce(
+      (last, r, i) => (r.selector === '.kanban' && r.conditions.length === 0 ? i : last),
+      -1
     )
     const print = rules.findIndex(
-      (r) => r.selector === '.kanban' && isPrint(r) && /height:\s*auto/.test(r.body)
+      (r) => r.selector === '.kanban' && isPrint(r) && /display:\s*block/.test(r.body)
     )
     expect(lastScreen).toBeGreaterThanOrEqual(0)
     expect(print).toBeGreaterThan(lastScreen)
+  })
+})
 
-    const lastScreenBreak = lastIndex(
-      (r: Rule) => r.selector.includes('.kanban ul:last-child') && !isPrint(r)
+describe('kanban board layout', () => {
+  const screen = (selector: string) => rulesFor(selector).find((r) => r.conditions.length === 0)
+
+  // The board was CSS multi-column over the section's children. WebKit balanced
+  // the columns and ignored `break-after: avoid`, leaving a heading alone in one
+  // column with its cards in the next, and painted card shadows where the
+  // breaks fell. A column-flow grid groups the same plain children instead: a
+  // heading (row 1) after anything in row 2 starts the next column.
+  it('groups headings with their lists by grid rows', () => {
+    const board = screen('.kanban')!
+    expect(declaration(board, 'display')).toBe('grid')
+    expect(declaration(board, 'grid-auto-flow')).toBe('column')
+    expect(declaration(board, 'grid-auto-columns')).toBe('minmax(18rem, 1fr)')
+    expect(declaration(board, 'overflow-x')).toBe('auto')
+    expect(declaration(board, 'columns')).toBeUndefined()
+    expect(declaration(screen('.kanban > *')!, 'grid-row')).toBe('2')
+    expect(declaration(screen('.kanban > :is(h1, h2, h3, h4, h5, h6)')!, 'grid-row')).toBe('1')
+    // Two rows only: rows are shared by every column, so a third row let one
+    // tall block push every other column's cards down.
+    expect(declaration(screen('.kanban > :is(ul, ol)')!, 'grid-row')).toBeUndefined()
+  })
+
+  it('has no column-break rules left on screen', () => {
+    const rules = parseRules(__MBR_THEME_CSS__).filter(
+      (r) => r.conditions.length === 0 && /kanban/.test(r.selector)
     )
-    const printBreak = rules.findIndex(
-      (r) => r.selector.includes('.kanban ul:last-child') && isPrint(r)
-    )
-    expect(printBreak).toBeGreaterThan(lastScreenBreak)
+    for (const rule of rules) {
+      expect(rule.body).not.toMatch(/break-(after|before)|column-break/)
+    }
   })
 })
 
@@ -320,7 +343,7 @@ describe('kanban card layout', () => {
     expect(declaration(card!, 'display')).toBe('block')
     expect(declaration(card!, 'list-style')).toBe('none')
     expect(declaration(card!, 'margin-inline')).toBe('0')
-    const list = screen('.kanban > ul')
+    const list = screen('.kanban > :is(ul, ol)')
     expect(declaration(list!, 'padding-left')).toBe('0')
     expect(declaration(list!, 'margin-left')).toBe('0')
   })

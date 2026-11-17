@@ -3683,12 +3683,26 @@ main li.mbr-agenda-next {
 /* ============================= Kanban Display ========================= */
 
 /*
- * A board is a section opened with `--- {.kanban}`: headings are columns and
- * each item of a list directly inside the section is a card. There is no
- * page-wide form. `style: kanban` in frontmatter puts the class on `<body>`,
- * where `.kanban` pours the whole page into 85vh-tall columns and the
- * `.kanban > ul` card rules match nothing, so docs/features/kanban.md tells
- * authors not to use it.
+ * A board is a section opened with `--- {.kanban}`: each heading starts a
+ * column and each item of a list directly inside the section is a card. The
+ * HTML is the section's plain children; the grid does the grouping. With
+ * `grid-auto-flow: column`, an item placed in a row above the previous item's
+ * row starts the next column, so a heading (row 1) and the block after it
+ * (row 2) make one column. Any further block under the same heading (a second
+ * list, a paragraph, a chat) is a column of its own, with no heading. Only
+ * two rows, on purpose: grid rows are shared by every column, so a third row
+ * for text between a heading and its list let one tall block push the cards
+ * of every other column down.
+ *
+ * This used to be CSS multi-column. A multicol box with no fixed height
+ * balances its columns, and WebKit, which ignores `break-after: avoid`, left a
+ * heading alone in one column with its cards in the next and painted card
+ * shadows where the column breaks fell. Grid placement never splits an item.
+ *
+ * There is no page-wide form. `style: kanban` in frontmatter puts the class on
+ * `<body>`, where the grid lays out the header, note and footer side by side
+ * and the `.kanban > ul` card rules match nothing, so
+ * docs/features/kanban.md tells authors not to use it.
  */
 
 .kanban {
@@ -3696,12 +3710,14 @@ main li.mbr-agenda-next {
    * checkbox sits in it and the text starts after it, so plain lines and
    * tasks align (see "Card contents" below). */
   --mbr-kanban-gutter: 1.7em;
-  columns: 18rem; /* needs to be fixed since we don't know how many columns */
-  column-gap: 2rem;
-  column-fill: auto; /* should avoid balancing and just fill left first */
-  /* column-rule: 1px solid var(--pico-muted-border-color); */
-  overflow-x: auto; /* allow horizontal scroll */
-  overflow-y: visible;
+  display: grid;
+  grid-auto-flow: column;
+  /* At least 18rem a column, sharing any room left over; columns that do not
+   * fit scroll sideways inside the board. */
+  grid-auto-columns: minmax(18rem, 1fr);
+  align-items: start;
+  gap: 0 2rem;
+  overflow-x: auto;
   max-width: 100%;
   min-height: 45vh;
   padding: 1em;
@@ -3709,46 +3725,19 @@ main li.mbr-agenda-next {
   --r-heading-color: var(--pico-color);
 }
 
-.kanban h1,
-.kanban h2,
-.kanban h3,
-.kanban h4,
-.kanban h5,
-.kanban h6 {
+.kanban > * {
+  grid-row: 2;
+  min-width: 0;
+}
+
+.kanban > :is(h1, h2, h3, h4, h5, h6) {
+  grid-row: 1;
   margin-top: 0;
-  break-after: avoid;
-  -webkit-column-break-after: avoid;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
 }
 
-.kanban h1:has(+ ul),
-.kanban h1:has(+ ol),
-.kanban h2:has(+ ul),
-.kanban h2:has(+ ol),
-.kanban h3:has(+ ul),
-.kanban h3:has(+ ol),
-.kanban h4:has(+ ul),
-.kanban h4:has(+ ol),
-.kanban h5:has(+ ul),
-.kanban h5:has(+ ol),
-.kanban h6:has(+ ul),
-.kanban h6:has(+ ol) {
-  break-after: avoid;
-  -webkit-column-break-after: avoid;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
-}
-
-.kanban > ul,
-.kanban > ol {
+.kanban > :is(ul, ol) {
   margin-left: 0;
   padding-left: 0;
-  break-after: column;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
-  -webkit-column-break-before: avoid;
-  break-before: avoid;
 }
 
 .kanban > ul > li,
@@ -3763,10 +3752,7 @@ main li.mbr-agenda-next {
   /* A card is the whole width of its column: no marker, no indent. */
   margin-inline: 0;
   list-style: none;
-  /* background-color: var(--pico-card-sectioning-background-color); */
   font-weight: bold;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
 }
 
 /*
@@ -3803,22 +3789,11 @@ main li.mbr-agenda-next {
   margin-inline: calc(-1 * var(--mbr-kanban-gutter)) 0.45em;
 }
 
-.kanban ul:last-child,
-.kanban ol:last-child {
-  break-after: always;
-}
-
 @media print {
-  /* Kanban boards lose cards on paper twice over: `height: 85vh` cuts off
-   * everything below one screenful, and the columns scroll horizontally past
-   * the width of the sheet. Flattening to a single column is the only shape
-   * that guarantees every card reaches the page -- the board reads as a run of
-   * headed lists rather than side-by-side columns, which is the right trade
+  /* Side-by-side columns scroll sideways past the width of the sheet and
+   * lose cards on paper, so a printed board is one column: it reads as a run
+   * of headed lists rather than side-by-side columns, which is the right trade
    * when the alternative is dropping cards silently.
-   *
-   * `break-after` has to be reset too: `always` is a *page* break once there
-   * is no multicol context to consume it, so each list would otherwise eject
-   * the rest of the board onto a fresh sheet.
    *
    * Unscoped like the screen rules: `.kanban` is the `<section>` that
    * `--- {.kanban}` opens. (`style: kanban` in frontmatter puts it on
@@ -3829,18 +3804,15 @@ main li.mbr-agenda-next {
    * alone. It used to sit in the main print section earlier in the file and
    * silently lost. */
   .kanban {
+    display: block;
     height: auto;
     max-height: none;
-    columns: auto;
     overflow: visible;
   }
 
-  .kanban > ul,
-  .kanban > ol,
-  .kanban ul:last-child,
-  .kanban ol:last-child {
-    break-before: auto;
-    break-after: auto;
+  .kanban > ul > li,
+  .kanban > ol > li {
+    break-inside: avoid;
   }
 }
 

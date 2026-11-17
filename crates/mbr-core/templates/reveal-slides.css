@@ -151,14 +151,12 @@ html.mbr-embedded body.slides-container .reveal .slide-number {
   object-fit: contain;
 }
 
-/* Kanban boards (`--- {.kanban}`). On a page the board is a multi-column
- * section 85% of the window tall (theme.css, "Kanban Display"); in a 960x700
- * slide that pours past the slide and Reveal's centring and scaling cut it
- * off. `<mbr-slides>` groups each heading and its list into a
- * `.mbr-kanban-column` inside one `.mbr-kanban-board`, laid out here as flex
- * columns sharing the slide's width. The section keeps Reveal's own display. */
+/* Kanban boards (`--- {.kanban}`). On a page the section itself is the grid
+ * (theme.css, "Kanban Display"), but a slide's own `display` is Reveal's, so
+ * `<mbr-slides>` groups each heading and its list into a `.mbr-kanban-column`
+ * inside one `.mbr-kanban-board`, laid out here as flex columns sharing the
+ * slide's width. */
 .reveal .slides section.kanban {
-  columns: auto;
   height: auto;
   max-width: none;
   overflow: visible;

@@ -112,15 +112,16 @@ title: Project board
 ```
 
 > [!WARNING]
-> Do not put `style: kanban` in the frontmatter. Frontmatter styles become classes on the page's `<body>`, and the kanban rules apply to whatever element carries the class. On `<body>` they pour the whole page -- header, note and footer -- into narrow columns 85% of the window tall, while the lists stay plain bulleted lists, because the card rules only match lists directly inside the board. It does not help a page that also has a `--- {.kanban}` section either: the section still becomes a board, but the page around it is broken the same way.
+> Do not put `style: kanban` in the frontmatter. Frontmatter styles become classes on the page's `<body>`, and the kanban rules apply to whatever element carries the class. On `<body>` they lay the whole page -- header, note and footer -- out side by side as board columns, while the lists stay plain bulleted lists, because the card rules only match lists directly inside the board. It does not help a page that also has a `--- {.kanban}` section either: the section still becomes a board, but the page around it is broken the same way.
 
 ## How the Board Lays Out
 
-The board is CSS multi-column layout, so it takes no JavaScript and no new markdown syntax:
+The board is a CSS grid over the section's own headings and lists, so it takes no JavaScript and no new markdown syntax:
 
-* The board is 85% of the window tall, and each column is about 18rem wide, with as many columns as the headings need.
-* Columns that do not fit the width of the page scroll sideways inside the board.
-* A column whose cards are taller than the board continues at the top of the next column, and every column after it moves one place to the right. Keep each list short enough to fit, or split it under a second heading.
+* Each heading starts a column, and the list right after it fills that column, so a heading always stays with its cards.
+* A heading with no list of its own (a board title, say) is a column with no cards. Anything else after a heading's first block -- a second list, a paragraph, a chat -- gets a column of its own, with no heading; to keep two lists together, make them one list.
+* Each column is at least 18rem wide, and the columns share any width left over. Columns that do not fit the width of the page scroll sideways inside the board.
+* A column is as tall as its cards; the board is as tall as its tallest column.
 * Each item of a top-level list in the section is a card, as wide as its column. Nested bullets, checklists and text inside an item are that card's content, in normal weight under the card's bold first line, with a thin line between the title and the content (a card with no nested list has no line).
 * In a card's content, bullets and checkboxes hang at the card's left edge and the text of every line starts at the same place, so a task lines up with the bullets around it. Deeper levels indent one step each. This holds in slides too.
 
@@ -135,4 +136,4 @@ is the ordinary board described above.
 
 ## Printing
 
-When printed, a board flattens to a single column: each heading is followed by its list of cards, so every card reaches the page instead of being cut off at the board height or the sheet width.
+When printed, a board flattens to a single column: each heading is followed by its list of cards, so every card reaches the page instead of being cut off at the sheet width.
