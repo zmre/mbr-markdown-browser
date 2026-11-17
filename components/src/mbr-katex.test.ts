@@ -119,6 +119,20 @@ describe('<mbr-katex>', () => {
       expect(katex.render).toHaveBeenCalledOnce()
     })
 
+    it('renders at once instead of at idle in a PDF export', async () => {
+      window.__MBR_EXPORT__ = { links: 'strip', paperWidthIn: 8.5, paperHeightIn: 11, margin: '0.5in' }
+      try {
+        document.body.innerHTML = '<main><div class="math math-display">x^2</div></main>'
+        const katex = stubKatex()
+        await mount()
+        await mathSettled()
+        expect(mocks.idleTasks).toHaveLength(0)
+        expect(katex.render).toHaveBeenCalledTimes(1)
+      } finally {
+        delete window.__MBR_EXPORT__
+      }
+    })
+
     it('resolves, not rejects, when KaTeX fails to load', async () => {
       document.body.innerHTML = '<main><span class="math math-inline">x</span></main>'
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})

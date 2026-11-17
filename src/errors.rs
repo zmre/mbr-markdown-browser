@@ -63,6 +63,92 @@ pub enum ExternalOpenError {
     LaunchFailed { url: String, reason: String },
 }
 
+/// Why a PDF export (`mbr --pdf`, the GUI's Save as PDF…) did not produce a
+/// file. See [`crate::pdf_export`].
+///
+/// Messages name the cause and the path, because the CLI prints them as they
+/// are and the GUI shows them in a dialog.
+#[cfg(feature = "gui")]
+#[derive(Debug, Error)]
+pub enum PdfError {
+    /// This platform has no export backend yet.
+    #[error("PDF export is not available on {platform} yet")]
+    Unsupported { platform: &'static str },
+
+    /// No display to run a webview on (Linux without X11/Wayland).
+    #[error("{0}")]
+    NoDisplay(String),
+
+    #[error("The folder for the PDF does not exist: {}", dir.display())]
+    OutputDirMissing { dir: std::path::PathBuf },
+
+    #[error("Not a folder: {}", dir.display())]
+    OutputDirNotDirectory { dir: std::path::PathBuf },
+
+    #[error("Cannot write to the folder {}", dir.display())]
+    OutputDirNotWritable {
+        dir: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Could not start the server for the export: {0}")]
+    Server(String),
+
+    #[error("Could not create the export window")]
+    Window(#[source] tao::error::OsError),
+
+    #[error("Could not create the export webview")]
+    WebView(#[source] wry::Error),
+
+    /// The page reported that it could not prepare itself for paper.
+    #[error("The page could not be prepared for export: {message}")]
+    PageFailed { message: String },
+
+    #[error("Printing to PDF failed: {message}")]
+    PrintFailed { message: String },
+
+    /// The print system reported success but left no file (macOS does this
+    /// for a folder that vanished).
+    #[error("No PDF was written to {}", path.display())]
+    NotWritten { path: std::path::PathBuf },
+
+    #[error("The PDF written to {} is empty", path.display())]
+    Empty { path: std::path::PathBuf },
+
+    #[error("The file written to {} is not a PDF", path.display())]
+    NotAPdf { path: std::path::PathBuf },
+
+    #[error("Could not move the PDF into place at {}", path.display())]
+    Finalize {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Could not write the PDF to standard output")]
+    Stdout(#[source] std::io::Error),
+}
+
+#[cfg(feature = "gui")]
+impl PdfError {
+    /// Refused before the export started — no backend, no display, an
+    /// output folder that is missing, not a folder or not writable, or a
+    /// server that would not start: the CLI's exit code 2 rather than 1.
+    /// Everything from creating the export window on is a failure (1).
+    pub fn is_refusal(&self) -> bool {
+        matches!(
+            self,
+            PdfError::Unsupported { .. }
+                | PdfError::NoDisplay(_)
+                | PdfError::OutputDirMissing { .. }
+                | PdfError::OutputDirNotDirectory { .. }
+                | PdfError::OutputDirNotWritable { .. }
+                | PdfError::Server(_)
+        )
+    }
+}
+
 /// Lets `?` lift a [`BrowserError`] into [`MbrError::Browser`], as the derived
 /// `#[from]` did when both enums lived in one crate.
 #[cfg(feature = "gui")]

@@ -24,14 +24,14 @@ mbr provides platform-appropriate menus:
 
 **macOS:**
 - **mbr** menu: About, Preferences, Quit (Cmd+Q)
-- **File**: Open… (Cmd+O)
+- **File**: Open… (Cmd+O), Print… (Cmd+P), Save as PDF… (Shift+Cmd+P)
 - **Edit**: Copy, Paste, Select All, Copy Page as Rich Text, Copy Page as Markdown, Find… (Cmd+F), Find Next (Cmd+G), Find Previous (Shift+Cmd+G)
 - **View**: Reload (Cmd+R), Toggle DevTools (Cmd+Option+I)
 - **History**: Back (Cmd+[), Forward (Cmd+])
 - **Window**: Minimize, Zoom, Close (Cmd+W)
 
 **Windows/Linux:**
-- **File**: Open…, Exit
+- **File**: Open… (Ctrl+O), Print… (Ctrl+Shift+P), Save as PDF… (Ctrl+Alt+P), Exit
 - **Edit**: Copy, Paste, Select All, Copy Page as Rich Text, Copy Page as Markdown, Find… (Ctrl+F), Find Next (F3), Find Previous (Shift+F3)
 - **View**: Reload, Toggle DevTools
 - **History**: Back, Forward
@@ -58,6 +58,8 @@ include it, so your browser's native find is left untouched.
 |--------|-------|---------------|
 | Open folder or file | Cmd+O | Ctrl+O |
 | Reload settings and page | Cmd+R | Ctrl+R |
+| Print… | Cmd+P | Ctrl+Shift+P |
+| Save as PDF… | Shift+Cmd+P | Ctrl+Alt+P |
 | Go Back | Cmd+[ | Alt+Left |
 | Go Forward | Cmd+] | Alt+Right |
 | Close Window | Cmd+W | Ctrl+W |
@@ -101,6 +103,19 @@ To browse read-only, set `edit_enabled = false` in the repository's
 The default and `--no-edit` apply to every folder you open in the window, not
 just the first. If the GUI is bound to a non-loopback `--host` without an
 `edit_token_hash`, editing stays off. See [In-Browser Editing](../features/editing.md).
+
+### Save as PDF
+
+**File → Save as PDF…** writes the page on screen to a PDF file without a print
+dialog: pick a name (the page title is suggested), and mbr renders the page in
+a hidden view of its own — the window you are reading is left alone — waits for
+diagrams, math, highlighting and images, and saves. A toast reports "Saved
+*name*.pdf"; a failure opens a dialog naming the cause. The item is greyed out
+while the in-browser editor is open, since the export reads the note from disk
+and unsaved edits would be missing. Paper, margins and page numbers come from
+the repository's [`[pdf]` settings](../reference/configuration.md#pdf-export-settings).
+The same export runs from the command line as `mbr --pdf note.md`. See
+[PDF Export](../features/pdf-export.md).
 
 ### Switching Directories or Opening a File
 

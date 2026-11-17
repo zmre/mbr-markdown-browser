@@ -121,3 +121,32 @@ describe('the search-extras chunk (search-extras/index.ts)', () => {
     }
   })
 })
+
+describe('the export chunk (export/index.ts)', () => {
+  it('bundles no stateful main-bundle module: every service is injected', () => {
+    const modules = chunkModules('export/index.ts')
+    expect(modules.has('export/prepare.ts')).toBe(true)
+    for (const forbidden of [
+      'shared.ts',
+      'dynamic-loader.ts',
+      'export-ready.ts',
+      'export-chunk.ts',
+      'export-mode.ts',
+      'mbr-mermaid.ts',
+      'mbr-katex.ts',
+      'mbr-hljs.ts',
+      'mbr-editor.ts',
+      'task-toggle.ts',
+      'edit-token.ts',
+    ]) {
+      expect(modules.has(forbidden), forbidden).toBe(false)
+    }
+  })
+
+  it('stays out of the main bundle: the trigger reaches it only through the loader', () => {
+    const modules = chunkModules('export-ready.ts')
+    expect(modules.has('export-chunk.ts')).toBe(true)
+    expect(modules.has('export/prepare.ts')).toBe(false)
+    expect(modules.has('export/index.ts')).toBe(false)
+  })
+})

@@ -3,6 +3,9 @@ use crate::errors::{ConfigError, MbrError};
 use clap::{ArgGroup, Parser};
 use std::path::{Path, PathBuf};
 
+/// The static build's output folder when `--output` is not given.
+pub const DEFAULT_BUILD_OUTPUT: &str = "build";
+
 /// Markdown browser and previewer
 // `Clone` so a server can keep the invocation and re-apply its overrides when
 // the configuration is reloaded ([`read_config`]).
@@ -59,15 +62,71 @@ pub struct Args {
     #[arg(long, group = "mode")]
     pub check_links_only: bool,
 
+    /// Export a note (as mbr renders it) to a paginated PDF, with no window.
+    /// Writes `<note>.pdf` in the current folder unless --output names a
+    /// file, a folder, or `-` (standard output). Exit code: 0 written,
+    /// 1 the export failed, 2 refused before starting
+    #[cfg(feature = "gui")]
+    #[arg(long, group = "mode")]
+    pub pdf: bool,
+
+    /// Paper size for --pdf: letter, a4, legal, or <W>x<H>mm|in
+    /// (default: `[pdf] paper`, else the system's default paper)
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "PAPER")]
+    pub pdf_paper: Option<crate::pdf_config::Paper>,
+
+    /// Landscape orientation for --pdf (overrides `[pdf] orientation`)
+    #[cfg(feature = "gui")]
+    #[arg(long, conflicts_with = "pdf_portrait")]
+    pub pdf_landscape: bool,
+
+    /// Portrait orientation for --pdf (overrides `[pdf] orientation`)
+    #[cfg(feature = "gui")]
+    #[arg(long)]
+    pub pdf_portrait: bool,
+
+    /// Page margin for --pdf, a CSS margin shorthand such as "0.5in" or
+    /// "0.6in 0.5in" (default: `[pdf] margin`, else 0.6in 0.5in)
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "MARGIN")]
+    pub pdf_margin: Option<crate::pdf_config::Margin>,
+
+    /// Print the platform's header and footer (title, date, page numbers)
+    /// with --pdf (macOS and Windows; overrides `[pdf] page_numbers`)
+    #[cfg(feature = "gui")]
+    #[arg(long, conflicts_with = "no_pdf_page_numbers")]
+    pub pdf_page_numbers: bool,
+
+    /// No header or footer with --pdf (overrides `[pdf] page_numbers = true`)
+    #[cfg(feature = "gui")]
+    #[arg(long)]
+    pub no_pdf_page_numbers: bool,
+
+    /// Rewrite internal links in the PDF onto this published site (default:
+    /// internal links are removed, their text kept)
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "URL")]
+    pub pdf_link_base: Option<crate::pdf_config::LinkBase>,
+
+    /// How long --pdf waits for the page to finish rendering before exporting
+    /// it anyway, in milliseconds (default: `[pdf] timeout_ms`, else 30000)
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub pdf_timeout_ms: Option<u64>,
+
     /// Report format for --check-links-only (default: markdown)
     // Checked in `Args::parse_checked`, not with `requires`: a `bool` flag
     // has a default value (`false`), which satisfies clap's `requires`.
     #[arg(long, value_enum)]
     pub format: Option<ReportFormat>,
 
-    /// Output directory for static site build (default: "build")
-    #[arg(long, default_value = "build")]
-    pub output: PathBuf,
+    /// Where a mode writes its output. Static build (-b): the output folder
+    /// (default: "build"). --pdf: a file, an existing folder (the PDF is named
+    /// after the note), or `-` for standard output (default: `<note>.pdf` in
+    /// the current folder)
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
 
     /// Markdown file or folder to serve (defaults to current directory)
     #[arg(default_value = ".")]
@@ -241,7 +300,53 @@ impl Args {
         if self.format.is_some() && !self.check_links_only {
             return Err("--format applies only to --check-links-only");
         }
+        #[cfg(feature = "gui")]
+        if !self.pdf && self.pdf_flags() != crate::pdf_export::PdfFlags::default() {
+            return Err("--pdf-* options apply only to --pdf");
+        }
         Ok(())
+    }
+
+    /// Whether this is a `--pdf` invocation (always false without `gui`,
+    /// where the flag does not exist).
+    pub fn is_pdf(&self) -> bool {
+        #[cfg(feature = "gui")]
+        {
+            self.pdf
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            false
+        }
+    }
+
+    /// The static build's output folder: `--output`, else `build`.
+    pub fn build_output_dir(&self) -> PathBuf {
+        self.output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_BUILD_OUTPUT))
+    }
+
+    /// The `--pdf-*` options, the command-line layer of
+    /// [`crate::pdf_export::PdfOptions::resolve`].
+    #[cfg(feature = "gui")]
+    pub fn pdf_flags(&self) -> crate::pdf_export::PdfFlags {
+        crate::pdf_export::PdfFlags {
+            paper: self.pdf_paper,
+            orientation: match (self.pdf_landscape, self.pdf_portrait) {
+                (true, _) => Some(crate::pdf_config::Orientation::Landscape),
+                (_, true) => Some(crate::pdf_config::Orientation::Portrait),
+                _ => None,
+            },
+            margin: self.pdf_margin.clone(),
+            page_numbers: match (self.pdf_page_numbers, self.no_pdf_page_numbers) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
+            link_base: self.pdf_link_base.clone(),
+            timeout_ms: self.pdf_timeout_ms,
+        }
     }
 
     /// Get the log level filter string based on verbosity flags.
@@ -438,9 +543,27 @@ mod tests {
             extract_video_metadata: false,
             #[cfg(feature = "media-metadata")]
             extract_pdf_cover: false,
+            #[cfg(feature = "gui")]
+            pdf: false,
+            #[cfg(feature = "gui")]
+            pdf_paper: None,
+            #[cfg(feature = "gui")]
+            pdf_landscape: false,
+            #[cfg(feature = "gui")]
+            pdf_portrait: false,
+            #[cfg(feature = "gui")]
+            pdf_margin: None,
+            #[cfg(feature = "gui")]
+            pdf_page_numbers: false,
+            #[cfg(feature = "gui")]
+            no_pdf_page_numbers: false,
+            #[cfg(feature = "gui")]
+            pdf_link_base: None,
+            #[cfg(feature = "gui")]
+            pdf_timeout_ms: None,
             check_links_only: false,
             format: None,
-            output: PathBuf::from("build"),
+            output: None,
             path: PathBuf::from("."),
             oembed_timeout_ms: None,
             oembed_cache_size: None,
@@ -543,7 +666,8 @@ mod tests {
         assert!(!args.stdout);
         assert!(!args.build);
         assert_eq!(args.path, PathBuf::from("."));
-        assert_eq!(args.output, PathBuf::from("build"));
+        assert_eq!(args.output, None);
+        assert_eq!(args.build_output_dir(), PathBuf::from("build"));
         assert_eq!(args.verbose, 0);
         assert!(!args.quiet);
     }
@@ -644,7 +768,8 @@ mod tests {
     fn test_parse_output_directory() {
         let args = Args::parse_from(["mbr", "-b", "--output", "./public"]);
         assert!(args.build);
-        assert_eq!(args.output, PathBuf::from("./public"));
+        assert_eq!(args.output, Some(PathBuf::from("./public")));
+        assert_eq!(args.build_output_dir(), PathBuf::from("./public"));
     }
 
     #[test]
@@ -1153,5 +1278,152 @@ mod tests {
             read_config(dir.path(), false, &args),
             Err(MbrError::Config(ConfigError::ParseFailed(_)))
         ));
+    }
+
+    /// Regression: `--output` became optional for `--pdf`; a build without it
+    /// still writes to `build`.
+    #[test]
+    fn test_build_output_defaults_to_build() {
+        assert_eq!(
+            Args::parse_from(["mbr", "-b"]).build_output_dir(),
+            PathBuf::from("build")
+        );
+        assert!(!Args::parse_from(["mbr", "-b"]).is_pdf());
+    }
+
+    #[cfg(feature = "gui")]
+    mod pdf {
+        use super::*;
+        use crate::pdf_config::{Orientation, Paper};
+
+        #[test]
+        fn pdf_is_a_mode() {
+            let args = Args::parse_from(["mbr", "--pdf", "note.md"]);
+            assert!(args.pdf && args.is_pdf());
+            assert_eq!(args.path, PathBuf::from("note.md"));
+            assert_eq!(args.check_combinations(), Ok(()));
+            for other in ["-s", "-g", "-b", "-o", "--check-links-only"] {
+                assert!(
+                    Args::try_parse_from(["mbr", "--pdf", other]).is_err(),
+                    "--pdf and {other} must conflict"
+                );
+            }
+        }
+
+        #[test]
+        fn pdf_options_parse() {
+            let args = Args::parse_from([
+                "mbr",
+                "--pdf",
+                "--pdf-paper",
+                "A4",
+                "--pdf-landscape",
+                "--pdf-margin",
+                "1cm 2cm",
+                "--pdf-page-numbers",
+                "--pdf-link-base",
+                "https://notes.example.com",
+                "--pdf-timeout-ms",
+                "5000",
+                "--output",
+                "-",
+                "note.md",
+            ]);
+            let flags = args.pdf_flags();
+            assert_eq!(flags.paper, Some(Paper::A4));
+            assert_eq!(flags.orientation, Some(Orientation::Landscape));
+            assert_eq!(
+                flags.margin.map(|m| m.as_css().to_owned()).as_deref(),
+                Some("1cm 2cm")
+            );
+            assert_eq!(flags.page_numbers, Some(true));
+            assert_eq!(
+                flags.link_base.as_ref().map(|b| b.as_str()),
+                Some("https://notes.example.com/")
+            );
+            assert_eq!(flags.timeout_ms, Some(5000));
+            assert_eq!(args.output, Some(PathBuf::from("-")));
+        }
+
+        /// Absent switches leave the configuration alone; each of a pair
+        /// overrides it in its own direction.
+        #[test]
+        fn orientation_and_page_number_switches_override_both_ways() {
+            let flags = Args::parse_from(["mbr", "--pdf", "note.md"]).pdf_flags();
+            assert_eq!(flags.orientation, None);
+            assert_eq!(flags.page_numbers, None);
+
+            let flags =
+                Args::parse_from(["mbr", "--pdf", "--pdf-portrait", "--no-pdf-page-numbers"])
+                    .pdf_flags();
+            assert_eq!(flags.orientation, Some(Orientation::Portrait));
+            assert_eq!(flags.page_numbers, Some(false));
+
+            let flags = Args::parse_from(["mbr", "--pdf", "--pdf-landscape", "--pdf-page-numbers"])
+                .pdf_flags();
+            assert_eq!(flags.orientation, Some(Orientation::Landscape));
+            assert_eq!(flags.page_numbers, Some(true));
+        }
+
+        #[test]
+        fn opposite_pdf_switches_conflict() {
+            for pair in [
+                ["--pdf-landscape", "--pdf-portrait"],
+                ["--pdf-page-numbers", "--no-pdf-page-numbers"],
+            ] {
+                let argv = ["mbr", "--pdf", pair[0], pair[1]];
+                assert!(Args::try_parse_from(argv).is_err(), "{argv:?}");
+            }
+        }
+
+        /// Precedence end to end: the switch beats `[pdf]` in the file.
+        #[test]
+        fn switches_beat_the_pdf_config_table() {
+            let config = crate::pdf_config::PdfConfig {
+                orientation: Orientation::Landscape,
+                page_numbers: true,
+                ..crate::pdf_config::PdfConfig::default()
+            };
+            let args =
+                Args::parse_from(["mbr", "--pdf", "--pdf-portrait", "--no-pdf-page-numbers"]);
+            let options =
+                crate::pdf_export::PdfOptions::resolve(&config, &args.pdf_flags(), || Paper::A4);
+            assert_eq!(options.orientation, Orientation::Portrait);
+            assert!(!options.page_numbers);
+
+            let args = Args::parse_from(["mbr", "--pdf"]);
+            let options =
+                crate::pdf_export::PdfOptions::resolve(&config, &args.pdf_flags(), || Paper::A4);
+            assert_eq!(options.orientation, Orientation::Landscape);
+            assert!(options.page_numbers);
+        }
+
+        #[test]
+        fn bad_pdf_option_values_are_refused_by_the_parser() {
+            for argv in [
+                ["mbr", "--pdf", "--pdf-paper", "tabloid"],
+                ["mbr", "--pdf", "--pdf-margin", "1in;x"],
+                ["mbr", "--pdf", "--pdf-link-base", "ftp://x/"],
+                ["mbr", "--pdf", "--pdf-timeout-ms", "0"],
+            ] {
+                assert!(Args::try_parse_from(argv).is_err(), "{argv:?}");
+            }
+        }
+
+        #[test]
+        fn pdf_options_without_pdf_are_refused() {
+            for flag in [
+                &["--pdf-landscape"][..],
+                &["--pdf-portrait"],
+                &["--pdf-page-numbers"],
+                &["--no-pdf-page-numbers"],
+                &["--pdf-paper", "a4"],
+                &["--pdf-timeout-ms", "10"],
+            ] {
+                let argv: Vec<&str> = ["mbr", "-s"].iter().chain(flag).copied().collect();
+                let args = Args::try_parse_from(argv).expect("parses");
+                assert!(args.check_combinations().is_err(), "{flag:?}");
+            }
+        }
     }
 }

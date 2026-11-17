@@ -18,6 +18,7 @@ your-notes/
 │   ├── config.toml    # Configuration
 │   ├── theme.css      # Complete theme replacement
 │   ├── user.css       # Select style changes/ overrides
+│   ├── export.css     # Paper-only styles for PDF export
 │   ├── index.html     # Page template
 │   └── components/    # Custom components
 ├── README.md
@@ -54,6 +55,7 @@ flowchart TD
 | `config.toml` | Settings and behavior | [Configuration Reference](../reference/configuration/), [Sorting](sorting/) |
 | `theme.css` | Color theme override | [Themes](themes/) |
 | `user.css` | Additional styles | [Themes](themes/) |
+| `export.css` | Styles loaded only when exporting a PDF (`mbr --pdf`, Save as PDF…) | [PDF Export](../features/pdf-export/#customizing-the-pdf) |
 | `index.html` | Main page template | [Templates](templates/) |
 | `section.html` | Directory listing template | [Templates](templates/) |
 | `home.html` | Home page template | [Templates](templates/) |

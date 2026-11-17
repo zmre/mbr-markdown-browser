@@ -74,6 +74,7 @@ pub mod outside_link;
 pub mod page_context;
 pub mod page_errors;
 pub mod path_resolver;
+pub mod pdf_config;
 #[cfg(feature = "media-metadata")]
 pub mod pdf_metadata;
 pub mod readability;

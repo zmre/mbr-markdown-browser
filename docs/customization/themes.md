@@ -346,8 +346,15 @@ scrolling off, so a printed table is never cut at the scroll edge.
 
 ## Printing
 
-Printing (and "Save as PDF", which is the same code path) is governed by the
-`@media print` block at the end of `theme.css`. Two rules define it.
+Printing (and a browser's own "Save as PDF", which is the same code path) is
+governed by the `@media print` block at the end of `theme.css`. Two rules define
+it.
+
+mbr's [PDF export](../features/pdf-export.md) (`mbr --pdf`, the GUI's **File →
+Save as PDF…**) uses these rules too, plus `export.css`, which only an export
+loads. It sets real `@page` margins (the macOS band described below does not
+appear on the export's print path) and drops the padding margins, so every page of an exported PDF
+gets the same top and bottom margin. Customize it in `.mbr/export.css`.
 
 ### Nothing is hidden on paper
 

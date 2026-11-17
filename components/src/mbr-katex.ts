@@ -12,7 +12,8 @@
  */
 import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
-import { waitForDom, loadScript, loadCss, getMbrAssetBase, scheduleIdleTask } from './dynamic-loader.ts'
+import { waitForDom, loadScript, loadCss, getMbrAssetBase } from './dynamic-loader.ts'
+import { scheduleRenderTask } from './export-mode.ts'
 import {
   type AsciiMathConverter,
   type KatexLike,
@@ -99,12 +100,13 @@ export class MbrKatexElement extends LitElement {
       return
     }
 
-    // Render in idle time to avoid blocking the main thread. The elements are
+    // Render in idle time to avoid blocking the main thread (at once in a PDF
+    // export, where idle time comes late). The elements are
     // queried *now*, not the list found at startup: if something cloned the
     // page while KaTeX was loading (slides after their bounded wait ran out),
     // the clones are what is on screen, and they are still unhandled.
     await new Promise<void>((resolve) => {
-      scheduleIdleTask(() => {
+      scheduleRenderTask(() => {
         try {
           renderMathElements(pendingMathElements(), katex, converter)
         } finally {

@@ -42,8 +42,12 @@ async fn main() -> ExitCode {
     let args = cli::Args::parse_checked();
     // `--check-links-only` reserves 1 for "broken links found", so a check
     // that could not run (bad configuration, unreadable root) is 2.
+    // `--pdf` likewise: 1 is "the export failed", so not getting as far as
+    // starting it (a missing note, a bad configuration) is 2, "refused".
     let failure = if args.check_links_only {
         ExitCode::from(LINK_CHECK_FAILED)
+    } else if args.is_pdf() {
+        ExitCode::from(PDF_REFUSED)
     } else {
         ExitCode::FAILURE
     };
@@ -60,6 +64,8 @@ async fn main() -> ExitCode {
 const LINK_CHECK_FOUND_PROBLEMS: u8 = 1;
 /// `--check-links-only`: the check itself failed.
 const LINK_CHECK_FAILED: u8 = 2;
+/// `--pdf`: refused before the export started (`pdf_cli::EXIT_REFUSED`).
+const PDF_REFUSED: u8 = 2;
 
 /// Formats an error and its `source()` chain for the terminal:
 /// `Error: <message>` followed by one `  caused by: <message>` line per source.
@@ -102,8 +108,9 @@ async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
     // Initialize tracing/logging based on verbosity flags
     // Use try_init to allow server to re-configure if needed (it uses tower_http logging)
     let log_filter = args.log_level_filter();
-    // The link report is stdout; every log line goes to stderr there.
-    let log_writer = if args.check_links_only {
+    // The link report is stdout, and so may a PDF be (`--output -`); every
+    // log line goes to stderr there.
+    let log_writer = if args.check_links_only || args.is_pdf() {
         tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
     } else {
         tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
@@ -156,10 +163,12 @@ async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
         && !args.stdout
         && !args.build
         && !args.check_links_only
+        && !args.pdf
         && !args.extract_video_metadata
         && !args.extract_pdf_cover;
     #[cfg(all(feature = "gui", not(feature = "media-metadata")))]
-    let is_gui_mode = !args.server && !args.stdout && !args.build && !args.check_links_only;
+    let is_gui_mode =
+        !args.server && !args.stdout && !args.build && !args.check_links_only && !args.pdf;
     #[cfg(not(feature = "gui"))]
     let _is_gui_mode = false;
 
@@ -343,6 +352,13 @@ async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
         return check_links(&config, &args);
     }
 
+    // PDF export: read like server mode (above: not the GUI's defaults), one
+    // note, its own loopback server and a hidden window.
+    #[cfg(feature = "gui")]
+    if args.pdf {
+        return Ok(mbr::pdf_cli::run(&args, &absolute_path, &path_relative_to_root, config).await);
+    }
+
     if args.build {
         // Build mode - generate static site
         // Default oembed timeout to 0 (disabled) for fastest builds unless explicitly set via CLI.
@@ -351,12 +367,13 @@ async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
             config.oembed_timeout_ms = 0;
         }
 
-        let output_dir = if args.output.is_absolute() {
-            args.output.clone()
+        let output = args.build_output_dir();
+        let output_dir = if output.is_absolute() {
+            output
         } else {
             std::env::current_dir()
                 .map_err(ConfigError::CurrentDirFailed)?
-                .join(&args.output)
+                .join(&output)
         };
 
         tracing::info!("Building static site to: {}", output_dir.display());

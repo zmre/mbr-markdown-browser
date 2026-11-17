@@ -12,6 +12,7 @@ use figment::{
 
 use crate::calendar::CalendarConfig;
 use crate::errors::ConfigError;
+use crate::pdf_config::PdfConfig;
 use crate::slides::SlideSettings;
 use crate::task_query::IncludeFilter;
 
@@ -847,6 +848,15 @@ pub struct Config {
     /// See `docs/reference/configuration.md` and [`crate::calendar`].
     #[serde(default)]
     pub calendar: CalendarConfig,
+    /// PDF export (`mbr --pdf`, the GUI's Save as PDF…): the `[pdf]` table
+    /// (`paper`, `orientation`, `margin`, `page_numbers`, `link_base`,
+    /// `timeout_ms`). Typed with `deny_unknown_fields`, so a typo fails at
+    /// startup. Command-line flags (`--pdf-*`) beat it.
+    ///
+    /// Environment: `MBR_PDF__PAPER=a4`, `MBR_PDF__MARGIN="0.5in"` (figment
+    /// splits on `__`). See [`crate::pdf_config`].
+    #[serde(default)]
+    pub pdf: PdfConfig,
     /// Glob patterns whose matching files are left out of the **task index**.
     ///
     /// Each pattern is matched against a markdown file's repository-relative
@@ -997,6 +1007,7 @@ impl Default for Config {
             tasks_default_include: default_tasks_default_include(),
             slides: SlideSettings::default(),
             calendar: CalendarConfig::default(),
+            pdf: PdfConfig::default(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
@@ -1302,7 +1313,6 @@ impl Config {
         let mut config: Config = figment
             .extract()
             .map_err(|e| ConfigError::ParseFailed(Box::new(e)))?;
-        tracing::debug!("Loaded config: {:?}", &config);
         if !edit_enabled_is_explicit && config.editing_needs_token() {
             tracing::warn!(
                 "In-browser editing is off: it is on by default here, but host {} is not \
@@ -1326,6 +1336,10 @@ impl Config {
         // here, never from the repository's config file (see the field docs).
         config.no_symlink_mounts =
             no_symlink_mounts_from_env() || NO_SYMLINK_MOUNTS_FOR_PROCESS.load(Ordering::Relaxed);
+        // After `root_dir` is assigned: before it, the value is
+        // `Config::default()`'s (the process's working directory), which made
+        // the log name the wrong repository.
+        tracing::debug!("Loaded config: {:?}", &config);
         config.reject_repo_supplied_absolute_static_folder(&figment)?;
         config.validate()?;
         config.log_external_static_folder();
@@ -3677,6 +3691,74 @@ mod tests {
         let config = Config::read(repo.path()).expect("env must load");
 
         assert_eq!(config.tasks_default_include, IncludeFilter::Markers);
+    }
+
+    #[test]
+    fn test_config_read_pdf_table() {
+        use crate::pdf_config::{Orientation, Paper};
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some(
+            "[pdf]\npaper = \"a4\"\norientation = \"landscape\"\nmargin = \"1cm\"\n\
+             page_numbers = true\nlink_base = \"https://notes.example.com\"\ntimeout_ms = 5000\n",
+        ));
+
+        let config = Config::read(repo.path()).expect("a [pdf] table must load");
+
+        assert_eq!(config.pdf.paper, Some(Paper::A4));
+        assert_eq!(config.pdf.orientation, Orientation::Landscape);
+        assert_eq!(config.pdf.margin.as_css(), "1cm");
+        assert!(config.pdf.page_numbers);
+        assert_eq!(
+            config.pdf.link_base.as_ref().map(|b| b.as_str()),
+            Some("https://notes.example.com/")
+        );
+        assert_eq!(config.pdf.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_config_read_without_pdf_table_uses_defaults() {
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(None);
+        let config = Config::read(repo.path()).expect("loads");
+        assert_eq!(config.pdf, crate::pdf_config::PdfConfig::default());
+    }
+
+    #[test]
+    fn test_config_read_rejects_bad_pdf_values() {
+        let _guard = env_lock();
+        for toml in [
+            "[pdf]\npapr = \"a4\"\n",
+            "[pdf]\npaper = \"tabloid\"\n",
+            "[pdf]\norientation = \"sideways\"\n",
+            "[pdf]\nmargin = \"1in; color: red\"\n",
+            "[pdf]\nlink_base = \"ftp://example.com/\"\n",
+            "[pdf]\ntimeout_ms = 0\n",
+        ] {
+            let repo = repo_with_mbr_dir(Some(toml));
+            assert!(
+                matches!(
+                    Config::read(repo.path()),
+                    Err(crate::MbrError::Config(ConfigError::ParseFailed(_)))
+                ),
+                "{toml:?} must fail to load"
+            );
+        }
+    }
+
+    /// `MBR_PDF__*` nests into `[pdf]` and beats the file key by key; a bare
+    /// `MBR_PDF__MARGIN=0` (which figment reads as a number) is a margin.
+    #[test]
+    fn test_config_read_pdf_env_overrides_the_file() {
+        use crate::pdf_config::Paper;
+        let _guard = env_lock();
+        let repo = repo_with_mbr_dir(Some("[pdf]\npaper = \"a4\"\npage_numbers = true\n"));
+        let _env = EnvVars::set(&[("MBR_PDF__PAPER", "legal"), ("MBR_PDF__MARGIN", "0")]);
+
+        let config = Config::read(repo.path()).expect("env must load");
+
+        assert_eq!(config.pdf.paper, Some(Paper::Legal));
+        assert_eq!(config.pdf.margin.as_css(), "0");
+        assert!(config.pdf.page_numbers, "the file's other keys stay");
     }
 
     #[test]

@@ -19,6 +19,7 @@
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { waitForDom, getMbrAssetBase } from './dynamic-loader.ts'
+import { isExportMode } from './export-mode.ts'
 import { subscribeSiteNav, getCanonicalPath, getGraphDepth, resolveUrl } from './shared.ts'
 import { loadGraphChunk } from './graph-chunk.ts'
 import { fetchPageLinks } from './graph/links-cache.ts'
@@ -110,6 +111,13 @@ export class MbrGenealogyElement extends LitElement {
     void waitForDom().then(() => {
       // Only person and organization pages get the relationship charts.
       if (!isChartNoteType(window.frontmatter?.['type'])) return
+      // Deliberately left out of a PDF export: the charts load near the
+      // viewport (an IntersectionObserver a hidden view may never fire),
+      // animate through d3 transitions (requestAnimationFrame, which a hidden
+      // view never runs), open on the reader's last chart (localStorage) and
+      // are an interactive window onto a larger canvas — none of which makes a
+      // faithful page. Nothing is rendered, so not even the placeholder prints.
+      if (isExportMode()) return
       this._unsubscribeSiteNav = subscribeSiteNav((state) => {
         if (state.data && state.data !== this._siteData) {
           this._siteData = state.data
