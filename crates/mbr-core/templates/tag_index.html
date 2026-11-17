@@ -18,7 +18,7 @@
         <ul class="tag-list">
           {% for tag in tags %}
           <li>
-            <a href="/{{ tag_source }}/{{ tag.url_value }}/">
+            <a href="{{ relative_root | default(value="/") | safe }}{{ tag_source }}/{{ tag.url_value }}/">
               <strong>{{ tag.display_value }}</strong>
             </a>
             <span class="tag-count">({{ tag.page_count }})</span>
@@ -34,7 +34,7 @@
       <nav>
         <ul>
           <li>
-            <a href="/" role="button" class="outline secondary mbr-icon-label">{{ icon(name="house", size=16) | safe }}Home</a>
+            <a href="{{ relative_root | default(value="/") | safe }}" role="button" class="outline secondary mbr-icon-label">{{ icon(name="house", size=16) | safe }}Home</a>
           </li>
         </ul>
       </nav>

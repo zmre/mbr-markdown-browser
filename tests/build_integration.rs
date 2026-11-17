@@ -839,6 +839,44 @@ async fn test_build_404_html_honours_base_url() {
     assert!(!readme.contains("/my-repo/"));
 }
 
+/// Regression: 404.html anchors its links at `base_url` (`/my-repo/`), and the
+/// link check resolved `/my-repo/` against the output folder itself, so every
+/// build with a `base_url` reported the 404 page's Home link as broken (fatal
+/// under `--fail-on-broken-links`). The output is served at `base_url`, so a
+/// root-relative link outside it would 404 once deployed: the tag pages' back
+/// buttons were `/tags/` and `/`, and now go through `relative_root`.
+#[tokio::test]
+async fn test_build_link_check_honours_base_url() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "readme.md",
+        "---\ntags: [demo]\n---\n# Hello World\n\n[Guide](docs/guide.md)",
+    );
+    repo.create_markdown("docs/guide.md", "# Guide");
+
+    let mut config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.base_url = "/my-repo/".to_string();
+    let output_dir = repo.path().join("build");
+    let builder =
+        mbr::build::Builder::new(config, output_dir.clone()).expect("Failed to create builder");
+    let stats = builder.build().await.expect("Build failed");
+
+    let html = read_page(&output_dir.join("404.html"));
+    assert!(html.contains(r#"<a href="/my-repo/" role="button" class="outline">Home</a>"#));
+    let tag_page = read_page(&output_dir.join("tags").join("demo").join("index.html"));
+    assert!(tag_page.contains(r#"<a href="../../tags/" role="button""#));
+    let tag_index = read_page(&output_dir.join("tags").join("index.html"));
+    assert!(tag_index.contains(r#"<a href="../" role="button""#));
+    assert_eq!(
+        stats.broken_links, 0,
+        "links must resolve under base_url, got {}",
+        stats.broken_links
+    );
+}
+
 #[tokio::test]
 async fn test_build_refuses_an_invalid_base_url() {
     let repo = TestRepo::new();
