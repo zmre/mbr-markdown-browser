@@ -72,7 +72,8 @@ These variables are available in all templates:
 | `headings` | string | Table of contents data (JSON) |
 | `current_dir_name` | string | Current directory name |
 | `current_path` | string | Current URL path |
-| `frontmatter_json` | string | All frontmatter as JSON |
+| `frontmatter_json` | string | All frontmatter as JSON (the simplified form: nested maps flattened, floats as strings) |
+| `frontmatter` | object | The note's whole frontmatter as written: nested maps, lists of maps and numbers intact, so `{% for i in frontmatter.items %}{{ i.qty * i.rate }}{% endfor %}` works. A frontmatter key named `frontmatter` cannot replace it |
 | `calendar_enabled` | bool | `[calendar] enabled`; gates `<mbr-calendar>` in `_footer.html` and the pre-paint script in `_head.html` |
 | `calendar_nav` | object | Only on a [periodic note](../features/calendar/#periodic-notes): `period` (canonical key, e.g. `2026-10-31`, `2026-W44`), `kind` (`day`/`week`/`month`/`quarter`/`year`), `label` (English, e.g. `Saturday, October 31, 2026`), `datetime` (for `<time datetime>`; absent for a quarter), `prev` / `next` (the nearest notes of the same kind, or absent) and `up` (the containing week / month / quarter / year notes that exist). Each link has `kind`, `period`, `url` (page-relative in static builds), `label`, `title` and `datetime`. Drawn by `_calendar_nav.html` |
 
@@ -161,6 +162,16 @@ The `subdirs` JSON array contains:
 {% include "_head.html" %}
 ```
 
+### URLs
+
+`url(path=…)` writes the URL of a file in the repository, given relative to the repository root: `/images/logo.png` on the server, in the GUI and in QuickLook, and a path relative to the page in a static build, so a site published under a sub-path keeps working. It is the same as `{{ relative_root | default(value="/") | safe }}images/logo.png`, escaped once and with a readable `/`:
+
+```html
+<img src="{{ url(path='/images/logo.png') }}" alt="Logo">
+```
+
+A URL with a scheme or host (`https://…`, `//cdn…`, `mailto:`) passes through unchanged.
+
 ### Icons
 
 The `icon()` function draws one of mbr's built-in icons (the [Lucide](https://lucide.dev) set the rest of the interface uses) as an inline SVG in the current text colour:
@@ -231,6 +242,14 @@ if (window.__MBR_CONFIG__?.serverMode) {
   initLiveSearch();
 }
 ```
+
+## One Note, Its Own Template
+
+The templates on this page restyle **every** page. To give a single note a
+layout of its own — an invoice, a letter — put `template: invoice.html` in its
+frontmatter instead; that file can include mbr's templates as
+`/.mbr/_head.html` and its own partials by name. See
+[Custom Page Templates](../features/custom-page-templates/).
 
 ## Example: Custom Page Template
 

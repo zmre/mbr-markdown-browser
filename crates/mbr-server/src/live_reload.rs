@@ -25,6 +25,12 @@
 //!   anywhere in the repository), which reloaded every open page for an HTML
 //!   file saved next to the notes.
 //!
+//!   A page rendered through its own page template (`template:` in the
+//!   note's frontmatter, [`mbr_core::page_template`]) is also told `template`
+//!   for an `.html` change in that template's folder — the template or a
+//!   sibling it may include — and for nothing else
+//!   ([`LiveReloadScope::with_page_template_folder`]).
+//!
 //! The hash is read only for an event naming the client's own source, so a
 //! burst of thousands of events (a `git checkout`) costs nothing extra.
 
@@ -91,11 +97,54 @@ fn affects_every_page(event_path: &str, template_folder: Option<&Path>) -> bool 
         || template_folder.is_some_and(|folder| path.starts_with(folder))
 }
 
+/// Whether a change at `event_path` (absolute, as the watcher reports it) is
+/// an `.html` file directly in `folder`: the page's own template or one of
+/// the siblings it may include.
+fn affects_page_template(event_path: &str, folder: Option<&Path>) -> bool {
+    let Some(folder) = folder else {
+        return false;
+    };
+    let path = Path::new(event_path);
+    path.parent() == Some(folder)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+}
+
+/// The folder of the page template the note at `source` (repo-relative, as
+/// the client names it) is rendered with, as an index key — `None` when the
+/// note has none or it does not resolve. A map lookup for any other note;
+/// only a note with a `template` key touches storage (one
+/// [`locate_page_template`](mbr_core::page_template::locate_page_template)),
+/// so call it off the async threads.
+pub fn page_template_folder(repo: &mbr_core::repo::Repo, source: &str) -> Option<PathBuf> {
+    let vault = repo.vault();
+    let note = mbr_core::vault::VaultPath::new(&normalized(source)).ok()?;
+    let template = {
+        let notes = repo.markdown_files.pin();
+        let frontmatter = notes.get(&vault.key(&note))?.frontmatter.as_ref()?;
+        mbr_core::page_template::requested_template(frontmatter)?
+            .ok()?
+            .to_string()
+    };
+    let path = mbr_core::page_template::locate_page_template(
+        vault.as_ref(),
+        &note,
+        &template,
+        repo.exempt_hidden_dirs(),
+    )
+    .ok()?;
+    Some(vault.key(&path.parent().unwrap_or_default()))
+}
+
 /// What one live-reload connection needs to describe changes to its page.
 pub struct LiveReloadScope {
     source: Option<String>,
     vault: Arc<dyn Vault>,
     template_folder: Option<PathBuf>,
+    /// The folder of the page's own page template, as an index key.
+    page_template_folder: Option<PathBuf>,
 }
 
 impl LiveReloadScope {
@@ -112,7 +161,21 @@ impl LiveReloadScope {
             vault,
             template_folder: template_folder
                 .map(|folder| folder.canonicalize().unwrap_or_else(|_| folder.to_owned())),
+            page_template_folder: None,
         }
+    }
+
+    /// The page is rendered through a page template in `folder` (an index
+    /// key, [`page_template_folder`]): an `.html` change there reloads it.
+    #[must_use]
+    pub fn with_page_template_folder(mut self, folder: Option<PathBuf>) -> Self {
+        self.page_template_folder = folder;
+        self
+    }
+
+    /// The connection's own note, as the client named it.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 
     /// The JSON frame for `event`. Reads the file only when `event` names this
@@ -130,7 +193,8 @@ impl LiveReloadScope {
         serde_json::to_string(&LiveReloadFrame {
             event,
             content_hash,
-            template: affects_every_page(&event.path, self.template_folder.as_deref()),
+            template: affects_every_page(&event.path, self.template_folder.as_deref())
+                || affects_page_template(&event.path, self.page_template_folder.as_deref()),
         })
     }
 }
@@ -190,6 +254,60 @@ mod tests {
                 Some("docs/guide.md")
             ));
         }
+    }
+
+    #[test]
+    fn page_template_changes_are_html_directly_in_its_folder() {
+        let folder = Path::new("/r/inv");
+        assert!(affects_page_template("/r/inv/invoice.html", Some(folder)));
+        assert!(affects_page_template("/r/inv/lines.HTML", Some(folder)));
+        assert!(!affects_page_template("/r/inv/a.md", Some(folder)));
+        assert!(!affects_page_template("/r/inv/sub/x.html", Some(folder)));
+        assert!(!affects_page_template(
+            "/r/other/invoice.html",
+            Some(folder)
+        ));
+        assert!(!affects_page_template("/r/inv/invoice.html", None));
+    }
+
+    #[test]
+    fn page_template_folder_comes_from_the_note_s_frontmatter() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("inv")).unwrap();
+        std::fs::write(root.join("inv/a.md"), "---\ntemplate: invoice.html\n---\n").unwrap();
+        std::fs::write(root.join("inv/invoice.html"), "x").unwrap();
+        std::fs::write(root.join("plain.md"), "# Plain\n").unwrap();
+        let repo = mbr_core::repo::Repo::init(
+            root.clone(),
+            "static".to_string(),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md".to_string(),
+            &[],
+            &[],
+        );
+        repo.scan_all().unwrap();
+        assert_eq!(
+            page_template_folder(&repo, "inv/a.md"),
+            Some(root.join("inv"))
+        );
+        assert_eq!(
+            page_template_folder(&repo, "/inv/a.md"),
+            Some(root.join("inv"))
+        );
+        assert_eq!(page_template_folder(&repo, "plain.md"), None);
+        assert_eq!(page_template_folder(&repo, "missing.md"), None);
+    }
+
+    #[tokio::test]
+    async fn a_page_template_save_is_a_template_frame_for_its_pages_only() {
+        let (_dir, root, scope) = repo(&[("inv/invoice.html", "x")], Some("inv/a.md"));
+        let save = event(&root, "inv/invoice.html", ChangeEventType::Modified);
+        assert!(frame_json(&scope, &save).await.get("template").is_none());
+        let scope = scope.with_page_template_folder(Some(root.join("inv")));
+        assert_eq!(frame_json(&scope, &save).await["template"], true);
     }
 
     #[test]

@@ -430,6 +430,12 @@ pub struct Builder {
     /// pass (url_path -> error message). Summarized to stderr after the build,
     /// mirroring broken-link reporting.
     frontmatter_errors: Arc<ConcurrentHashMap<String, String>>,
+    /// Notes whose page template (`template:`) could not be used, collected
+    /// during the parallel render pass (note path -> message). Any entry
+    /// fails the build after the pass, listing all of them: a page template
+    /// has no fallback, since publishing an invoice through the default page
+    /// would publish the wrong document.
+    page_template_errors: Arc<ConcurrentHashMap<String, String>>,
     /// Tells the link transform whether an extension-less target
     /// (`[x](../folder/file)`, `[x](/folder/file)`) is a page or folder — and
     /// therefore needs the trailing slash the URL convention requires — or a
@@ -454,6 +460,7 @@ impl Builder {
         let oembed_cache = Arc::new(OembedCache::new(config.oembed_cache_size));
         let build_link_index = Arc::new(ConcurrentHashMap::new());
         let frontmatter_errors = Arc::new(ConcurrentHashMap::new());
+        let page_template_errors = Arc::new(ConcurrentHashMap::new());
 
         tracing::debug!(
             "build: initialized oembed cache with {} bytes max",
@@ -482,6 +489,7 @@ impl Builder {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
+            page_template_errors,
             directory_url_probe,
             outside_links,
             calendar_chrome,
@@ -889,6 +897,7 @@ impl Builder {
         });
 
         error.into_result()?;
+        self.page_template_result()?;
 
         print_stage_done("Rendering markdown", count, Some(stage_start.elapsed()));
         Ok(count)
@@ -1097,6 +1106,21 @@ impl Builder {
         Ok(())
     }
 
+    /// Fails with every page-template problem the render pass recorded, in
+    /// note order, or does nothing when there was none.
+    fn page_template_result(&self) -> Result<(), BuildError> {
+        let guard = self.page_template_errors.pin();
+        if guard.is_empty() {
+            return Ok(());
+        }
+        let mut problems: Vec<(String, String)> = guard
+            .iter()
+            .map(|(note, message)| (note.clone(), message.clone()))
+            .collect();
+        problems.sort();
+        Err(BuildError::PageTemplates { problems })
+    }
+
     /// Synchronous version of `render_single_markdown` for use with rayon parallelism.
     ///
     /// All I/O in the render pipeline is already synchronous (std::fs, pulldown-cmark,
@@ -1175,12 +1199,43 @@ impl Builder {
         let word_count = render_result.word_count;
         let contact = render_result.contact;
         let slides = render_result.slides;
+        let frontmatter_value = render_result.frontmatter_value;
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
             syllables: render_result.syllable_count,
         };
         let readability_scores = mbr_core::readability::scores(&readability_counts);
+
+        // The note's own page template. A problem is recorded and the page is
+        // not written; the build fails once every page has been tried, so one
+        // run lists every broken template.
+        let note_label = || mbr_core::url_path::path_to_url(&info.raw_path);
+        let page_template = match mbr_core::page_template::requested_template(&frontmatter) {
+            None => None,
+            Some(requested) => match requested.and_then(|template| {
+                let vault = self.repo.vault();
+                let note = vault.vault_path(path).map_err(|_| {
+                    mbr_core::page_template::PageTemplateError::OutsideRoot {
+                        template: template.to_string(),
+                    }
+                })?;
+                mbr_core::page_template::resolve_page_template(
+                    vault.as_ref(),
+                    &note,
+                    template,
+                    self.repo.exempt_hidden_dirs(),
+                )
+            }) {
+                Ok(template) => Some(template),
+                Err(e) => {
+                    self.page_template_errors
+                        .pin()
+                        .insert(note_label(), e.to_string());
+                    return Ok(());
+                }
+            },
+        };
 
         // Store outbound links in the build link index for generating links.json files
         if self.config.link_tracking && !outbound_links.is_empty() {
@@ -1247,6 +1302,7 @@ impl Builder {
                 siblings,
                 slides: slides.as_ref().map(|s| &s.settings),
                 calendar_nav: calendar_nav.as_ref(),
+                frontmatter: Some(&frontmatter_value),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &self.config.tag_sources,
@@ -1294,8 +1350,24 @@ impl Builder {
         }
 
         // Render through template (lock-free — uses pre-cloned Tera)
-        let html_output =
-            Templates::render_markdown_with_tera(tera, &html, frontmatter, extra_context)?;
+        let html_output = match page_template {
+            Some(template) => match Templates::render_page_template_with_tera(
+                tera,
+                &template,
+                &html,
+                frontmatter,
+                extra_context,
+            ) {
+                Ok(html) => html,
+                Err(e) => {
+                    self.page_template_errors
+                        .pin()
+                        .insert(note_label(), e.to_string());
+                    return Ok(());
+                }
+            },
+            None => Templates::render_markdown_with_tera(tera, &html, frontmatter, extra_context)?,
+        };
 
         // Determine output path: url_path → build/{url_path}/index.html
         let url_path = info.url_path.trim_start_matches('/');
@@ -1915,11 +1987,14 @@ impl Builder {
 
     /// Places static assets (images, PDFs, videos) into the build output.
     fn place_assets(&self) -> Result<usize, BuildError> {
+        // A note's page template is page structure, never published.
+        let templates = self.repo.page_template_files();
         let other_files: Vec<_> = self
             .repo
             .other_files
             .pin()
             .iter()
+            .filter(|(key, _)| !templates.contains(*key))
             .map(|(_, info)| info.clone())
             .collect();
 
@@ -2074,6 +2149,7 @@ impl Builder {
 
         let placement = AssetPlacement::for_current_platform();
         let depth = static_dir.segments().count();
+        let templates = self.repo.page_template_files();
 
         let files = mbr_core::vault::walk_files_under(vault.as_ref(), &static_dir, |dir| {
             !is_hidden_segment(dir.name())
@@ -2082,7 +2158,10 @@ impl Builder {
             // A folder that canonicalized elsewhere in the vault (a link out of
             // the static folder, or a second link to a mount's target) is not
             // part of the static folder's URL space.
-            if !entry.path.starts_with(&static_dir) || is_hidden_segment(entry.name()) {
+            if !entry.path.starts_with(&static_dir)
+                || is_hidden_segment(entry.name())
+                || templates.contains(&vault.key(&entry.path))
+            {
                 continue;
             }
             let relative: PathBuf = entry.path.segments().skip(depth).collect();
@@ -2310,7 +2389,7 @@ impl Builder {
 
         // Step 4b: Generate media.json with only other_files
         let media_data = serde_json::json!({
-            "other_files": &self.repo.other_files,
+            "other_files": self.repo.published_other_files(),
         });
         let media_json = serde_json::to_string(&media_data).map_err(|e| {
             BuildError::RepoScan(mbr_core::errors::RepoError::JsonSerializeFailed(e))
@@ -3178,6 +3257,7 @@ mod tests {
             oembed_cache,
             build_link_index,
             frontmatter_errors,
+            page_template_errors: Arc::new(ConcurrentHashMap::new()),
             directory_url_probe,
             outside_links,
             calendar_chrome,

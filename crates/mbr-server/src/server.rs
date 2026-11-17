@@ -401,6 +401,25 @@ impl ListingCaches {
     }
 }
 
+/// What rendering a note through its page template came to
+/// (`Server::render_with_page_template`).
+enum PageTemplateRender {
+    Html(String),
+    /// Not usable: the error page.
+    Failed(mbr_core::page_template::PageTemplateError),
+    /// The template, or a sibling it needs, did not arrive in time: the
+    /// "Downloading" page.
+    Downloading,
+}
+
+/// Whether `path` has an `.html` extension (ASCII case-insensitive): the only
+/// files that can be a note's page template.
+fn is_html_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+}
+
 /// Whether a change at `path` (repository-relative) can change the periodic
 /// index: a markdown file whose stem names a period — a periodic note, or
 /// one that was — or anything that is not a markdown file, since a folder's
@@ -3480,6 +3499,21 @@ impl Server {
             Arc::clone(config.repo.vault()),
             config.template_folder.as_deref(),
         );
+        // A page rendered with its own page template also reloads when that
+        // template (or a sibling) is saved.
+        let page_template_folder = match scope.source().map(str::to_string) {
+            Some(source) => {
+                let repo = Arc::clone(&config.repo);
+                tokio::task::spawn_blocking(move || {
+                    crate::live_reload::page_template_folder(&repo, &source)
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+            None => None,
+        };
+        let scope = scope.with_page_template_folder(page_template_folder);
 
         // If file watcher is not initialized, close the connection
         let Some(file_change_tx) = config.file_change_tx else {
@@ -3659,7 +3693,7 @@ impl Server {
 
         let json_start = std::time::Instant::now();
         let media_data = serde_json::json!({
-            "other_files": &config.repo.other_files,
+            "other_files": config.repo.published_other_files(),
             "populated": populated,
         });
 
@@ -5785,6 +5819,16 @@ impl Server {
                     "Blocked request for a path outside the repository root: {}",
                     resolved_path.display()
                 );
+                ResolvedPath::NotFound
+            }
+            // A note's page template is page structure, not content: never
+            // served. Only an `.html` request asks (templates are `.html`),
+            // and the set is memoized, so an image request pays nothing.
+            ResolvedPath::StaticFile(resolved_path)
+                if is_html_path(&resolved_path)
+                    && config.repo.is_page_template_file(&resolved_path) =>
+            {
+                tracing::debug!("Not serving page template {}", resolved_path.display());
                 ResolvedPath::NotFound
             }
             other => other,
@@ -7924,6 +7968,139 @@ impl Server {
         config.repo.record_file_stamps(&diff);
     }
 
+    /// Renders a note through its page template (`requested`: the
+    /// frontmatter value, or why it is not usable).
+    ///
+    /// A template — or a sibling the render names — that the vault reports
+    /// not downloaded (iCloud on iOS) is requested from the provider and the
+    /// whole resolve + render retried every [`MBR_ASSET_DOWNLOAD_POLL`] for up
+    /// to [`MBR_ASSET_DOWNLOAD_WAIT`], the wait `/.mbr/*` overrides and edit
+    /// reads get; still missing, the answer is the "Downloading" page
+    /// ([`PageTemplateRender::Downloading`]), logged at DEBUG, whose
+    /// `Refresh` retries the load. Siblings the template never uses are never
+    /// requested: core reports one only once a render error names it.
+    ///
+    /// Free on the desktop: `LocalVault` answers `availability` without I/O
+    /// and never fails a read `NotDownloaded`, so the first attempt is the
+    /// only one.
+    async fn render_with_page_template(
+        config: &ServerState,
+        md_path: &Path,
+        requested: Result<String, mbr_core::page_template::PageTemplateError>,
+        html: &str,
+        frontmatter: markdown::SimpleMetadata,
+        extra_context: std::collections::HashMap<String, serde_json::Value>,
+    ) -> PageTemplateRender {
+        let requested = match requested {
+            Ok(requested) => requested,
+            Err(e) => return PageTemplateRender::Failed(e),
+        };
+        let deadline = Instant::now() + MBR_ASSET_DOWNLOAD_WAIT;
+        let mut asked: HashSet<mbr_core::vault::VaultPath> = HashSet::new();
+        loop {
+            let attempt = match Self::load_page_template(config, md_path, &requested).await {
+                Ok(template) => config.templates.render_page_template(
+                    &template,
+                    html,
+                    frontmatter.clone(),
+                    extra_context.clone(),
+                ),
+                Err(e) => Err(e),
+            };
+            let missing = match attempt {
+                Ok(html) => return PageTemplateRender::Html(html),
+                Err(e) => match e.not_downloaded_files() {
+                    Some(files) => files.to_vec(),
+                    None => return PageTemplateRender::Failed(e),
+                },
+            };
+            let new: Vec<_> = missing
+                .into_iter()
+                .filter(|file| asked.insert(file.clone()))
+                .collect();
+            if !new.is_empty() {
+                config.repo.vault().request_download(&new);
+                continue; // a provider with the bytes at hand has them now
+            }
+            if Instant::now() >= deadline {
+                tracing::debug!(
+                    "page template of {} not downloaded after {}ms; asking for a retry",
+                    md_path.display(),
+                    MBR_ASSET_DOWNLOAD_WAIT.as_millis()
+                );
+                return PageTemplateRender::Downloading;
+            }
+            tokio::time::sleep(MBR_ASSET_DOWNLOAD_POLL).await;
+        }
+    }
+
+    /// Locates and reads the page template a note asks for
+    /// ([`mbr_core::page_template::resolve_page_template`]) on the blocking
+    /// pool.
+    async fn load_page_template(
+        config: &ServerState,
+        md_path: &Path,
+        requested: &str,
+    ) -> Result<mbr_core::page_template::PageTemplate, mbr_core::page_template::PageTemplateError>
+    {
+        use mbr_core::page_template::PageTemplateError;
+        let requested = requested.to_string();
+        let repo = Arc::clone(&config.repo);
+        let key = md_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let vault = repo.vault();
+            let note = vault
+                .vault_path(&key)
+                .map_err(|_| PageTemplateError::OutsideRoot {
+                    template: requested.clone(),
+                })?;
+            mbr_core::page_template::resolve_page_template(
+                vault.as_ref(),
+                &note,
+                &requested,
+                repo.exempt_hidden_dirs(),
+            )
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(PageTemplateError::Render {
+                template: String::new(),
+                message: format!("the template task failed: {e}"),
+            })
+        })
+    }
+
+    /// The page a note gets when its page template cannot be used: the
+    /// error template, `500`, naming the note and the problem (escaped by
+    /// the template). `500` for a missing template too, not `404`: the page
+    /// the reader asked for exists, and it is the note's own configuration
+    /// that failed — a `404` would send them looking for the wrong thing.
+    fn page_template_error_page(
+        config: &ServerState,
+        md_path: &Path,
+        error: &mbr_core::page_template::PageTemplateError,
+    ) -> Response<Body> {
+        let note = pathdiff::diff_paths(md_path, &config.base_dir)
+            .map(|relative| mbr_core::url_path::path_to_url(&relative))
+            .unwrap_or_else(|| md_path.display().to_string());
+        tracing::warn!("Page template of {note}: {error}");
+        let current_url = mbr_core::repo::build_markdown_url_path(
+            md_path,
+            config
+                .canonical_base_dir
+                .as_deref()
+                .unwrap_or(config.base_dir.as_path()),
+            &config.index_file,
+        );
+        Self::render_error_page(
+            config,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Page template error",
+            Some(&format!("{note}: {error}")),
+            &current_url,
+        )
+    }
+
     async fn markdown_to_html(
         md_path: &Path,
         config: &ServerState,
@@ -8015,12 +8192,17 @@ impl Server {
         let word_count = render_result.word_count;
         let contact = render_result.contact;
         let slides = render_result.slides;
+        let frontmatter_value = render_result.frontmatter_value;
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
             syllables: render_result.syllable_count,
         };
         let readability_scores = mbr_core::readability::scores(&readability_counts);
+        // The note's own page template (`template:`), resolved and rendered
+        // in place of `index.html` below. Notes without one pay a map lookup.
+        let page_template = mbr_core::page_template::requested_template(&frontmatter)
+            .map(|requested| requested.map(str::to_string));
         // Use relative path for markdown_source so live reload can match it.
         // `path_to_url` keeps it `/`-separated: the editor splits this value on
         // `/` to build the raw/save URLs and to derive the note's folder for
@@ -8124,6 +8306,7 @@ impl Server {
                 siblings: &siblings,
                 slides: slides.as_ref().map(|s| &s.settings),
                 calendar_nav: calendar_nav.as_ref(),
+                frontmatter: Some(&frontmatter_value),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -8182,10 +8365,34 @@ impl Server {
             );
         }
 
-        let full_html_output = config
-            .templates
-            .render_markdown(&inner_html_output, frontmatter, extra_context)
-            .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?;
+        let full_html_output = match page_template {
+            Some(requested) => match Self::render_with_page_template(
+                config,
+                md_path,
+                requested,
+                &inner_html_output,
+                frontmatter,
+                extra_context,
+            )
+            .await
+            {
+                PageTemplateRender::Html(html) => html,
+                PageTemplateRender::Failed(e) => {
+                    return Ok(Self::page_template_error_page(config, md_path, &e));
+                }
+                PageTemplateRender::Downloading => {
+                    return Ok(Self::not_downloaded_page(
+                        config,
+                        current_url.trim_start_matches('/'),
+                        md_path,
+                    ));
+                }
+            },
+            None => config
+                .templates
+                .render_markdown(&inner_html_output, frontmatter, extra_context)
+                .inspect_err(|e| tracing::error!("Error rendering template: {e}"))?,
+        };
         tracing::debug!("generated the html");
 
         // Generate ETag from rendered content

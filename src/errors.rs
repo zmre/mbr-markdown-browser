@@ -102,6 +102,12 @@ pub enum PdfError {
     WebView(#[source] wry::Error),
 
     /// The page reported that it could not prepare itself for paper.
+    /// The note names a page template (`template:`) that cannot be used.
+    /// Refused before the export starts: the server would answer its error
+    /// page, and printing that would be the wrong document.
+    #[error("{0}")]
+    PageTemplate(crate::standalone::PageTemplateProblem),
+
     #[error("The page could not be prepared for export: {message}")]
     PageFailed { message: String },
 
@@ -145,6 +151,7 @@ impl PdfError {
                 | PdfError::OutputDirNotDirectory { .. }
                 | PdfError::OutputDirNotWritable { .. }
                 | PdfError::Server(_)
+                | PdfError::PageTemplate(_)
         )
     }
 }

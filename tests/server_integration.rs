@@ -12048,3 +12048,138 @@ async fn test_saving_config_toml_changes_the_served_page() {
     assert!(errors.contains("config_parse_error"), "{errors}");
     assert_html_contains(&fetch_text(&client, port, "/note/").await, "After | ");
 }
+
+// ---------------------- per-note page templates ----------------------
+
+/// A repository with an invoice note rendered through `invoices/invoice.html`,
+/// which includes mbr's head, a sibling partial, loops over a list of maps
+/// in the lossless `frontmatter`, and writes a site URL with `url()`.
+fn page_template_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "invoices/2026-001.md",
+        concat!(
+            "---\n",
+            "title: Invoice 2026-001\n",
+            "template: invoice.html\n",
+            "client: {name: Acme}\n",
+            "items:\n",
+            "  - {desc: Design, qty: 2, rate: 150.5}\n",
+            "  - {desc: Build, qty: 3, rate: 100}\n",
+            "---\n\nThanks for your business.\n",
+        ),
+    );
+    repo.create_static_file(
+        "invoices/invoice.html",
+        concat!(
+            "<!doctype html><html><head>{% include \"/.mbr/_head.html\" %}</head><body>",
+            "<img src=\"{{ url(path=\"/images/logo.png\") }}\">",
+            "<h1>{{ title }} for {{ frontmatter.client.name }}</h1>",
+            "{% include \"lines.html\" %}",
+            "<div class=\"notes\">{{ markdown | safe }}</div></body></html>",
+        )
+        .as_bytes(),
+    );
+    repo.create_static_file(
+        "invoices/lines.html",
+        b"<table>{% for i in frontmatter.items %}<tr><td>{{ i.desc }}</td><td>{{ i.qty * i.rate }}</td></tr>{% endfor %}</table>",
+    );
+    repo.create_static_file("invoices/standalone.html", b"<p>a real page</p>");
+    repo.create_static_file("images/logo.png", b"png");
+    repo
+}
+
+#[tokio::test]
+async fn test_page_template_renders_the_note() {
+    let repo = page_template_repo();
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/invoices/2026-001/").await;
+    assert_eq!(response.status(), 200);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "<h1>Invoice 2026-001 for Acme</h1>");
+    assert_html_contains(&html, "<td>Design</td><td>301</td>");
+    assert_html_contains(&html, "<td>Build</td><td>300</td>");
+    assert_html_contains(&html, "<img src=\"/images/logo.png\">");
+    assert_html_contains(&html, "Thanks for your business.");
+    // mbr's own head, through the `/.mbr/` prefix.
+    assert_html_contains(&html, "pico.min.css");
+    // Not mbr's page layout.
+    assert_html_not_contains(&html, "<mbr-browse");
+}
+
+#[tokio::test]
+async fn test_page_template_file_is_not_served_or_listed() {
+    let repo = page_template_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    assert_eq!(server.get("/invoices/invoice.html").await.status(), 404);
+    // A sibling no note names is an ordinary file, served as before.
+    assert_eq!(server.get("/invoices/lines.html").await.status(), 200);
+    assert_eq!(server.get("/invoices/standalone.html").await.status(), 200);
+
+    let media = server.populated_media_text().await;
+    assert!(!media.contains("invoices/invoice.html"), "{media}");
+    assert!(media.contains("invoices/standalone.html"), "{media}");
+    // site.json lists notes only; the template is never an entry.
+    let site = server.get_text("/.mbr/site.json").await;
+    assert!(!site.contains("\"/invoices/invoice.html"), "{site}");
+
+    let search = server
+        .post_json("/.mbr/search", r#"{"q": "invoice", "filetype": "all"}"#)
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!search.contains("/invoices/invoice.html"), "{search}");
+}
+
+#[tokio::test]
+async fn test_missing_page_template_is_an_error_page() {
+    let repo = TestRepo::new();
+    repo.create_markdown("notes/a.md", "---\ntemplate: nope.html\n---\n\nBody\n");
+    // Refused lexically (not an `.html` name), so no file name the host
+    // filesystem would reject is ever looked up: `<` is invalid on Windows.
+    repo.create_markdown("notes/b.md", "---\ntemplate: \"<b>nope\"\n---\n\nBody\n");
+    let server = TestServer::start(&repo).await;
+
+    let response = server.get("/notes/a/").await;
+    assert_eq!(response.status(), 500);
+    // As a browser reads it: Tera's escaper writes `/` as `&#x2F;`.
+    let html = response.text().await.unwrap().replace("&#x2F;", "/");
+    assert_html_contains(&html, "Page template error");
+    assert_html_contains(&html, "notes/a.md");
+    assert_html_contains(&html, "template `nope.html` was not found");
+
+    let response = server.get("/notes/b/").await;
+    assert_eq!(response.status(), 500);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "is not an .html file");
+    // Escaped, never markup.
+    assert_html_not_contains(&html, "<b>nope");
+    assert_html_contains(&html, "&lt;b&gt;nope");
+}
+
+#[tokio::test]
+async fn test_broken_page_template_is_an_error_page_naming_the_problem() {
+    let repo = TestRepo::new();
+    repo.create_markdown("a.md", "---\ntemplate: t.html\n---\n\nBody\n");
+    repo.create_static_file("t.html", b"{{ no_such_variable.deep }}");
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/a/").await;
+    assert_eq!(response.status(), 500);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "Page template error");
+    assert_html_contains(&html, "t.html");
+    assert_html_contains(&html, "no_such_variable");
+}
+
+#[tokio::test]
+async fn test_page_template_escaping_the_repository_is_refused() {
+    let repo = TestRepo::new();
+    repo.create_markdown("a.md", "---\ntemplate: ../../outside.html\n---\n\nBody\n");
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/a/").await;
+    assert_eq!(response.status(), 500);
+    assert_html_contains(&response.text().await.unwrap(), "outside the repository");
+}

@@ -4010,3 +4010,111 @@ async fn test_build_ships_the_calendar_overlay_on_every_page() {
         assert!(entry["raw_path"].is_string(), "{entry}");
     }
 }
+
+// ---------------------- per-note page templates ----------------------
+
+/// Builds `repo` and returns the result instead of panicking on failure.
+async fn try_build_site(repo: &TestRepo) -> Result<std::path::PathBuf, mbr::errors::BuildError> {
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+    let builder = mbr::build::Builder::new(config, output_dir.clone())?;
+    builder.build().await?;
+    Ok(output_dir)
+}
+
+/// An invoice two folders down, rendered through a template beside it.
+fn page_template_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "clients/acme/2026-001.md",
+        concat!(
+            "---\n",
+            "title: Invoice 2026-001\n",
+            "template: invoice.html\n",
+            "items:\n",
+            "  - {desc: Design, qty: 2, rate: 150.5}\n",
+            "---\n\nThanks.\n",
+        ),
+    );
+    repo.create_static_file(
+        "clients/acme/invoice.html",
+        concat!(
+            "<html><head>{% include \"/.mbr/_head.html\" %}</head><body>",
+            "<img id=\"a\" src=\"{{ url(path=\"/images/logo.png\") }}\">",
+            "<img id=\"b\" src=\"{{ relative_root | default(value=\"/\") | safe }}images/logo.png\">",
+            "{% include \"row.html\" %}{{ markdown | safe }}</body></html>",
+        )
+        .as_bytes(),
+    );
+    repo.create_static_file(
+        "clients/acme/row.html",
+        b"{% for i in frontmatter.items %}<p class=\"row\">{{ i.desc }} {{ i.qty * i.rate }}</p>{% endfor %}",
+    );
+    repo.create_static_file("images/logo.png", b"png");
+    repo
+}
+
+#[tokio::test]
+async fn test_build_renders_a_page_template_with_urls_relative_to_depth() {
+    let repo = page_template_repo();
+    let output = build_site(&repo).await;
+    let html = fs::read_to_string(output.join("clients/acme/2026-001/index.html")).unwrap();
+    assert!(html.contains("<p class=\"row\">Design 301</p>"), "{html}");
+    assert!(html.contains("Thanks."), "{html}");
+    // `url()` and the idiom agree, relative to the page three levels down.
+    assert!(
+        html.contains("<img id=\"a\" src=\"../../../images/logo.png\">"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<img id=\"b\" src=\"../../../images/logo.png\">"),
+        "{html}"
+    );
+    // mbr's head, with the static build's relative asset base (as a browser
+    // reads it: Tera writes `/` as `&#x2F;` there).
+    assert!(
+        html.replace("&#x2F;", "/")
+            .contains("../../../.mbr/pico.min.css"),
+        "{html}"
+    );
+    assert!(output.join("images/logo.png").exists());
+}
+
+#[tokio::test]
+async fn test_build_does_not_publish_page_templates() {
+    let repo = page_template_repo();
+    let output = build_site(&repo).await;
+    assert!(
+        fs::symlink_metadata(output.join("clients/acme/invoice.html")).is_err(),
+        "the template is not published"
+    );
+    // A sibling no note names is an ordinary file.
+    assert!(fs::symlink_metadata(output.join("clients/acme/row.html")).is_ok());
+    let media = fs::read_to_string(output.join(".mbr/media.json")).unwrap();
+    assert!(!media.contains("invoice.html"), "{media}");
+    assert!(media.contains("row.html"), "{media}");
+}
+
+#[tokio::test]
+async fn test_build_fails_listing_every_broken_page_template() {
+    let repo = TestRepo::new();
+    repo.create_markdown("a.md", "---\ntemplate: missing.html\n---\n\nA\n");
+    repo.create_markdown("b/c.md", "---\ntemplate: t.html\n---\n\nC\n");
+    repo.create_static_file("b/t.html", b"{{ nope.nope }}");
+    repo.create_markdown("fine.md", "# Fine\n");
+    let error = try_build_site(&repo).await.expect_err("the build fails");
+    let message = error.to_string();
+    assert!(message.contains("2 page template problem(s)"), "{message}");
+    assert!(
+        message.contains("a.md: template `missing.html` was not found"),
+        "{message}"
+    );
+    assert!(
+        message.contains("b/c.md: template `t.html` failed to render"),
+        "{message}"
+    );
+    assert!(message.contains("nope"), "{message}");
+}

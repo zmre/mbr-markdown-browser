@@ -373,6 +373,7 @@ impl Repo {
         }
         drop(other);
         self.rebuild_tag_index();
+        self.invalidate_page_templates();
         Ok(restored)
     }
 

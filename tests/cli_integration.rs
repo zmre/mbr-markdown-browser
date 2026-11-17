@@ -784,3 +784,57 @@ fn test_check_links_only_conflicts_with_build_and_format_needs_it() {
         .expect("run");
     assert!(!format_alone.status.success());
 }
+
+/// A note whose page template does not render fails `mbr -b` with a non-zero
+/// exit, naming the note, the template and the problem on stderr.
+#[test]
+fn test_build_with_broken_page_template_exits_non_zero() {
+    let repo = TestRepo::new();
+    repo.create_markdown("invoices/a.md", "---\ntemplate: invoice.html\n---\n\nA\n");
+    repo.create_static_file("invoices/invoice.html", b"{% if %}");
+    let out = tempfile::tempdir().unwrap();
+    let output = run_build(&repo, &out.path().join("site"), &[]);
+    assert!(!output.status.success(), "the build must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invoices/a.md"), "{stderr}");
+    assert!(stderr.contains("invoice.html"), "{stderr}");
+}
+
+/// `mbr --pdf` refuses (exit 2) a note whose page template cannot be used,
+/// naming the note and the problem, and writes nothing: printing the server's
+/// error page would be the wrong document. The check runs before the display
+/// and backend checks, so this holds on every platform and in headless CI.
+#[cfg(feature = "gui")]
+#[test]
+fn test_pdf_with_broken_page_template_is_refused() {
+    let repo = TestRepo::new();
+    repo.create_markdown("bills/a.md", "---\ntemplate: missing.html\n---\n\nA\n");
+    repo.create_markdown("bills/b.md", "---\ntemplate: t.html\n---\n\nB\n");
+    repo.create_static_file("bills/t.html", b"{{ nope.nope }}");
+    let out = tempfile::tempdir().unwrap();
+
+    for (note, expected) in [
+        (
+            "bills/a.md",
+            "bills/a.md: template `missing.html` was not found",
+        ),
+        (
+            "bills/b.md",
+            "bills/b.md: template `t.html` failed to render",
+        ),
+    ] {
+        let pdf = out.path().join("out.pdf");
+        let output = mbr_command()
+            .arg("--pdf")
+            .arg("-q")
+            .arg("--output")
+            .arg(&pdf)
+            .arg(repo.path().join(note))
+            .output()
+            .expect("failed to run the mbr binary");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!pdf.exists(), "nothing is written");
+    }
+}

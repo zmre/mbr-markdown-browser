@@ -114,7 +114,7 @@ never replaces an existing PDF with a broken one.
 |------|---------|
 | `0` | The PDF was written (warnings, if any, on stderr) |
 | `1` | The export ran and failed: the page could not be prepared, printing failed, or the written file could not be checked or moved into place. The message names the cause and the path |
-| `2` | Refused before starting: a bad flag or value, a missing note, a configuration error, an output folder that does not exist, is not a folder or is not writable, no display (Linux), or a platform without PDF support. Nothing was rendered |
+| `2` | Refused before starting: a bad flag or value, a missing note, a configuration error, a note whose [page template](custom-page-templates/) cannot be used (missing, outside the repository, or failing to render: the message names the note, the template and why), an output folder that does not exist, is not a folder or is not writable, no display (Linux), or a platform without PDF support. Nothing was rendered |
 
 ## What ends up on paper
 

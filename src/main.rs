@@ -3,10 +3,7 @@ use std::process::ExitCode;
 
 #[cfg(feature = "gui")]
 use mbr::browser::{self, BrowserContext};
-use mbr::{
-    ConfigError, MbrError, build::Builder, cli, link_transform::LinkTransformConfig, markdown,
-    templates,
-};
+use mbr::{ConfigError, MbrError, build::Builder, cli};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Check if the given path requires a folder picker dialog.
@@ -432,112 +429,8 @@ async fn run(args: cli::Args) -> Result<ExitCode, MbrError> {
             std::process::exit(1);
         }
 
-        // Determine if this is an index file (which doesn't need ../ prefix for links)
-        let is_index_file = input_path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .is_some_and(|f| f == config.index_file);
-
-        let link_transform_config = LinkTransformConfig {
-            markdown_extensions: config.markdown_extensions.clone(),
-            index_file: config.index_file.clone(),
-            is_index_file,
-            url_depth: None,
-            // CLI stdout mode renders a single file with no repo index, so
-            // body wikilinks never resolve globally; the page URL is unused.
-            current_page_url: String::new(),
-            directory_url_probe: None,
-            outside_links: None,
-        };
-
-        // CLI mode: server_mode=false, transcode disabled (transcode is server-only).
-        // Stdout/CLI mode mirrors build defaults (off unless explicitly enabled).
-        let valid_tag_sources = mbr::config::tag_sources_to_set(&config.tag_sources);
-        let mark_incomplete = config.mark_incomplete.unwrap_or(false);
-        let render_result = markdown::render(
-            input_path,
-            config.root_dir.as_path(),
-            config.oembed_timeout_ms,
-            link_transform_config,
-            false, // server_mode is false in CLI mode
-            false, // transcode is disabled in CLI mode
-            valid_tag_sources,
-            // Hardcoded off: CLI mode writes HTML to stdout, with no page and no
-            // server for a review anchor to reach.
-            markdown::ReviewLines::Omit,
-            mark_incomplete,
-            &config.incomplete_markers,
-            None, // no repo wikilink index in CLI stdout mode
-        )
-        .await
-        .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
-        let templates =
-            templates::Templates::new(&config.root_dir, config.template_folder.as_deref())
-                .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
-        // The same context builder the server and the static build use, so a
-        // key the templates read (`sidebar_style`, …) cannot go missing here.
-        // A single file has no siblings and no live repository; URLs stay
-        // absolute, as before.
-        let readability = mbr::readability::scores(&mbr::readability::ReadabilityCounts {
-            words: render_result.word_count,
-            sentences: render_result.sentence_count,
-            syllables: render_result.syllable_count,
-        });
-        let file_path = path_relative_to_root.to_string_lossy();
-        let modified_secs = std::fs::metadata(&absolute_path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        let mut extra_context = mbr::page_context::markdown_extra_context(
-            &mbr::page_context::MarkdownPageParams {
-                breadcrumb_path: &path_relative_to_root,
-                headings: &render_result.headings,
-                has_h1: render_result.has_h1,
-                word_count: render_result.word_count,
-                readability: &readability,
-                file_path: &file_path,
-                modified_secs,
-                current_url: "",
-                siblings: &[],
-                slides: render_result.slides.as_ref().map(|s| &s.settings),
-                // A single file rendered to stdout has no repository index.
-                calendar_nav: None,
-            },
-            &mbr::page_context::MarkdownContextOptions {
-                tag_sources: &config.tag_sources,
-                sidebar_style: &config.sidebar_style,
-                sidebar_max_items: config.sidebar_max_items,
-                graph_depth: config.graph_depth,
-                flashcards_concentric_threshold: config.flashcards_concentric_threshold,
-                flashcards_progress_indicators: config.flashcards_progress_indicators,
-                // No server behind stdout output: no task browser, and the
-                // render above emitted no `data-mbr-line`.
-                tasks_enabled: false,
-                review_enabled: false,
-                tasks_default_include: config.tasks_default_include,
-                title_prefix: &config.title_prefix,
-                title_suffix: &config.title_suffix,
-                root_dir: None,
-                slides: &config.slides,
-                calendar: &mbr::page_context::CalendarChrome::new(&config.calendar),
-            },
-            &mbr::page_context::UrlMode::Absolute,
-        );
-        let mut frontmatter = render_result.frontmatter;
-        frontmatter.insert("server_mode".to_string(), false.into());
-        // A contact note still gets its card; with no repository there is no
-        // relationship index to link `company` through, and no backlinks.
-        mbr::page_context::insert_contact(
-            &mut extra_context,
-            render_result.contact,
-            &[],
-            &mbr::relationships::RelationTypeRegistry::from_types(&config.relationship_types),
-            None,
-            &mbr::page_context::UrlMode::Absolute,
-        );
         let html_output =
-            templates.render_markdown(&render_result.html, frontmatter, extra_context)?;
+            mbr::standalone::render_note(&config, &absolute_path, &path_relative_to_root).await?;
         println!("{}", html_output);
     } else if args.server {
         // Server mode - HTTP server only, no GUI

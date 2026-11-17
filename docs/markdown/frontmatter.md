@@ -74,8 +74,9 @@ is a slide with a heading and a list, never a second metadata block.
 | `order`, `pinned` | Position in listings, see [File Sorting](../customization/sorting/) |
 | `relationships` | Typed links to other notes: a list of `{type, to}` edges, or the [short form](../features/relationships/#the-short-form) `reports_to: "[[X]]"`; see [Relationships](../features/relationships/) |
 | `slides` | Per-deck settings, see [Deck Settings](../features/slides/#deck-settings) |
+| `template` | An `.html` file, relative to the note's folder, that replaces the page layout for this note; see [Custom Page Templates](../features/custom-page-templates/) |
 | `author` | Author name, available to templates |
-| Any other field | Searchable, and available to templates via `frontmatter_json` |
+| Any other field | Searchable, and available to templates, each as its own variable and all of them, structure intact, as `frontmatter` (see [Custom Page Templates](../features/custom-page-templates/#variables)) |
 
 Contacts read many more (`company`, `emails`, `phones`, `dates`, …); see
 [Contacts](../features/contacts/).
