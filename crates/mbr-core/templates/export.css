@@ -1,0 +1,49 @@
+/* mbr PDF export stylesheet (served at /.mbr/export.css).
+ *
+ * Loaded ONLY while a page is being exported to PDF (`mbr --pdf`, the GUI's
+ * Save as PDF…), by `components/src/export-ready.ts`, which also writes the
+ * page box itself into `<style id="mbr-export-page">`:
+ *
+ *     @page { size: <W>in <H>in; margin: <M> }
+ *
+ * The browser's own print panel never loads this file, so theme.css's print
+ * section ("PAGE MARGINS ARE ZERO ON PURPOSE") is untouched: the WebKit top
+ * band that rule avoids does not appear on the export's print path, where a
+ * real `@page` margin is what gives continuation pages their top and bottom
+ * margins (theme.css's padding only reaches the first and last page).
+ *
+ * Override it like any other asset: `.mbr/export.css` in the repository.
+ */
+
+@media print {
+  /* The page margin is exactly the generated `@page` margin (`--pdf-margin`,
+   * `[pdf] margin`): theme.css's print padding (`--mbr-print-margin-*`) is
+   * where the print panel keeps its margins, and here it would stack on top —
+   * vertically on the first and last page, horizontally on every page. */
+  main.container {
+    padding: 0 !important;
+  }
+
+  /* theme.css's only other horizontal page whitespace: the docked calendar
+   * column's `padding-right` on `<body>`. Its width variable is set only in
+   * `@media screen`, so it is 0 on paper today; this keeps it that way. */
+  body {
+    padding-inline: 0 !important;
+  }
+
+  /* Links into the site point at the exporter's own short-lived server, so
+   * export-ready.ts removes their href (the default link policy) and marks
+   * them with this class: on paper they are plain text. */
+  a.mbr-export-unlinked {
+    color: inherit !important;
+    text-decoration: none !important;
+    cursor: auto;
+  }
+
+  /* The relationship charts are left out of an export: `<mbr-genealogy>`
+   * renders nothing in export mode (see mbr-genealogy.ts for why). This keeps
+   * a customized element's placeholder off the paper too. */
+  mbr-genealogy {
+    display: none !important;
+  }
+}

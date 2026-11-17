@@ -276,3 +276,21 @@ mod watching {
         }
     }
 }
+
+/// `config()` is what was applied last: a reload's change shows, a broken
+/// file keeps the last good one (the GUI reads `[pdf]` from it).
+#[tokio::test(flavor = "multi_thread")]
+async fn config_reports_the_applied_configuration() {
+    let dir = repo("[pdf]\npaper = \"a4\"\n");
+    let live = live(dir.path()).await;
+    let paper = |c: Config| c.pdf.paper.map(|p| p.to_string());
+    assert_eq!(paper(live.config().await).as_deref(), Some("a4"));
+
+    write_config(dir.path(), "[pdf]\npaper = \"legal\"\n");
+    assert_eq!(live.reload().await, ReloadOutcome::Applied);
+    assert_eq!(paper(live.config().await).as_deref(), Some("legal"));
+
+    write_config(dir.path(), "[pdf]\npaper = \"tabloid\"\n");
+    live.reload().await;
+    assert_eq!(paper(live.config().await).as_deref(), Some("legal"));
+}

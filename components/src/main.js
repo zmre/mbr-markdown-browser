@@ -51,3 +51,8 @@ export * from './mbr-flashcards.ts';
 export * from './mbr-calendar.ts';
 // 404 pages: tiny trigger; the matcher and renderer live in mbr-not-found.min.js.
 export * from './mbr-not-found-suggestions.ts';
+// PDF export trigger: inert unless Rust set window.__MBR_EXPORT__ (then loads
+// the mbr-export.min.js chunk and posts mbr:export-ready); in GUI windows, also
+// relays the editor's open/closed state so Save as PDF… can be greyed out.
+// A side-effect import: nothing outside it needs its exports (test hooks).
+import './export-ready.ts';

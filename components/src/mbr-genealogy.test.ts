@@ -126,6 +126,19 @@ describe('UNIT MbrGenealogyElement', () => {
     expect(element.shadowRoot?.querySelector('figure.gen-figure')).not.toBeNull()
   })
 
+  it('is left out of a PDF export: no placeholder, no chunk', async () => {
+    window.__MBR_EXPORT__ = { links: 'strip', paperWidthIn: 8.5, paperHeightIn: 11, margin: '0.5in' }
+    try {
+      const loader = vi.fn()
+      setGenealogyModuleLoader(loader)
+      element = await createElement()
+      expect(element.shadowRoot?.querySelector('figure')).toBeNull()
+      expect(loader).not.toHaveBeenCalled()
+    } finally {
+      delete window.__MBR_EXPORT__
+    }
+  })
+
   it('warns and renders nothing when the chunk fails to load', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     setGenealogyModuleLoader(() => Promise.reject(new Error('network down')))

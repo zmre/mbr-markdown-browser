@@ -8,12 +8,19 @@ use crate::external_open::{
     parse_ipc_reveal_request, resolve_reveal_target, reveal_in_file_manager,
 };
 use crate::live::LiveServer;
+use crate::pdf_config::PdfConfig;
+use crate::pdf_export::{
+    self, EditorState, ExportEvent, ExportSession, ExportSink, OutputTarget, PdfFlags, PdfOptions,
+    PendingOutput, parse_editor_state,
+};
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
 use parking_lot::RwLock;
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use tao::{
     event::{ElementState, Event, StartCause, WindowEvent},
@@ -94,6 +101,116 @@ const COPY_PAGE_MARKDOWN_SCRIPT: &str = "(()=>{let n=0;const go=()=>{\
     if(++n<40)setTimeout(go,25);\
     };go();})()";
 
+/// A transient message in the visible page: the page's own `.mbr-toast`
+/// (theme.css's "Toast" section, the element `components/src/toast.ts`
+/// creates), with a minimal inline style where a custom theme has none.
+/// `message` travels as a JSON string literal, so it cannot break out of it.
+fn toast_script(message: &str, duration_ms: u32) -> String {
+    let text = serde_json::Value::from(message).to_string();
+    format!(
+        "(()=>{{document.querySelectorAll('.mbr-toast').forEach(e=>e.remove());\
+         const t=document.createElement('div');t.className='mbr-toast';\
+         t.setAttribute('role','status');t.setAttribute('aria-live','polite');\
+         t.textContent={text};document.body.appendChild(t);\
+         if(getComputedStyle(t).position==='static'){{Object.assign(t.style,{{position:'fixed',\
+         bottom:'1.5rem',left:'50%',transform:'translateX(-50%)',padding:'.5rem 1rem',\
+         borderRadius:'.5rem',background:'#333',color:'#fff',zIndex:'2147483647'}});}}\
+         setTimeout(()=>t.remove(),{duration_ms});}})()"
+    )
+}
+
+/// How long the Save as PDF toasts stay up.
+const PDF_TOAST_MS: u32 = 3000;
+
+/// Characters no file name may hold on some platform this runs on.
+const FORBIDDEN_FILE_NAME_CHARS: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+
+/// The Save as PDF dialog's suggested name: the page title made safe for a
+/// file name, else the page's last URL segment (the note's stem), else
+/// `page`; always ending `.pdf`.
+fn default_pdf_file_name(title: &str, url: &str) -> String {
+    let clean = |raw: &str| -> String {
+        let words: Vec<&str> = raw
+            .split(|c: char| {
+                c.is_control() || c.is_whitespace() || FORBIDDEN_FILE_NAME_CHARS.contains(&c)
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+        let joined: String = words.join(" ").chars().take(120).collect();
+        joined
+            .trim_matches(|c: char| c == '.' || c.is_whitespace())
+            .to_owned()
+    };
+    let from_url = || {
+        url::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()?
+                    .rfind(|segment| !segment.is_empty())
+                    .map(|segment| {
+                        percent_encoding::percent_decode_str(segment)
+                            .decode_utf8_lossy()
+                            .into_owned()
+                    })
+            })
+            .map(|segment| clean(&segment))
+            .filter(|name| !name.is_empty())
+    };
+    let stem = Some(clean(title))
+        .filter(|name| !name.is_empty())
+        .or_else(from_url)
+        .unwrap_or_else(|| "page".to_owned());
+    format!("{stem}.pdf")
+}
+
+/// Where the Save as PDF dialog opens: the folder used last, else
+/// `~/Documents`, else wherever the platform likes.
+fn pdf_dialog_directory(last: Option<&Path>) -> Option<PathBuf> {
+    last.map(Path::to_path_buf)
+        .filter(|dir| dir.is_dir())
+        .or_else(|| {
+            crate::config::home_dir()
+                .map(|home| home.join("Documents"))
+                .filter(|dir| dir.is_dir())
+        })
+}
+
+/// A chosen save path, with `.pdf` added when the user typed none.
+fn with_pdf_extension(mut path: PathBuf) -> PathBuf {
+    let has_pdf = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    if !has_pdf {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".pdf");
+        path.set_file_name(name);
+    }
+    path
+}
+
+/// The page Save as PDF… exports: the one on screen, without its fragment.
+/// A fragment only scrolls on screen, and some are commands to the page
+/// (`#mbr-edit` opens the editor), which the export view must not run.
+fn pdf_export_url(on_screen: &str) -> String {
+    on_screen
+        .split_once('#')
+        .map_or(on_screen, |(page, _)| page)
+        .to_owned()
+}
+
+/// Shows an error dialog without blocking the event loop (a modal dialog
+/// spins its own run loop, and this one is the loop it would spin inside).
+fn show_error_dialog(title: &'static str, description: String) {
+    std::thread::spawn(move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title(title)
+            .set_description(description)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    });
+}
+
 /// Custom user events for the event loop
 enum UserEvent {
     MenuEvent(MenuEvent),
@@ -128,6 +245,21 @@ enum UserEvent {
     /// *current* server's repository in the event loop, the only place that
     /// knows which one that is.
     Reveal(crate::vault::VaultPath),
+    /// File → Save as PDF… ([`Shortcut::SaveAsPdf`]): ask where, then export.
+    SavePdf,
+    /// The Save as PDF dialog closed: export `url` to `path` with `pdf`, or
+    /// (`path` = `None`) the user cancelled.
+    SavePdfTo {
+        path: Option<PathBuf>,
+        url: String,
+        pdf: Box<PdfConfig>,
+    },
+    /// Progress of the running export ([`ExportSession::handle`]).
+    Export(ExportEvent),
+    /// The visible page started loading: the editor cannot be open there yet.
+    PageLoading,
+    /// The page's in-browser editor opened or closed (`mbr:editor-state:*`).
+    EditorState(EditorState),
 }
 
 /// Context needed to launch and manage the browser window
@@ -243,6 +375,7 @@ struct MenuHandles {
     open_item: MenuItem,
     reload_item: MenuItem,
     print_item: MenuItem,
+    save_pdf_item: MenuItem,
     history_items: HistoryMenuItems,
     find_items: FindMenuItems,
     copy_page_items: CopyPageMenuItems,
@@ -322,6 +455,21 @@ fn build_menu_bar() -> MenuHandles {
         Some(Accelerator::new(print_modifier, Code::KeyP)),
     );
 
+    // Save as PDF is Cmd+Shift+P on macOS and **Ctrl+Alt+P** elsewhere, where
+    // Ctrl+Shift+P is already Print (see above). Disabled where the platform
+    // has no export backend yet; toggled with the editor afterwards.
+    #[cfg(target_os = "macos")]
+    let save_pdf_modifier = Modifiers::META | Modifiers::SHIFT;
+    #[cfg(not(target_os = "macos"))]
+    let save_pdf_modifier = Modifiers::CONTROL | Modifiers::ALT;
+
+    let save_pdf_item = MenuItem::with_id(
+        "save_pdf",
+        "Save as P&DF…",
+        pdf_export::BACKEND_AVAILABLE,
+        Some(Accelerator::new(save_pdf_modifier, Code::KeyP)),
+    );
+
     #[cfg(target_os = "macos")]
     log_menu_result(
         "file menu items",
@@ -331,6 +479,7 @@ fn build_menu_bar() -> MenuHandles {
             &reload_item,
             &PredefinedMenuItem::separator(),
             &print_item,
+            &save_pdf_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
         ]),
@@ -345,6 +494,7 @@ fn build_menu_bar() -> MenuHandles {
             &reload_item,
             &PredefinedMenuItem::separator(),
             &print_item,
+            &save_pdf_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
             &PredefinedMenuItem::separator(),
@@ -530,6 +680,7 @@ fn build_menu_bar() -> MenuHandles {
         open_item,
         reload_item,
         print_item,
+        save_pdf_item,
         history_items,
         find_items,
         copy_page_items,
@@ -568,6 +719,40 @@ fn spawn_open_picker(proxy: EventLoopProxy<UserEvent>) {
         ) {
             let _ = proxy.send_event(UserEvent::PathSelected(path));
         }
+    });
+}
+
+/// Shows the Save as PDF dialog on a thread of its own (it must not block the
+/// event loop; rfd hands it to the main thread where the platform needs it),
+/// with the `[pdf]` configuration the current server applies, and reports the
+/// answer as [`UserEvent::SavePdfTo`].
+fn spawn_pdf_save_dialog(
+    proxy: EventLoopProxy<UserEvent>,
+    server: Option<Arc<LiveServer>>,
+    runtime: tokio::runtime::Handle,
+    url: String,
+    file_name: String,
+    directory: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        // A plain thread, not a runtime one, so blocking on the runtime is
+        // allowed; the lock is held for a clone.
+        let pdf = server
+            .map(|server| runtime.block_on(server.config()).pdf)
+            .unwrap_or_default();
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save as PDF")
+            .set_file_name(file_name)
+            .add_filter("PDF", &["pdf"]);
+        if let Some(directory) = directory {
+            dialog = dialog.set_directory(directory);
+        }
+        let path = dialog.save_file();
+        let _ = proxy.send_event(UserEvent::SavePdfTo {
+            path,
+            url,
+            pdf: Box::new(pdf),
+        });
     });
 }
 
@@ -797,6 +982,8 @@ enum Shortcut {
     Open,
     Reload,
     Print,
+    /// File → Save as PDF…; see [`UserEvent::SavePdf`].
+    SaveAsPdf,
     Back,
     Forward,
     FindOpen,
@@ -824,6 +1011,7 @@ struct ShortcutIds {
     open: muda::MenuId,
     reload: muda::MenuId,
     print: muda::MenuId,
+    save_pdf: muda::MenuId,
     back: muda::MenuId,
     forward: muda::MenuId,
     find: muda::MenuId,
@@ -838,6 +1026,7 @@ fn shortcut_for_menu_id(id: &muda::MenuId, ids: &ShortcutIds) -> Option<Shortcut
         (&ids.open, Shortcut::Open),
         (&ids.reload, Shortcut::Reload),
         (&ids.print, Shortcut::Print),
+        (&ids.save_pdf, Shortcut::SaveAsPdf),
         (&ids.back, Shortcut::Back),
         (&ids.forward, Shortcut::Forward),
         (&ids.find, Shortcut::FindOpen),
@@ -884,6 +1073,12 @@ fn perform_shortcut(
             if let Err(e) = webview.print() {
                 tracing::error!("Print failed: {e}");
             }
+        }
+        Shortcut::SaveAsPdf => {
+            // The event loop holds the state (editor open, an export already
+            // running), so the decision is made there.
+            tracing::debug!("Save as PDF requested");
+            let _ = proxy.send_event(UserEvent::SavePdf);
         }
         Shortcut::Back => {
             tracing::debug!("History back requested");
@@ -943,6 +1138,7 @@ fn linux_shortcut_for(key: &Key<'_>, modifiers: ModifiersState) -> Option<Shortc
     // shortcut that fires on any superset would steal keys from the page.
     let ctrl = modifiers == ModifiersState::CONTROL;
     let ctrl_shift = modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl_alt = modifiers == ModifiersState::CONTROL | ModifiersState::ALT;
     let alt = modifiers == ModifiersState::ALT;
     let shift = modifiers == ModifiersState::SHIFT;
     let bare = modifiers.is_empty();
@@ -964,6 +1160,9 @@ fn linux_shortcut_for(key: &Key<'_>, modifiers: ModifiersState) -> Option<Shortc
         // `Character("P")`; the lowercasing below is what makes the two spellings
         // one case. Plain Ctrl+P is left to the page, where it means "previous".
         Key::Character(c) if ctrl_shift && c.eq_ignore_ascii_case("p") => Some(Shortcut::Print),
+        // Ctrl+Alt+P: the keyval is still `p` (Alt does not change it on the
+        // layouts this targets); case-folded like the rest.
+        Key::Character(c) if ctrl_alt && c.eq_ignore_ascii_case("p") => Some(Shortcut::SaveAsPdf),
         Key::F3 if bare => Some(Shortcut::FindNext),
         Key::F3 if shift => Some(Shortcut::FindPrev),
         Key::ArrowLeft if alt => Some(Shortcut::Back),
@@ -1056,6 +1255,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         open_item,
         reload_item,
         print_item,
+        save_pdf_item,
         history_items,
         find_items,
         copy_page_items,
@@ -1173,6 +1373,11 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
     let new_window_origin = Arc::clone(&site_origin);
     let ipc_origin = Arc::clone(&site_origin);
     let ipc_proxy = event_loop.create_proxy();
+    let load_proxy = event_loop.create_proxy();
+    // The page's `document.title`, for Save as PDF…'s suggested file name.
+    // Only touched on this thread: wry calls the handler on the UI thread.
+    let page_title = Rc::new(RefCell::new(String::new()));
+    let title_sink = Rc::clone(&page_title);
 
     let builder = WebViewBuilder::new()
         .with_devtools(true)
@@ -1236,9 +1441,22 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
                 spawn_outside_open_picker(ipc_proxy.clone(), outside);
             } else if let Some(path) = parse_ipc_reveal_request(gui_active(), request.body()) {
                 let _ = ipc_proxy.send_event(UserEvent::Reveal(path));
+            } else if let Some(state) = parse_editor_state(request.body()) {
+                // Page-controlled, but all it can do is grey out one menu item.
+                let _ = ipc_proxy.send_event(UserEvent::EditorState(state));
             } else {
                 tracing::debug!("Ignoring unrecognized IPC message from the page");
             }
+        })
+        // Save as PDF… is re-enabled on every new page (no editor is open on
+        // one yet) and disabled by `mbr:editor-state:open`.
+        .with_on_page_load_handler(move |event, _url| {
+            if matches!(event, wry::PageLoadEvent::Started) {
+                let _ = load_proxy.send_event(UserEvent::PageLoading);
+            }
+        })
+        .with_document_title_changed_handler(move |title| {
+            *title_sink.borrow_mut() = title;
         });
 
     #[cfg(not(target_os = "linux"))]
@@ -1269,6 +1487,7 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
         open: open_item.id().clone(),
         reload: reload_item.id().clone(),
         print: print_item.id().clone(),
+        save_pdf: save_pdf_item.id().clone(),
         back: history_items.back.id().clone(),
         forward: history_items.forward.id().clone(),
         find: find_items.open.id().clone(),
@@ -1291,7 +1510,18 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
     // Create proxy for the open picker
     let event_proxy = event_loop.create_proxy();
 
-    event_loop.run(move |event, _target, control_flow| {
+    // Save as PDF… state. One export at a time: `pdf_busy` covers the save
+    // dialog as well as the export itself.
+    let mut editor_open = false;
+    let mut pdf_busy = false;
+    let mut pdf_session: Option<ExportSession> = None;
+    let mut last_pdf_dir: Option<PathBuf> = None;
+    let export_proxy = parking_lot::Mutex::new(event_loop.create_proxy());
+    let export_sink: ExportSink = Arc::new(move |event| {
+        let _ = export_proxy.lock().send_event(UserEvent::Export(event));
+    });
+
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
@@ -1370,20 +1600,119 @@ pub fn launch_browser(launch: InitialLaunch) -> Result<(), BrowserError> {
             },
             Event::UserEvent(UserEvent::ReloadPage) => reload_page(&webview, &current_url),
             Event::UserEvent(UserEvent::Reveal(path)) => reveal_note(live_server.as_deref(), &path),
+            Event::UserEvent(UserEvent::PageLoading) => {
+                editor_open = false;
+                save_pdf_item.set_enabled(pdf_export::BACKEND_AVAILABLE);
+            }
+            Event::UserEvent(UserEvent::EditorState(state)) => {
+                editor_open = state == EditorState::Open;
+                save_pdf_item.set_enabled(pdf_export::BACKEND_AVAILABLE && !editor_open);
+            }
+            Event::UserEvent(UserEvent::SavePdf) => {
+                // The keyboard route (Linux, menu bar hidden) reaches here
+                // whatever the item's state, so the item's rules are checked
+                // again: unsaved editor content would not be in the export,
+                // which loads the page from the server.
+                if !pdf_export::BACKEND_AVAILABLE || editor_open {
+                    tracing::debug!("Save as PDF is unavailable right now");
+                } else if pdf_busy {
+                    let _ = webview.evaluate_script(&toast_script(
+                        "A PDF is already being saved",
+                        PDF_TOAST_MS,
+                    ));
+                } else {
+                    pdf_busy = true;
+                    let url = pdf_export_url(
+                        &webview
+                            .url()
+                            .ok()
+                            .filter(|url| url.starts_with("http"))
+                            .unwrap_or_else(|| current_url.clone()),
+                    );
+                    let file_name = default_pdf_file_name(&page_title.borrow(), &url);
+                    spawn_pdf_save_dialog(
+                        event_proxy.clone(),
+                        live_server.clone(),
+                        tokio_runtime.clone(),
+                        url,
+                        file_name,
+                        pdf_dialog_directory(last_pdf_dir.as_deref()),
+                    );
+                }
+            }
+            Event::UserEvent(UserEvent::SavePdfTo { path, url, pdf }) => {
+                let Some(path) = path else {
+                    pdf_busy = false;
+                    return;
+                };
+                let path = with_pdf_extension(path);
+                last_pdf_dir = path.parent().map(Path::to_path_buf);
+                let options = PdfOptions::resolve(
+                    &pdf,
+                    &PdfFlags::default(),
+                    pdf_export::default_paper,
+                );
+                let started = PendingOutput::prepare(OutputTarget::File(path.clone())).and_then(
+                    |output| {
+                        ExportSession::start(target, &url, options, output, Arc::clone(&export_sink))
+                    },
+                );
+                match started {
+                    Ok(session) => {
+                        tracing::info!("Saving {url} as {}", path.display());
+                        let _ = webview.evaluate_script(&toast_script("Saving PDF…", 60_000));
+                        pdf_session = Some(session);
+                    }
+                    Err(e) => {
+                        pdf_busy = false;
+                        show_error_dialog("Could Not Save PDF", e.to_string());
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::Export(export_event)) => {
+                let finished = pdf_session
+                    .as_mut()
+                    .and_then(|session| session.handle(export_event, &mut std::io::sink()));
+                if let Some(result) = finished {
+                    // Closes the hidden export window.
+                    pdf_session = None;
+                    pdf_busy = false;
+                    match result {
+                        Ok(exported) => {
+                            for warning in &exported.warnings {
+                                tracing::warn!("PDF export: {warning}");
+                            }
+                            let name = match &exported.target {
+                                OutputTarget::File(path) => path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                                OutputTarget::Stdout => String::new(),
+                            };
+                            let message = match exported.warnings.len() {
+                                0 => format!("Saved {name}"),
+                                1 => format!("Saved {name} (1 warning: {})", exported.warnings[0]),
+                                n => format!("Saved {name} ({n} warnings; see the log)"),
+                            };
+                            let _ = webview.evaluate_script(&toast_script(&message, PDF_TOAST_MS));
+                        }
+                        Err(e) => {
+                            let _ = webview.evaluate_script(
+                                "document.querySelectorAll('.mbr-toast').forEach(e=>e.remove())",
+                            );
+                            show_error_dialog("Could Not Save PDF", e.to_string());
+                        }
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::ServerFailed { path }) => {
-                // Off-thread because a modal dialog spins its own run loop, and
-                // this one is the event loop it would spin inside.
-                std::thread::spawn(move || {
-                    rfd::MessageDialog::new()
-                        .set_level(rfd::MessageLevel::Error)
-                        .set_title("Failed to Open")
-                        .set_description(format!(
-                            "Could not open: {}\n\nThe current folder will remain active.",
-                            path.display()
-                        ))
-                        .set_buttons(rfd::MessageButtons::Ok)
-                        .show();
-                });
+                show_error_dialog(
+                    "Failed to Open",
+                    format!(
+                        "Could not open: {}\n\nThe current folder will remain active.",
+                        path.display()
+                    ),
+                );
             }
             // macOS only in practice: tao's Windows and Linux backends never
             // construct `Event::Opened`, so `awaiting_open_decision` is always
@@ -1589,6 +1918,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pdf_file_name_comes_from_the_title_made_safe() {
+        let url = "http://127.0.0.1:5200/docs/markdown/diagrams/";
+        assert_eq!(
+            default_pdf_file_name("MBR Docs | Mermaid Diagrams", url),
+            "MBR Docs Mermaid Diagrams.pdf"
+        );
+        assert_eq!(
+            default_pdf_file_name("a/b\\c:d*e?f\"g<h>i\n\tj", url),
+            "a b c d e f g h i j.pdf"
+        );
+        assert_eq!(default_pdf_file_name("..hidden..", url), "hidden.pdf");
+        let long = "x".repeat(500);
+        assert_eq!(default_pdf_file_name(&long, url).len(), 124);
+    }
+
+    #[test]
+    fn pdf_file_name_falls_back_to_the_url_then_page() {
+        assert_eq!(
+            default_pdf_file_name("", "http://127.0.0.1:5200/notes/My%20Note/"),
+            "My Note.pdf"
+        );
+        assert_eq!(
+            default_pdf_file_name("  ", "http://127.0.0.1:5200/notes/a%2Fb/"),
+            "a b.pdf"
+        );
+        assert_eq!(
+            default_pdf_file_name("", "http://127.0.0.1:5200/"),
+            "page.pdf"
+        );
+        assert_eq!(default_pdf_file_name("", "not a url"), "page.pdf");
+    }
+
+    #[test]
+    fn the_export_url_drops_the_fragment() {
+        assert_eq!(
+            pdf_export_url("http://127.0.0.1:5200/a/#mbr-edit"),
+            "http://127.0.0.1:5200/a/"
+        );
+        assert_eq!(
+            pdf_export_url("http://127.0.0.1:5200/a/?q=1#x"),
+            "http://127.0.0.1:5200/a/?q=1"
+        );
+        assert_eq!(
+            pdf_export_url("http://127.0.0.1:5200/a/"),
+            "http://127.0.0.1:5200/a/"
+        );
+    }
+
+    #[test]
+    fn a_save_path_without_pdf_gains_it() {
+        assert_eq!(
+            with_pdf_extension(PathBuf::from("/x/note")),
+            PathBuf::from("/x/note.pdf")
+        );
+        assert_eq!(
+            with_pdf_extension(PathBuf::from("/x/note.PDF")),
+            PathBuf::from("/x/note.PDF")
+        );
+        assert_eq!(
+            with_pdf_extension(PathBuf::from("/x/v1.2")),
+            PathBuf::from("/x/v1.2.pdf")
+        );
+    }
+
+    /// The message is a JSON string literal inside the script: quotes and
+    /// script-looking text stay text.
+    #[test]
+    fn toast_script_embeds_the_message_as_a_string_literal() {
+        let script = toast_script("Saved \"a\".pdf');alert(1);//", 3000);
+        assert!(
+            script.contains(r#"t.textContent="Saved \"a\".pdf');alert(1);//";"#),
+            "{script}"
+        );
+        assert!(script.contains("className='mbr-toast'"));
+        assert!(script.contains("setTimeout(()=>t.remove(),3000)"));
+    }
+
     // `auto` is passed in rather than read from `MENU_BAR_AUTO_VISIBLE`, so both
     // platform conventions are covered no matter which host runs the suite.
     #[test]
@@ -1692,6 +2099,22 @@ mod tests {
             assert_eq!(look(Key::F3, SHIFT), Some(Shortcut::FindPrev));
             assert_eq!(look(Key::ArrowLeft, ALT), Some(Shortcut::Back));
             assert_eq!(look(Key::ArrowRight, ALT), Some(Shortcut::Forward));
+            assert_eq!(
+                look(Key::Character("p"), CTRL | ALT),
+                Some(Shortcut::SaveAsPdf)
+            );
+        }
+
+        // Ctrl+Alt+P is Save as PDF, Ctrl+Shift+P stays Print, and neither
+        // takes a third modifier.
+        #[test]
+        fn save_as_pdf_is_ctrl_alt_p_only() {
+            assert_eq!(
+                look(Key::Character("P"), CTRL | ALT),
+                Some(Shortcut::SaveAsPdf)
+            );
+            assert_eq!(look(Key::Character("p"), CTRL | ALT | SHIFT), None);
+            assert_eq!(look(Key::Character("p"), ALT), None);
         }
 
         // Both are `PredefinedMenuItem`s, so both stop working with the bar.

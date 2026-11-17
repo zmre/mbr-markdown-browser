@@ -140,6 +140,25 @@ describe('UNIT MbrMermaidElement', () => {
     expect(mermaid.initialize.mock.calls[0][0]).toMatchObject({ theme: 'dark' })
   })
 
+  it('renders light from the start in a PDF export, with no print swap', async () => {
+    mockPrefersDark(true)
+    window.__MBR_EXPORT__ = { links: 'strip', paperWidthIn: 8.5, paperHeightIn: 11, margin: '0.5in' }
+    try {
+      document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A--&gt;B</pre>')
+      const mermaid = stubMermaid()
+
+      element = await mount()
+      window.dispatchEvent(new Event('beforeprint'))
+      window.dispatchEvent(new Event('afterprint'))
+
+      expect(mermaid.initialize).toHaveBeenCalledTimes(1)
+      expect(mermaid.initialize.mock.calls[0][0]).toMatchObject({ theme: 'default' })
+      expect(mermaid.run).toHaveBeenCalledTimes(1)
+    } finally {
+      delete window.__MBR_EXPORT__
+    }
+  })
+
   it('uses the default theme when prefers-color-scheme: dark does not match', async () => {
     mockPrefersDark(false)
     document.body.insertAdjacentHTML('beforeend', '<pre class="mermaid">graph LR;A--&gt;B</pre>')

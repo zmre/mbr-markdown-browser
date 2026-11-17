@@ -41,6 +41,7 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | [Editing Properties](editing-properties/) | Frontmatter as a form or as YAML, with suggestions from your notes |
 | [Review Notes](review/) | Annotate a page and copy the whole review out as markdown (`r`) |
 | [Copying Text and Pages](copying/) | Copy a selection or the whole note as its markdown source or as rich text, without mbr's buttons and markers |
+| [PDF Export](pdf-export/) | Save a note as a PDF as mbr renders it: File → Save as PDF…, or `mbr --pdf` in a script |
 
 ## Where each feature works
 
@@ -57,5 +58,6 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | Editing and properties | ✓ (on by default) | with `--edit` | | ✓ | |
 | Review notes | ✓ | ✓ | | with a keyboard | |
 | Copy markdown / rich | ✓ (and the Edit menu) | ✓ (markdown with `--edit`, else text) | ✓ (text, not markdown) | ✓ | |
+| PDF export | ✓ (File → Save as PDF…; also `mbr --pdf`) | | | | |
 
 The modes themselves are described in [Modes of Operation](../modes/).

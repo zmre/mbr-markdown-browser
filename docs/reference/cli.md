@@ -43,6 +43,7 @@ These flags are mutually exclusive:
 | `-g, --gui` | Launch native GUI window (explicit) |
 | `-b, --build` | Generate static site |
 | `--check-links-only` | Report broken links (and suggested fixes) without building anything; see [Checking links](#checking-links) |
+| `--pdf` | Export one note to a PDF, with no window (requires the `gui` feature); see [PDF export](#pdf-export) |
 | `--extract-video-metadata` | Extract video metadata to sidecar files (requires `media-metadata` feature) |
 | `--extract-pdf-cover` | Extract cover images from PDF files (requires `media-metadata` feature) |
 
@@ -64,12 +65,20 @@ Supported media types are detected by file extension:
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--host <HOST>` | Server IP address to bind. **Warning:** binding to a non-loopback address (e.g. `0.0.0.0`) makes the entire repository readable to the network with no authentication; mbr logs a warning at startup. | `127.0.0.1` |
-| `--output <PATH>` | Output directory for static build | `build` |
+| `--output <PATH>` | Where a mode writes. `-b`: the output folder. `--pdf`: a file, an existing folder (or a path ending in `/`), where the PDF is named after the note, or `-` for standard output | `-b`: `build`; `--pdf`: `<note>.pdf` in the current folder |
 | `--template-folder <PATH>` | Custom template folder | (uses `.mbr/`) |
 | `--oembed-timeout-ms <MS>` | Timeout for URL metadata fetch (0 to disable) | `500` (server/GUI), `0` (build) |
 | `--oembed-cache-size <BYTES>` | Max oembed cache size (0 to disable). Affects link-preview metadata only — the video/PDF metadata cache is sized by the `media_cache_size` config option / `MBR_MEDIA_CACHE_SIZE`, which has no CLI flag. | `2097152` (2MB) |
 | `--build-concurrency <N>` | Files to process in parallel during build (and `--check-links-only`) | auto (2x cores, max 32) |
 | `--format <FORMAT>` | Report format for `--check-links-only`: `markdown` or `json`. Refused without `--check-links-only` | `markdown` |
+| `--pdf-paper <PAPER>` | Paper for `--pdf`: `letter`, `a4`, `legal`, or a custom `<W>x<H>mm` / `<W>x<H>in` (each side 1–200 in) | `[pdf] paper`, else the system's |
+| `--pdf-landscape` | Landscape orientation for `--pdf`. Conflicts with `--pdf-portrait` | `[pdf] orientation` (portrait) |
+| `--pdf-portrait` | Portrait orientation for `--pdf`, overriding `orientation = "landscape"` in `[pdf]`. Conflicts with `--pdf-landscape` | `[pdf] orientation` (portrait) |
+| `--pdf-margin <MARGIN>` | Page margin for `--pdf`: a CSS margin shorthand of one to four lengths in `in`, `cm`, `mm`, `pt`, `pc` or `px`, or `0` (`"0.5in"`, `"0.6in 0.5in"`) | `[pdf] margin`, else `0.6in 0.5in` |
+| `--pdf-page-numbers` | Print the platform's header and footer (title, date, page numbers) with `--pdf`. macOS and Windows; ignored on Linux. Conflicts with `--no-pdf-page-numbers` | `[pdf] page_numbers` (off) |
+| `--no-pdf-page-numbers` | No header or footer with `--pdf`, overriding `page_numbers = true` in `[pdf]`. Conflicts with `--pdf-page-numbers` | `[pdf] page_numbers` (off) |
+| `--pdf-link-base <URL>` | Rewrite links to other notes onto this published site (`http(s)`, no query or fragment; a trailing `/` is added) instead of removing them | `[pdf] link_base`, else links removed |
+| `--pdf-timeout-ms <MS>` | How long `--pdf` waits for the page to finish rendering before exporting it anyway (≥ 1) | `[pdf] timeout_ms`, else `30000` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--fail-on-broken-links` | Exit with a non-zero status if the static build (`-b`) finds broken internal links. For CI. No effect with `--skip-link-checks` (the build warns on stderr when both are set, since the combination disables the gate). | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
@@ -150,6 +159,12 @@ mbr --check-links-only --format json ~/notes > broken-links.json
 
 # Build to custom directory
 mbr -b --output ./public ~/notes
+
+# Export a note to report.pdf in the current folder (no window)
+mbr --pdf ~/notes/report.md
+
+# Export as A4 landscape to standard output
+mbr --pdf --pdf-paper a4 --pdf-landscape --output - ~/notes/report.md > report.pdf
 
 # Use custom template folder
 mbr -s --template-folder ./my-theme ~/notes
@@ -308,6 +323,52 @@ an incompatible change):
 | `suggestions[]` | Up to three, best first: `replacement` (paste in place of the destination; the whole `[[…]]` for a wikilink), `url`, `path` (`null` outside the repository), `title` (`null` for a file) |
 | `folder` | When nothing matched and the target's folder still exists: `{ "url", "title" }` (omitted otherwise) |
 | `resolved_to`, `candidates[]` | For `ambiguous_wikilink`: the note it opens, and every note answering to the name as a `suggestions`-shaped entry whose `replacement` names exactly that note |
+
+## PDF export
+
+```bash
+mbr --pdf [--output <FILE|FOLDER|->] [--pdf-paper <PAPER>]
+          [--pdf-landscape | --pdf-portrait] [--pdf-margin <MARGIN>]
+          [--pdf-page-numbers | --no-pdf-page-numbers] [--pdf-link-base <URL>]
+          [--pdf-timeout-ms <MS>] <NOTE>
+```
+
+Writes a paginated PDF of `NOTE` as mbr renders it (diagrams, math, code
+highlighting, images), with no window, Dock icon or dialog. See
+[PDF Export](../features/pdf-export/) for what the PDF contains, links, page
+numbers and customizing it.
+
+- **`NOTE`** is a markdown file or a folder (its index note or listing). The
+  repository root is discovered from it as for every mode, and the configuration
+  is read as for `-s` (`.mbr/config.toml`, `MBR_*`, flags). Editing is off and
+  the note is served on a private loopback port, never `--host`/`--port`.
+- **Where it goes** (`--output`): absent, `<note stem>.pdf` in the current
+  folder (a folder note is named after the folder); a path to an existing folder,
+  or any path ending in `/`, `<folder>/<note stem>.pdf`; `-`, standard output;
+  anything else, that file, replaced if it exists. The PDF is written to a
+  temporary file in the target folder, checked, and renamed into place, so a
+  failed export leaves nothing behind.
+- **Options**: the `--pdf-*` flags above. Each beats the matching key of the
+  [`[pdf]` table](configuration/#pdf-export-settings) (and its `MBR_PDF__*`
+  variable) and is refused without `--pdf`. The switches come in pairs so a
+  flag can override the table either way: `--pdf-landscape` / `--pdf-portrait`
+  and `--pdf-page-numbers` / `--no-pdf-page-numbers`; giving both of a pair is
+  an error. Without either, the table's value stands.
+- **Streams**: only the PDF goes to stdout (with `--output -`). Errors,
+  warnings (an image that did not load, the readiness timeout) and `-v` logs go
+  to stderr.
+- **Needs** the `gui` feature (the webview it prints with; without it the flag
+  does not exist) and, on Linux, a display: without `DISPLAY` or
+  `WAYLAND_DISPLAY` it stops with exit status 2 (`xvfb-run -a mbr --pdf …`
+  works around it).
+
+**Exit status:** `0` the PDF was written (warnings alone do not fail it), `1`
+the export ran and failed (the page could not be prepared, printing failed, the
+written file could not be checked or moved into place; the message names cause
+and path), `2` refused before starting, with nothing rendered (a usage error or
+invalid value, a missing note, a configuration error, an output folder that is
+missing, not a folder or not writable, no display, no PDF support on this
+platform).
 
 # Media Viewer Endpoints
 

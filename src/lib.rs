@@ -29,6 +29,10 @@ pub mod launch_url;
 mod macos_open;
 #[cfg(feature = "gui")]
 pub mod open_picker;
+#[cfg(all(feature = "gui", feature = "cli"))]
+pub mod pdf_cli;
+#[cfg(feature = "gui")]
+pub mod pdf_export;
 
 #[cfg(feature = "watcher")]
 pub use mbr_server::watcher;

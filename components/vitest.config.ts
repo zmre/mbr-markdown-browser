@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
@@ -81,6 +81,16 @@ function readAsciiMath2Tex(): string {
   return readFileSync(`${dir}${file}`, 'utf8')
 }
 
+/**
+ * The Rust half of the PDF export contract (`src/pdf_export/mod.rs`), whose
+ * string literals `export-ready.test.ts` pins against the page's constants, or
+ * `null` if that module is missing (the test then fails, naming it).
+ */
+function readPdfExportRs(): string | null {
+  const path = fileURLToPath(new URL('../src/pdf_export/mod.rs', import.meta.url))
+  return existsSync(path) ? readFileSync(path, 'utf8') : null
+}
+
 export default defineConfig({
   define: {
     __MBR_THEME_CSS__: JSON.stringify(themeCss),
@@ -96,6 +106,7 @@ export default defineConfig({
     // Shared with mbr-core's `editor_math_parity`; under tests/fixtures/ so the
     // Nix test sandbox (flake.nix's source filter) has it too.
     __MBR_ASCIIMATH2TEX_JS__: JSON.stringify(readAsciiMath2Tex()),
+    __MBR_PDF_EXPORT_RS__: JSON.stringify(readPdfExportRs()),
     __MBR_EDITOR_MATH_CASES__: JSON.stringify(readRepoFile('../tests/fixtures/editor-math-cases.json')),
   },
   test: {

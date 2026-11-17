@@ -135,6 +135,12 @@ impl LiveServer {
         Ok(live)
     }
 
+    /// The configuration being served now: the last one that loaded (a
+    /// broken file keeps the one before it).
+    pub async fn config(&self) -> Config {
+        self.applied.lock().await.config.clone()
+    }
+
     /// The server answering requests now.
     pub fn current(&self) -> Arc<Server> {
         self.current.load_full()

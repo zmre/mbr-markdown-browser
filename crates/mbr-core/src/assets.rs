@@ -42,6 +42,9 @@ const CSS: &str = "text/css";
 pub const FAVICON_PNG: &[u8] = include_bytes!("../templates/favicon.png");
 pub const THEME_CSS: &[u8] = include_bytes!("../templates/theme.css");
 pub const USER_CSS: &[u8] = include_bytes!("../templates/user.css");
+/// PDF export stylesheet: loaded by `export-ready.ts` only while a page is
+/// rendered for `mbr --pdf` / Save as PDF…, never by the print panel.
+pub const EXPORT_CSS: &[u8] = include_bytes!("../templates/export.css");
 
 /// Main components bundle: every always-on element plus the lazy-chunk triggers.
 pub const COMPONENTS_JS: &[u8] = include_bytes!("../templates/components-js/mbr-components.min.js");
@@ -86,6 +89,11 @@ pub const CALENDAR_JS: &[u8] = include_bytes!("../templates/components-js/mbr-ca
 /// lazy-loaded by `<mbr-not-found-suggestions>` (404 pages only) and
 /// `<mbr-page-errors>`. Ships in static builds, whose `404.html` uses it.
 pub const NOT_FOUND_JS: &[u8] = include_bytes!("../templates/components-js/mbr-not-found.min.js");
+/// PDF export: readies a page for paper and waits for it to finish rendering,
+/// lazy-loaded by `export-ready.ts` only when the exporter set
+/// `window.__MBR_EXPORT__`. Copied by static builds like every always-shipped
+/// chunk, though only the exporter's own server loads it.
+pub const EXPORT_JS: &[u8] = include_bytes!("../templates/components-js/mbr-export.min.js");
 
 /// QuickLook's day calendar (design/calendar.md §4.7): a self-contained IIFE
 /// that mbr-ffi's `quicklook.rs` inlines into a preview of a dated note with
@@ -123,6 +131,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ("/favicon.png", FAVICON_PNG, "image/png"),
     ("/theme.css", THEME_CSS, CSS),
     ("/user.css", USER_CSS, CSS),
+    ("/export.css", EXPORT_CSS, CSS),
     ("/pico.min.css", embedded_pico::PICO_DEFAULT, CSS),
     ("/components/mbr-components.min.js", COMPONENTS_JS, JS),
     ("/components/mbr-editor.min.js", EDITOR_JS, JS),
@@ -139,6 +148,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ),
     ("/components/mbr-calendar.min.js", CALENDAR_JS, JS),
     ("/components/mbr-not-found.min.js", NOT_FOUND_JS, JS),
+    ("/components/mbr-export.min.js", EXPORT_JS, JS),
     ("/hljs.dark.css", hljs::HLJS_DARK_CSS, CSS),
     ("/hljs.atom-one-dark.css", hljs::HLJS_ATOM_ONE_DARK_CSS, CSS),
     ("/hljs.js", hljs::HLJS_JS, JS),
@@ -227,6 +237,22 @@ mod tests {
         assert!(banner.contains("Apache-2.0"), "{banner}");
         assert!(text.contains("AsciiMathParser"));
         assert!(!text.contains("sourceMappingURL"));
+    }
+
+    /// `export-ready.ts` loads `/.mbr/export.css` by name (`EXPORT_CSS_FILE`),
+    /// and the class it puts on unlinked links is styled there.
+    #[test]
+    fn export_css_is_served_as_css() {
+        let (bytes, mime) = default_file("/export.css").expect("in the table");
+        assert_eq!((bytes, mime), (EXPORT_CSS, CSS));
+        let text = std::str::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains("@media print"));
+        assert!(text.contains("a.mbr-export-unlinked"));
+        // The chunk that loads it, at the URL `export-chunk.ts` builds.
+        assert_eq!(
+            default_file("/components/mbr-export.min.js"),
+            Some((EXPORT_JS, JS))
+        );
     }
 
     #[test]

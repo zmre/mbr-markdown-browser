@@ -3378,6 +3378,13 @@ impl Server {
         self.start_with_ready_signal(None).await
     }
 
+    /// Serves on a listener the caller has already bound, with no startup
+    /// banner. For an embedder that picks its own address — `mbr --pdf` binds
+    /// an ephemeral loopback port and must keep stdout free for the PDF.
+    pub async fn serve_on(&self, listener: tokio::net::TcpListener) -> Result<(), ServerError> {
+        serve(listener, self.router.clone()).await
+    }
+
     /// Starts the server and optionally signals when ready to accept connections.
     /// If a sender is provided, it will receive `()` once the server is bound and listening.
     pub async fn start_with_ready_signal(

@@ -10,6 +10,7 @@
 import { LitElement, nothing } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { waitForDom, loadScript, getMbrAssetBase } from './dynamic-loader.ts'
+import { isExportMode } from './export-mode.ts'
 
 /** Mermaid sanitizer levels, strictest last-resort first. */
 type MermaidSecurityLevel = 'strict' | 'antiscript' | 'loose' | 'sandbox'
@@ -116,7 +117,9 @@ export class MbrMermaidElement extends LitElement {
 
     // Initialize mermaid and manually trigger rendering
     // Using startOnLoad: false + explicit run() avoids race conditions
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    // A PDF export renders for paper from the start: light, and so with no
+    // `beforeprint` swap below, whose async re-render would race the print.
+    const prefersDark = !isExportMode() && window.matchMedia('(prefers-color-scheme: dark)').matches
     const mermaid = (window as WindowWithMermaid).mermaid
 
     // Tag each block, so the print re-render below finds the diagrams that are

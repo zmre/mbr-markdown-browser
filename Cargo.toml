@@ -135,8 +135,14 @@ yaml-rust2 = { version = "0.13", default-features = false }
 gio = "0.18"
 gtk = "0.18"
 muda = "0.21"
+# `pdf_export`'s macOS backend: the print delegate (`define_class!`). Already in
+# the tree at this version via tao/wry/muda, so naming it adds no crate.
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-foundation = { version = "0.3.2", default-features = false }
+# `pdf_export`: `WKWebView::printOperationWithPrintInfo`. Already in the tree at
+# this version via wry.
+objc2-web-kit = { version = "0.3.2", default-features = false }
 # Do NOT add the `common-controls-v6` feature: it wires the Windows/Linux
 # folder-or-file prompt (`open_picker.rs`) to `TaskDialogIndirect`, which is
 # exported only by the manifest-activated v6 `comctl32.dll` — a Rust binary
@@ -146,6 +152,14 @@ objc2-foundation = { version = "0.3.2", default-features = false }
 # that show the dialog. See `open_picker.rs`'s module doc comment.
 rfd = "0.17"
 tao = "0.37.0"
+# `pdf_export`'s Linux backend: `webkit2gtk::PrintOperation`. Already in the
+# tree at exactly this version via wry, so naming it adds no crate.
+webkit2gtk = "2.0.2"
+# `pdf_export`'s Windows backend: `ICoreWebView2_7::PrintToPdf`, its print
+# settings and completion handler, and the user's locale for the default
+# paper. Both already in the tree at these versions via wry.
+webview2-com = "0.39.1"
+windows = { version = "0.62.2", default-features = false }
 windows-sys = "0.61.2"
 wry = { version = "0.57", features = ["devtools"] }
 
@@ -209,11 +223,17 @@ gui = [
     "dep:muda",
     "dep:rfd",
     "dep:image",
+    "dep:objc2",
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
+    "dep:objc2-web-kit",
+    "dep:serde_json",
     "dep:windows-sys",
+    "dep:webview2-com",
+    "dep:windows",
     "dep:gio",
     "dep:gtk",
+    "dep:webkit2gtk",
 ]
 # Media metadata extraction (requires ffmpeg, pdfium) - disable for QuickLook to avoid SDL dependency.
 # Implemented in mbr-core (the repo scan reads it); the server's media routes
@@ -255,6 +275,8 @@ parking_lot.workspace = true
 pathdiff.workspace = true
 percent-encoding.workspace = true
 rpassword = { workspace = true, optional = true }
+# `pdf_export` (gui): the export flag it injects and the page's ready message.
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -279,6 +301,8 @@ gio = { workspace = true, optional = true }
 # tao/muda/webkit2gtk at this exact version, so naming it adds no crate.
 gtk = { workspace = true, optional = true }
 muda = { workspace = true, features = ["gtk3"], optional = true }
+# `pdf_export`'s Linux backend (`PrintOperation`); the version wry links.
+webkit2gtk = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `external_open`: NSWorkspace::openURL, the only way a WKWebView-hosted app can
@@ -286,18 +310,46 @@ muda = { workspace = true, features = ["gtk3"], optional = true }
 # it on its own). Both crates are already in the tree at exactly these versions
 # via tao/wry; promoting them to direct dependencies and adding the NSWorkspace
 # feature gate adds no crate to the graph. Safe wrappers, so no `unsafe` here.
+objc2 = { workspace = true, optional = true }
+# `pdf_export`'s macOS backend adds the printing, appearance, view and window
+# classes (NSPrintInfo, NSPrintOperation, …): feature gates only, no new crate.
 objc2-app-kit = { workspace = true, features = [
     "std",
+    "NSAppearance",
+    "NSGraphics",
+    "NSPrintInfo",
+    "NSPrintOperation",
+    "NSPrinter",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
     "NSWorkspace",
 ], optional = true }
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSArray",
+    "NSDictionary",
+    "NSGeometry",
     "NSString",
     "NSURL",
+    "NSValue",
+], optional = true }
+objc2-web-kit = { workspace = true, features = [
+    "std",
+    "WKWebView",
+    "objc2-app-kit",
 ], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# `pdf_export`'s Windows backend: WebView2's `PrintToPdf` (COM interfaces and
+# the completion handler) and `GetUserDefaultLocaleName`. Versions and
+# features are those wry already uses, so this adds no crate.
+webview2-com = { workspace = true, optional = true }
+windows = { workspace = true, features = [
+    "std",
+    "Win32_Foundation",
+    "Win32_Globalization",
+], optional = true }
 # `external_open`: ShellExecuteW, and SHOpenFolderAndSelectItems (+ COM init)
 # for the info panel's reveal button. windows-sys 0.61.2 is already in the tree many
 # times over; only the feature gates below are new, and those add no crate.
@@ -323,6 +375,8 @@ chrono.workspace = true
 criterion.workspace = true
 filetime.workspace = true
 flate2.workspace = true
+# `tests/pdf_export.rs` reads the exported PDF. Already a dependency of mbr-core.
+lopdf.workspace = true
 papaya.workspace = true
 proptest.workspace = true
 pulldown-cmark.workspace = true
@@ -358,6 +412,11 @@ required-features = ["ssg"]
 [[test]]
 name = "cli_integration"
 required-features = ["cli"]
+
+# Runs the real `mbr --pdf`, which needs the webview (`gui`) and the binary (`cli`).
+[[test]]
+name = "pdf_export"
+required-features = ["gui", "cli"]
 
 [profile.release]
 opt-level = 3

@@ -45,6 +45,7 @@ flowchart LR
 | Server | `-s` | Development, browsing | Yes | Yes (Live grep) |
 | CLI | `-o` | Pipe to tools, scripts | No | No |
 | Build | `-b` | Deploy to static hosts | N/A | Yes (Pagefind) |
+| PDF export | `--pdf` | One note to a PDF, in scripts (also File → Save as PDF… in the GUI) | N/A | N/A |
 | QuickLook | (Finder, Space) | Glance at a note without opening anything | N/A | No |
 | iOS app | (MBR app) | Read and edit notes on iPhone and iPad | On refresh | Yes (native) |
 
@@ -93,6 +94,18 @@ mbr -g ~/notes      # Explicit flag (same result)
 ```bash
 mbr -b --output ./public ~/notes
 ```
+
+### Use PDF Export When...
+
+- Sending a note to someone who does not use mbr
+- Archiving or attaching a rendered note, diagrams and math included
+- Producing PDFs from a script or a scheduled job (desktop session required)
+
+```bash
+mbr --pdf ~/notes/report.md --output ~/Desktop/
+```
+
+See [PDF Export](../features/pdf-export/).
 
 ## Detailed Guides
 

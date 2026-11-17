@@ -906,6 +906,49 @@ scans the repository and are not published; `date_fields` is applied there
 too. A `periodic_folders` entry may be written `journal`, `./journal/`,
 `/journal` or `journal\` (the same folder).
 
+### PDF Export Settings
+
+The `[pdf]` table sets how a page is laid out on paper by
+[PDF export](../features/pdf-export.md): `mbr --pdf` and the GUI's **File → Save
+as PDF…**. Every key is optional; a repository without the table gets the
+defaults below. The [`--pdf-*` flags](cli.md#pdf-export) beat it for `mbr --pdf`;
+the GUI uses the table as the open repository has it now (a saved
+`config.toml` applies to the next export, no relaunch).
+
+| Option | Values | Default | Meaning |
+|--------|--------|---------|---------|
+| `paper` | `letter`, `a4`, `legal`, or `<W>x<H>mm` / `<W>x<H>in` | the system's | Sheet size. Case and spaces are ignored. A custom side must be 1–200 inches (25.4 mm–5080 mm). Unset: on macOS the default printer's paper; on Windows and Linux Letter in US and Canadian locales (`LC_ALL`, `LC_PAPER`, `LANG`), else A4 |
+| `orientation` | `portrait`, `landscape` | `portrait` | `landscape` swaps the sheet's sides |
+| `margin` | CSS `margin` shorthand | `"0.6in 0.5in"` | One to four lengths (top, right, bottom, left as in CSS), each a number with a unit `in`, `cm`, `mm`, `pt`, `pc` or `px`, or `0`. Applied to every page as an `@page` margin |
+| `page_numbers` | bool | `false` | Print the platform's header and footer: title, date, page numbers. macOS and Windows; ignored on Linux |
+| `link_base` | `http(s)` URL | none | Rewrite links to other notes onto this published site (`/guide/` → `<link_base>guide/`). Unset, those links are removed and their text kept. A trailing `/` is added |
+| `timeout_ms` | integer ≥ 1 | `30000` | How long to wait for the page to finish rendering (images, diagrams, math, highlighting, fonts) before exporting it anyway, with a warning. `mbr --pdf` also gives the repository scan this budget |
+
+```toml
+# .mbr/config.toml
+[pdf]
+paper = "a4"
+margin = "2cm 2.5cm"
+page_numbers = true
+link_base = "https://notes.example.com/"
+```
+
+The values are checked at startup, because the margin and link base are written
+into the page: an unknown key (`papr`), an unknown paper (`"tabloid"`), an
+orientation other than the two, a margin that is not lengths
+(`"1in; color: red"`, or a bare number other than `0`), a `link_base` that is
+not an `http(s)` URL with a host or has a `?query` or `#fragment`, and
+`timeout_ms = 0` all stop mbr with a configuration error, like any other
+option.
+
+**Environment variables:** one key at a time with a double underscore,
+`MBR_PDF__PAPER=a4`, `MBR_PDF__MARGIN="0.5in"`, `MBR_PDF__PAGE_NUMBERS=true`,
+`MBR_PDF__LINK_BASE=https://notes.example.com/`; or the whole table,
+`MBR_PDF='{paper="a4", orientation="landscape"}'`. An environment key overrides
+that key of the file's table and leaves the others. For one `mbr --pdf` run,
+`--pdf-portrait` and `--no-pdf-page-numbers` turn off a file's
+`orientation = "landscape"` or `page_numbers = true`.
+
 ### Review Settings
 
 Every block-level element on a served page carries
@@ -1478,6 +1521,10 @@ MBR_FLASHCARDS_PROGRESS_INDICATORS=false
 # Slide decks: a nested key is two underscores (`[slides] transition`)
 MBR_SLIDES__TRANSITION=fade
 MBR_SLIDES__SLIDE_NUMBER=c/t
+
+# PDF export (`[pdf]` table)
+MBR_PDF__PAPER=a4
+MBR_PDF__MARGIN="0.5in"
 
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true

@@ -252,6 +252,8 @@ In GUI mode (`mbr -g`), standard macOS shortcuts are available:
 |-----|--------|
 | `Cmd+O` | Open folder or file |
 | `Cmd+R` | Reload settings (`.mbr/config.toml`, templates) and the page |
+| `Cmd+P` | Print |
+| `Shift+Cmd+P` | [Save as PDF](../features/pdf-export.md) (greyed out while the editor is open) |
 | `Cmd+[` | History back |
 | `Cmd+]` | History forward |
 | `Cmd+F` | Find in page |
@@ -279,6 +281,7 @@ key never fires twice.
 | `Ctrl+O` | Open folder or file |
 | `Ctrl+R` | Reload settings (`.mbr/config.toml`, templates) and the page |
 | `Ctrl+Shift+P` | Print |
+| `Ctrl+Alt+P` | [Save as PDF](../features/pdf-export.md) (not while the editor is open) |
 | `Ctrl+F` | Find in page |
 | `F3` / `Shift+F3` | Find next / previous |
 | `Alt+←` / `Alt+→` | History back / forward |
