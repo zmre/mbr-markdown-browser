@@ -7,6 +7,7 @@ use std::{
 use crate::contact::humanize_date;
 use crate::errors::TemplateError;
 use crate::markdown::SimpleMetadata;
+use crate::page_template::{PageTemplate, PageTemplateError};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use tera::{Context, Tera};
@@ -237,6 +238,7 @@ impl Templates {
         // fallback above.
         register_template_helpers(&mut tera);
 
+        let mut defaults_added: Vec<&'static str> = Vec::new();
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
             if tera.get_template(name).is_err() {
                 tracing::debug!("Adding default template {}", name);
@@ -245,8 +247,11 @@ impl Templates {
                         template_name: name.to_string(),
                         source: e,
                     })?;
+                defaults_added.push(name);
             }
         }
+
+        register_mbr_aliases(&mut tera, template_path, &defaults_added);
 
         Ok(tera)
     }
@@ -288,75 +293,219 @@ impl Templates {
         frontmatter: SimpleMetadata,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
-        tracing::debug!("frontmatter: {:?}", &frontmatter);
-
-        // Create JSON from frontmatter BEFORE adding markdown to context
-        // This avoids including the large markdown HTML in the frontmatter JSON.
-        // Escaped for `<script>` context: see `escape_json_for_script`.
-        let frontmatter_json = escape_json_for_script(
-            &serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string()),
-        );
-
-        // The head template used to hand-build these as JavaScript object and
-        // string literals, which broke on any `"`/`\` in a heading, a file path
-        // or a sibling URL — all of which are legal there. Serializing
-        // server-side keeps the emitted script parseable whatever the input.
-        let headings_json = extra_context
-            .get("headings")
-            .map(json_for_script)
-            .unwrap_or_else(|| "[]".to_string());
-        let file_path_json = extra_context
-            .get("file_path")
-            .map(json_for_script)
-            .unwrap_or_else(|| "\"\"".to_string());
-        let prev_page_json = nav_page_json(extra_context.get("prev_page"));
-        let next_page_json = nav_page_json(extra_context.get("next_page"));
-        // GUI pages only (the server sets `file_location` in GUI mode alone);
-        // `null` everywhere else, so no served or built page names a local path.
-        let file_location_json = extra_context
-            .get("file_location")
-            .map(json_for_script)
-            .unwrap_or_else(|| "null".to_string());
-
-        let mut context = Context::new();
-        frontmatter.iter().for_each(|(k, v)| {
-            // `style` is skipped here and inserted below from `body_class_list`,
-            // which also folds in `type` — so it has to be inserted even when the
-            // frontmatter carries no `style` key at all.
-            if k != "style" {
-                context.insert(k, v);
+        let context = markdown_context(html, &frontmatter, &extra_context);
+        render_with_url_root(tera, "index.html", &context, &extra_context).map_err(|e| {
+            TemplateError::RenderFailed {
+                template_name: "index.html".to_string(),
+                source: e,
             }
-        });
-        let body_class = with_companion_class(
-            body_class_list(&frontmatter),
-            extra_context.get("calendar_companion"),
-        );
-        // Left undefined when there is nothing to say, so `{% if style %}` in a
-        // custom template still distinguishes "no classes" from an empty string.
-        if !body_class.is_empty() {
-            context.insert("style", &body_class);
-        }
-        // Add extra context (breadcrumbs, current_dir_name, etc.)
-        extra_context.iter().for_each(|(k, v)| {
-            context.insert(k, v);
-        });
-        context.insert("markdown", html);
-        context.insert("frontmatter_json", &frontmatter_json);
-        context.insert("headings_json", &headings_json);
-        context.insert("file_path_json", &file_path_json);
-        context.insert("file_location_json", &file_location_json);
-        context.insert("prev_page_json", &prev_page_json);
-        context.insert("next_page_json", &next_page_json);
-
-        let html_output =
-            tera.render("index.html", &context)
-                .map_err(|e| TemplateError::RenderFailed {
-                    template_name: "index.html".to_string(),
-                    source: e,
-                })?;
-        Ok(html_output)
+        })
     }
 
+    /// Renders a note through its own page template (`template:` in its
+    /// frontmatter, see [`crate::page_template`]) instead of `index.html`,
+    /// with exactly the context [`Self::render_markdown`] gives `index.html`.
+    ///
+    /// Clones the loaded engine under the read lock; see
+    /// [`Self::render_page_template_with_tera`].
+    pub fn render_page_template(
+        &self,
+        template: &PageTemplate,
+        html: &str,
+        frontmatter: SimpleMetadata,
+        extra_context: HashMap<String, serde_json::Value>,
+    ) -> Result<String, PageTemplateError> {
+        let base = self.tera_clone();
+        Self::render_page_template_with_tera(&base, template, html, frontmatter, extra_context)
+    }
+
+    /// Lock-free [`Self::render_page_template`] over a loaded engine (the
+    /// page engine, or a [`Self::tera_clone`]).
+    ///
+    /// The page gets its own clone of `base`, so nothing it adds is visible to
+    /// any other page. On top of every loaded template (each also under
+    /// `/.mbr/<name>`, see [`MBR_TEMPLATE_PREFIX`]) it registers:
+    ///
+    /// - the `.html` files beside the template, by file name, so the template
+    ///   can include or extend them. **A sibling never shadows an mbr
+    ///   template**: one named like a loaded template (`_head.html`,
+    ///   `index.html`, …) is skipped, so mbr's own partials keep including
+    ///   mbr's partials. A sibling that does not parse is skipped too, and its
+    ///   error is reported if the render then fails naming it.
+    /// - the template itself, as `/<vault path>` (`/invoices/invoice.html`),
+    ///   a name no sibling or mbr template can have.
+    ///
+    /// A clone and one parse per page: only notes that ask for a template pay
+    /// it.
+    pub fn render_page_template_with_tera(
+        base: &Tera,
+        template: &PageTemplate,
+        html: &str,
+        frontmatter: SimpleMetadata,
+        extra_context: HashMap<String, serde_json::Value>,
+    ) -> Result<String, PageTemplateError> {
+        let render_error = |message: String| PageTemplateError::Render {
+            template: template.authored.clone(),
+            message,
+        };
+
+        let mut skipped: Vec<(String, String)> = Vec::new();
+        let mut added: Vec<(String, &str)> = Vec::with_capacity(template.siblings.len() + 1);
+        for (name, source) in &template.siblings {
+            if base.get_template(name).is_ok() {
+                tracing::debug!(
+                    "page template sibling {name} has the name of an mbr template; not registered"
+                );
+                skipped.push((
+                    name.clone(),
+                    "it has the name of an mbr template, which a sibling never replaces; \
+                     rename it"
+                        .to_string(),
+                ));
+                continue;
+            }
+            match tera::Template::new(name, None, source) {
+                Ok(_) => added.push((name.clone(), source.as_str())),
+                Err(e) => skipped.push((name.clone(), error_chain(&e))),
+            }
+        }
+        let main_name = format!("/{}", template.path.as_str());
+        added.push((main_name.clone(), template.source.as_str()));
+
+        let explain = |e: &tera::Error| {
+            let mut message = error_chain(e);
+            for (name, reason) in &skipped {
+                if names_template(&message, name) {
+                    message.push_str(&format!(" ({name} was not loaded: {reason})"));
+                }
+            }
+            message
+        };
+
+        // A failure that names a sibling which is not downloaded is that
+        // sibling's absence, not a broken template: the caller may fetch it
+        // and try again.
+        let fail = |e: tera::Error| {
+            let message = explain(&e);
+            let files: Vec<_> = template
+                .pending_siblings
+                .iter()
+                .filter(|(name, _)| names_template(&message, name))
+                .map(|(_, path)| path.clone())
+                .collect();
+            if files.is_empty() {
+                render_error(message)
+            } else {
+                PageTemplateError::NotDownloaded {
+                    template: template.authored.clone(),
+                    files,
+                }
+            }
+        };
+
+        let mut tera = base.clone();
+        tera.add_raw_templates(added).map_err(fail)?;
+
+        let context = markdown_context(html, &frontmatter, &extra_context);
+        render_with_url_root(&tera, &main_name, &context, &extra_context).map_err(fail)
+    }
+}
+
+/// Whether Tera's error `message` names the template `name` as a whole file
+/// name — `'lines.html'`, `'[lines.html]'` (an include's candidate list),
+/// `"lines.html"` — and not as part of a longer one (`data.html` does not
+/// name `a.html`).
+fn names_template(message: &str, name: &str) -> bool {
+    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/');
+    message.match_indices(name).any(|(at, _)| {
+        let before = message[..at].chars().next_back();
+        let after = message[at + name.len()..].chars().next();
+        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+    })
+}
+
+/// The Tera context of a markdown page, shared by `index.html` and a note's
+/// own page template ([`Templates::render_page_template`]).
+fn markdown_context(
+    html: &str,
+    frontmatter: &SimpleMetadata,
+    extra_context: &HashMap<String, serde_json::Value>,
+) -> Context {
+    tracing::debug!("frontmatter: {:?}", &frontmatter);
+
+    // Create JSON from frontmatter BEFORE adding markdown to context
+    // This avoids including the large markdown HTML in the frontmatter JSON.
+    // Escaped for `<script>` context: see `escape_json_for_script`.
+    let frontmatter_json = escape_json_for_script(
+        &serde_json::to_string(&frontmatter).unwrap_or_else(|_| "{}".to_string()),
+    );
+
+    // The head template used to hand-build these as JavaScript object and
+    // string literals, which broke on any `"`/`\` in a heading, a file path
+    // or a sibling URL — all of which are legal there. Serializing
+    // server-side keeps the emitted script parseable whatever the input.
+    let headings_json = extra_context
+        .get("headings")
+        .map(json_for_script)
+        .unwrap_or_else(|| "[]".to_string());
+    let file_path_json = extra_context
+        .get("file_path")
+        .map(json_for_script)
+        .unwrap_or_else(|| "\"\"".to_string());
+    let prev_page_json = nav_page_json(extra_context.get("prev_page"));
+    let next_page_json = nav_page_json(extra_context.get("next_page"));
+    // GUI pages only (the server sets `file_location` in GUI mode alone);
+    // `null` everywhere else, so no served or built page names a local path.
+    let file_location_json = extra_context
+        .get("file_location")
+        .map(json_for_script)
+        .unwrap_or_else(|| "null".to_string());
+
+    let mut context = Context::new();
+    frontmatter.iter().for_each(|(k, v)| {
+        // `style` is skipped here and inserted below from `body_class_list`,
+        // which also folds in `type` — so it has to be inserted even when the
+        // frontmatter carries no `style` key at all.
+        if k != "style" {
+            context.insert(k, v);
+        }
+    });
+    let body_class = with_companion_class(
+        body_class_list(frontmatter),
+        extra_context.get("calendar_companion"),
+    );
+    // Left undefined when there is nothing to say, so `{% if style %}` in a
+    // custom template still distinguishes "no classes" from an empty string.
+    if !body_class.is_empty() {
+        context.insert("style", &body_class);
+    }
+    // Add extra context (breadcrumbs, current_dir_name, etc.)
+    extra_context.iter().for_each(|(k, v)| {
+        context.insert(k, v);
+    });
+    context.insert("markdown", html);
+    context.insert("frontmatter_json", &frontmatter_json);
+    context.insert("headings_json", &headings_json);
+    context.insert("file_path_json", &file_path_json);
+    context.insert("file_location_json", &file_location_json);
+    context.insert("prev_page_json", &prev_page_json);
+    context.insert("next_page_json", &next_page_json);
+    // `frontmatter`: the note's whole frontmatter, lossless (nested maps,
+    // lists of maps, numbers as numbers), from `markdown_extra_context`.
+    // Inserted last so a frontmatter key that is itself named
+    // `frontmatter` (inserted above as a flat variable) cannot replace it;
+    // that key stays reachable as `frontmatter.frontmatter`. A caller that
+    // supplies none gets the simplified map, so the variable is always the
+    // note's frontmatter.
+    match extra_context.get(FRONTMATTER_VARIABLE) {
+        Some(value) => context.insert(FRONTMATTER_VARIABLE, value),
+        None => context.insert(FRONTMATTER_VARIABLE, frontmatter),
+    }
+
+    context
+}
+
+impl Templates {
     /// Lock-free generic template render that takes a `&Tera` directly.
     ///
     /// Use with `tera_clone()` to avoid `Arc<RwLock<Tera>>` contention when
@@ -370,11 +519,12 @@ impl Templates {
         context_data.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
-        tera.render(template_name, &context)
-            .map_err(|e| TemplateError::RenderFailed {
+        render_with_url_root(tera, template_name, &context, &context_data).map_err(|e| {
+            TemplateError::RenderFailed {
                 template_name: template_name.to_string(),
                 source: e,
-            })
+            }
+        })
     }
 
     pub fn render_section(
@@ -591,9 +741,177 @@ fn collapse_dashes(slug: &str) -> String {
 /// - `humandate` humanizes ISO-ish date strings (see `humanize_date`).
 /// - `icon(name=…, size=…)` draws the shared icon set (`icons.rs`), so a
 ///   template draws the same artwork as the components.
+/// - `url(path=…)` writes a site URL for the page being rendered (see
+///   [`site_url`]).
 pub fn register_template_helpers(tera: &mut Tera) {
     tera.register_filter("humandate", humandate_filter);
     tera.register_function("icon", crate::icons::icon_function);
+    tera.register_function("url", UrlFunction);
+}
+
+/// The template variable holding a note's lossless frontmatter.
+pub const FRONTMATTER_VARIABLE: &str = "frontmatter";
+
+/// The prefix under which every loaded mbr template (a `.mbr/` override, else
+/// the compiled-in default) is registered a second time, so a note's own page
+/// template can `{% include "/.mbr/_head.html" %}` mbr's partials whatever
+/// its siblings are called. No repository file can have such a name: page
+/// templates and their siblings are registered by vault path (`/x/y.html`) or
+/// bare file name, and a hidden `.mbr` segment never resolves.
+pub const MBR_TEMPLATE_PREFIX: &str = "/.mbr/";
+
+/// Registers every template of `tera` a second time as
+/// `/.mbr/<name>` ([`MBR_TEMPLATE_PREFIX`]), from the same source: the user's
+/// file for a name `tera` loaded from `template_path`, the compiled-in default
+/// for the names in `defaults_added`.
+///
+/// Done once per (re)load rather than per page, so a page template costs only
+/// its own clone. Committed only if the whole set registers; otherwise the
+/// aliases are dropped with a warning, which leaves every normal page
+/// untouched.
+fn register_mbr_aliases(tera: &mut Tera, template_path: &Path, defaults_added: &[&str]) {
+    let user_sources: HashMap<String, String> =
+        if tera.get_template_names().count() > defaults_added.len() {
+            collect_user_templates(template_path).into_iter().collect()
+        } else {
+            HashMap::new()
+        };
+    let aliases: Vec<(String, String)> = tera
+        .get_template_names()
+        .filter(|name| !name.starts_with(MBR_TEMPLATE_PREFIX))
+        .filter_map(|name| {
+            let source = if defaults_added.contains(&name) {
+                DEFAULT_TEMPLATES
+                    .iter()
+                    .find(|(default, _)| *default == name)
+                    .map(|(_, source)| (*source).to_string())
+            } else {
+                user_sources.get(name).cloned()
+            }?;
+            Some((format!("{MBR_TEMPLATE_PREFIX}{name}"), source))
+        })
+        .collect();
+
+    let mut candidate = tera.clone();
+    match candidate.add_raw_templates(aliases) {
+        Ok(()) => *tera = candidate,
+        Err(e) => tracing::warn!(
+            "Could not register mbr templates under {MBR_TEMPLATE_PREFIX}: {}. Note page \
+             templates cannot include them.",
+            error_chain(&e)
+        ),
+    }
+}
+
+/// An error and its sources on one line; a source already part of the
+/// message is not repeated. Tera puts the useful part (`Variable `x` not
+/// found`) in the sources.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
+thread_local! {
+    /// The `relative_root` of the page being rendered on this thread, for
+    /// [`UrlFunction`]. A Tera function sees only its arguments, never the
+    /// context, and a render runs start to finish on the thread that called
+    /// `Tera::render`, so the value is set around each render
+    /// ([`render_with_url_root`]) rather than registered per page.
+    static URL_ROOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `tera.render(name, context)` with [`URL_ROOT`] set to `values`'
+/// `relative_root` (static builds; absent on the server and in QuickLook)
+/// for the duration, restored afterwards even if the render panics.
+fn render_with_url_root(
+    tera: &Tera,
+    name: &str,
+    context: &Context,
+    values: &HashMap<String, serde_json::Value>,
+) -> tera::Result<String> {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            URL_ROOT.with(|root| *root.borrow_mut() = previous);
+        }
+    }
+    let root = values
+        .get("relative_root")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let _restore = Restore(URL_ROOT.with(|cell| cell.replace(root)));
+    tera.render(name, context)
+}
+
+/// The URL a template should write for `path`, a path relative to the
+/// repository root (`/images/logo.png` or `images/logo.png`), on a page whose
+/// `relative_root` is `relative_root`: exactly what the idiom
+/// `{{ relative_root | default(value="/") | safe }}images/logo.png` writes.
+/// On the server and in QuickLook (`None`) that is `/images/logo.png`; in a
+/// static build it is relative to the page (`../../images/logo.png`), so a
+/// site published under a path prefix still works.
+///
+/// A URL with a scheme or a host (`https://…`, `//cdn/…`, `mailto:`), a bare
+/// `#fragment` or `?query`, and the empty string are returned unchanged.
+pub fn site_url(path: &str, relative_root: Option<&str>) -> String {
+    if path.is_empty() || path.starts_with(['#', '?']) || crate::url_path::is_external_url(path) {
+        return path.to_string();
+    }
+    format!(
+        "{}{}",
+        relative_root.unwrap_or("/"),
+        path.trim_start_matches('/')
+    )
+}
+
+/// Escapes `s` for an HTML attribute value or text, leaving `/` alone (Tera's
+/// own escaper writes it as `&#x2F;`, which is valid but unreadable in a
+/// URL).
+fn escape_html_attribute(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Tera `url(path="/images/logo.png")`: [`site_url`] for the page being
+/// rendered, HTML-escaped by itself and marked safe, so neither
+/// `{{ url(…) }}` nor `{{ url(…) | safe }}` double-escapes it.
+struct UrlFunction;
+
+impl tera::Function for UrlFunction {
+    fn call(&self, args: &HashMap<String, serde_json::Value>) -> tera::Result<serde_json::Value> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                tera::Error::msg("url() needs a `path` string, e.g. url(path=\"/images/logo.png\")")
+            })?;
+        let url = URL_ROOT.with(|root| site_url(path, root.borrow().as_deref()));
+        Ok(serde_json::Value::String(escape_html_attribute(&url)))
+    }
+
+    fn is_safe(&self) -> bool {
+        true
+    }
 }
 
 /// The compiled-in contact card partial (`_contact_card.html`). Public so
@@ -2016,5 +2334,331 @@ mod tests {
         assert_eq!(href(&[]), "/about/");
         assert_eq!(href(&[("relative_root", json!(""))]), "about/");
         assert_eq!(href(&[("relative_root", json!("../../"))]), "../../about/");
+    }
+
+    // ---------------------- page templates ----------------------
+
+    use crate::page_template::PageTemplate;
+    use crate::vault::VaultPath;
+
+    /// A page template at `path` with `source` and `siblings`.
+    fn page_template(path: &str, source: &str, siblings: &[(&str, &str)]) -> PageTemplate {
+        PageTemplate {
+            authored: path.rsplit('/').next().unwrap().to_string(),
+            path: VaultPath::new(path).unwrap(),
+            source: source.to_string(),
+            siblings: siblings
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .collect(),
+            pending_siblings: Vec::new(),
+        }
+    }
+
+    /// Renders `template` over a repository whose `.mbr/` holds `overrides`.
+    fn render_with_page_template(
+        overrides: &[(&str, &str)],
+        template: &PageTemplate,
+        frontmatter: SimpleMetadata,
+        extra: HashMap<String, serde_json::Value>,
+    ) -> Result<String, PageTemplateError> {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr).unwrap();
+        for (name, source) in overrides {
+            std::fs::write(mbr.join(name), source).unwrap();
+        }
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        templates.render_page_template(template, "<p>body</p>", frontmatter, extra)
+    }
+
+    #[test]
+    fn every_mbr_template_is_also_registered_under_the_mbr_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mbr")).unwrap();
+        std::fs::write(tmp.path().join(".mbr/_nav.html"), "USER NAV").unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let tera = templates.tera.read();
+        for (name, _) in DEFAULT_TEMPLATES {
+            assert!(
+                tera.get_template(&format!("/.mbr/{name}")).is_ok(),
+                "/.mbr/{name} should be registered"
+            );
+        }
+        // The alias carries the override, not the default.
+        let rendered = tera.render("/.mbr/_nav.html", &Context::new()).unwrap();
+        assert_eq!(rendered, "USER NAV");
+    }
+
+    #[test]
+    fn a_page_template_includes_mbr_partials_by_prefix() {
+        let template = page_template(
+            "inv/invoice.html",
+            "<html><head>{% include \"/.mbr/_head.html\" %}</head><body>{{ markdown | safe }}</body></html>",
+            &[],
+        );
+        let html = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap();
+        assert!(html.contains("pico.min.css"), "mbr's head was included");
+        assert!(html.contains("<p>body</p>"));
+    }
+
+    #[test]
+    fn a_page_template_includes_and_extends_its_siblings() {
+        let template = page_template(
+            "inv/invoice.html",
+            "{% extends \"base.html\" %}{% block main %}{% include \"lines.html\" %}{% endblock %}",
+            &[
+                ("base.html", "<main>{% block main %}{% endblock %}</main>"),
+                ("lines.html", "<ul><li>{{ title }}</li></ul>"),
+            ],
+        );
+        let mut fm = SimpleMetadata::new();
+        fm.insert("title".into(), "Design".into());
+        let html = render_with_page_template(&[], &template, fm, HashMap::new()).unwrap();
+        assert_eq!(html, "<main><ul><li>Design</li></ul></main>");
+    }
+
+    #[test]
+    fn a_sibling_never_shadows_an_mbr_template() {
+        // A sibling named `_head.html` must not replace mbr's: the template's
+        // own `_head.html` include gets mbr's, and so does mbr's `index.html`.
+        let template = page_template(
+            "inv/invoice.html",
+            "{% include \"_head.html\" %}|{% include \"/.mbr/_head.html\" %}",
+            &[("_head.html", "SIBLING HEAD")],
+        );
+        let html = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap();
+        assert!(!html.contains("SIBLING HEAD"), "{html}");
+        assert!(html.contains("pico.min.css"));
+    }
+
+    #[test]
+    fn a_template_named_like_an_mbr_template_is_still_the_page_template() {
+        // `template: index.html` names the repository's file, not mbr's.
+        let template = page_template("letters/index.html", "MINE {{ title }}", &[]);
+        let mut fm = SimpleMetadata::new();
+        fm.insert("title".into(), "Hi".into());
+        let html = render_with_page_template(&[], &template, fm, HashMap::new()).unwrap();
+        assert_eq!(html, "MINE Hi");
+    }
+
+    #[test]
+    fn a_broken_sibling_is_named_when_the_template_uses_it() {
+        let template = page_template(
+            "inv/invoice.html",
+            "{% include \"lines.html\" %}",
+            &[("lines.html", "{% if %}"), ("unused.html", "{% for %}")],
+        );
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("invoice.html"), "{message}");
+        assert!(message.contains("lines.html was not loaded"), "{message}");
+        assert!(!message.contains("unused.html"), "{message}");
+    }
+
+    #[test]
+    fn an_unused_broken_sibling_does_not_break_the_page() {
+        let template = page_template("inv/invoice.html", "OK", &[("junk.html", "{% if %}")]);
+        let html = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap();
+        assert_eq!(html, "OK");
+    }
+
+    #[test]
+    fn a_render_error_names_the_template_and_tera_s_reason() {
+        let template = page_template("inv/invoice.html", "{{ missing.field }}", &[]);
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert!(matches!(err, PageTemplateError::Render { .. }));
+        let message = err.to_string();
+        assert!(message.contains("invoice.html"), "{message}");
+        assert!(message.contains("missing"), "{message}");
+    }
+
+    /// The `frontmatter` variable is the lossless value, numbers stay numbers,
+    /// and a frontmatter key named `frontmatter` cannot replace it.
+    #[test]
+    fn frontmatter_variable_is_lossless_and_cannot_be_clobbered() {
+        let template = page_template(
+            "inv/invoice.html",
+            "{% for i in frontmatter.items %}{{ i.desc }}={{ i.qty * i.rate }};{% endfor %}\
+             {{ frontmatter.client.name }}|{{ frontmatter.frontmatter }}|{{ frontmatter.paid is defined }}",
+            &[],
+        );
+        let mut fm = SimpleMetadata::new();
+        fm.insert("frontmatter".into(), "sneaky".into());
+        let extra = HashMap::from([(
+            FRONTMATTER_VARIABLE.to_string(),
+            json!({
+                "items": [{"desc": "Design", "qty": 2, "rate": 150.5}, {"desc": "Build", "qty": 3, "rate": 10}],
+                "client": {"name": "Acme"},
+                "frontmatter": "sneaky",
+                "paid": null,
+            }),
+        )]);
+        let html = render_with_page_template(&[], &template, fm, extra).unwrap();
+        assert_eq!(html, "Design=301;Build=30;Acme|sneaky|true");
+    }
+
+    #[test]
+    fn index_html_gets_the_frontmatter_variable_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mbr")).unwrap();
+        std::fs::write(
+            tmp.path().join(".mbr/index.html"),
+            "{{ frontmatter.client.name }}",
+        )
+        .unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let extra = HashMap::from([(
+            FRONTMATTER_VARIABLE.to_string(),
+            json!({"client": {"name": "Acme"}}),
+        )]);
+        let html = templates
+            .render_markdown("", SimpleMetadata::new(), extra)
+            .unwrap();
+        assert_eq!(html, "Acme");
+    }
+
+    #[test]
+    fn without_a_lossless_value_frontmatter_is_the_simplified_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mbr")).unwrap();
+        std::fs::write(
+            tmp.path().join(".mbr/index.html"),
+            "{{ frontmatter.title }}",
+        )
+        .unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let mut fm = SimpleMetadata::new();
+        fm.insert("title".into(), "T".into());
+        fm.insert("frontmatter".into(), "sneaky".into());
+        let html = templates.render_markdown("", fm, HashMap::new()).unwrap();
+        assert_eq!(html, "T");
+    }
+
+    #[test]
+    fn names_template_matches_whole_file_names_only() {
+        assert!(names_template(
+            "Template '[lines.html]' not found",
+            "lines.html"
+        ));
+        assert!(names_template(
+            "Template 'lines.html' not found",
+            "lines.html"
+        ));
+        assert!(names_template("parent \"base.html\" missing", "base.html"));
+        assert!(!names_template(
+            "Template '[data.html]' not found",
+            "a.html"
+        ));
+        assert!(!names_template(
+            "Template 'x/lines.html' not found",
+            "lines.html"
+        ));
+        assert!(!names_template("Template 'lines.html.bak'", "lines.html"));
+    }
+
+    /// A not-downloaded sibling the render names is `NotDownloaded` (the
+    /// caller may fetch it); one the template never uses changes nothing.
+    #[test]
+    fn a_pending_sibling_is_not_downloaded_only_when_the_render_needs_it() {
+        let mut template = page_template("inv/invoice.html", "{% include \"lines.html\" %}", &[]);
+        template.pending_siblings = vec![
+            (
+                "lines.html".to_string(),
+                VaultPath::new("inv/lines.html").unwrap(),
+            ),
+            (
+                "unused.html".to_string(),
+                VaultPath::new("inv/unused.html").unwrap(),
+            ),
+        ];
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert_eq!(
+            err.not_downloaded_files(),
+            Some(&[VaultPath::new("inv/lines.html").unwrap()][..])
+        );
+
+        template.source = "OK".to_string();
+        let html = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap();
+        assert_eq!(html, "OK");
+    }
+
+    #[test]
+    fn site_url_matches_the_relative_root_idiom() {
+        // Server and QuickLook: no relative_root.
+        assert_eq!(site_url("/images/logo.png", None), "/images/logo.png");
+        assert_eq!(site_url("images/logo.png", None), "/images/logo.png");
+        // Static build: the root page and a page two levels down.
+        assert_eq!(site_url("/images/logo.png", Some("")), "images/logo.png");
+        assert_eq!(
+            site_url("/images/logo.png", Some("../../")),
+            "../../images/logo.png"
+        );
+        // Left alone.
+        for external in [
+            "https://x.test/a.png",
+            "//cdn/a.png",
+            "mailto:a@b",
+            "#top",
+            "?q",
+            "",
+        ] {
+            assert_eq!(site_url(external, Some("../")), external);
+        }
+    }
+
+    /// `url()` produces what the idiom produces in each mode, escaped once.
+    #[test]
+    fn url_function_renders_like_the_idiom_in_every_mode() {
+        let source = "{{ url(path=\"/images/a b&c.png\") }}|{{ url(path=\"/x.png\") | safe }}|\
+                      {{ relative_root | default(value=\"/\") | safe }}x.png";
+        let template = page_template("inv/t.html", source, &[]);
+        let render = |root: Option<&str>| {
+            let extra = root
+                .map(|r| HashMap::from([("relative_root".to_string(), json!(r))]))
+                .unwrap_or_default();
+            // As a browser reads it: the idiom's `default` literal comes out
+            // as `&#x2F;` (see `test_header_link_relative_root_idiom`);
+            // `url()` writes a plain `/`.
+            render_with_page_template(&[], &template, SimpleMetadata::new(), extra)
+                .unwrap()
+                .replace("&#x2F;", "/")
+        };
+        assert!(
+            !render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+                .unwrap()
+                .starts_with("&#x2F;"),
+            "url() writes a readable `/`"
+        );
+        // Server / QuickLook (no relative_root).
+        assert_eq!(render(None), "/images/a b&amp;c.png|/x.png|/x.png");
+        // Static build at depth 2 and at the root.
+        assert_eq!(
+            render(Some("../../")),
+            "../../images/a b&amp;c.png|../../x.png|../../x.png"
+        );
+        assert_eq!(render(Some("")), "images/a b&amp;c.png|x.png|x.png");
+    }
+
+    /// QuickLook's own engine registers the helpers without a `Templates`.
+    #[test]
+    fn url_function_works_in_a_bare_engine() {
+        let mut tera = Tera::default();
+        register_template_helpers(&mut tera);
+        tera.add_raw_template("t", "{{ url(path=\"/a.png\") }}")
+            .unwrap();
+        assert_eq!(tera.render("t", &Context::new()).unwrap(), "/a.png");
+        assert!(
+            tera.add_raw_template("u", "{{ url() }}").is_ok()
+                && tera.render("u", &Context::new()).is_err(),
+            "url() without a path is a render error"
+        );
     }
 }

@@ -289,6 +289,11 @@ fn note_body() -> String {
         .collect()
 }
 
+/// The note rendered through a page template (`template:`), and its
+/// template, beside it in `notes/`.
+const TEMPLATED_NOTE: &str = "notes/templated.md";
+const TEMPLATE_FILE: &str = "page.html";
+
 /// A project on disk laid out per [`Layout`], with every [`FILES`] asset, the
 /// index and plain notes holding [`note_body`], and the cover notes.
 struct Fixture {
@@ -319,8 +324,19 @@ impl Fixture {
             write(&fixture.path(place, path), path.as_bytes());
         }
         for (note, _) in fixture.notes() {
-            write(&fixture.root().join(note), note_body().as_bytes());
+            let body = if note == TEMPLATED_NOTE {
+                format!("---\ntemplate: {TEMPLATE_FILE}\n---\n{}", note_body())
+            } else {
+                note_body()
+            };
+            write(&fixture.root().join(note), body.as_bytes());
         }
+        // The page template of `TEMPLATED_NOTE`: the body, and nothing else
+        // that loads, so its references are the table's.
+        write(
+            &fixture.root().join("notes").join(TEMPLATE_FILE),
+            b"<!doctype html><html><body>{{ markdown | safe }}</body></html>",
+        );
         for (i, case) in FRONTMATTER_CASES.iter().enumerate() {
             let note = format!("---\n{}: \"{}\"\n---\n# Cover {i}\n", case.key, case.value);
             write(
@@ -344,12 +360,15 @@ impl Fixture {
     }
 
     /// The notes holding [`CASES`] and their served URLs: an index note,
-    /// served at its folder's URL, and a plain one at its own, whose relative
-    /// links the renderer writes one `../` deeper.
-    fn notes(&self) -> [(String, &'static str); 2] {
+    /// served at its folder's URL, a plain one at its own, whose relative
+    /// links the renderer writes one `../` deeper, and a plain one rendered
+    /// through its own page template ([`TEMPLATED_NOTE`]), whose references
+    /// must load exactly what the plain note's do.
+    fn notes(&self) -> [(String, &'static str); 3] {
         [
             (format!("notes/{}", self.layout.index_file()), "/notes/"),
             ("notes/note.md".to_string(), "/notes/note/"),
+            (TEMPLATED_NOTE.to_string(), "/notes/templated/"),
         ]
     }
 

@@ -911,3 +911,104 @@ async fn media_json_answers_before_media_population_finishes() {
     };
     assert!(done.to_string().contains("pic.png"), "{done}");
 }
+
+// ---------------------- page templates on a cloud vault ----------------------
+
+/// A vault holding an invoice note whose page template includes `lines.html`.
+/// `unused.html` sits beside them and is never included.
+fn templated_vault() -> Arc<MemVault> {
+    Arc::new(
+        MemVault::new()
+            .with_file("index.md", "# Home\n")
+            .with_file(
+                "bills/invoice.md",
+                "---\ntitle: Bill\ntemplate: invoice.html\n---\nThanks.\n",
+            )
+            .with_file(
+                "bills/invoice.html",
+                "<h1>{{ title }}</h1>{% include \"lines.html\" %}{{ markdown | safe }}",
+            )
+            .with_file("bills/lines.html", "<p>LINES</p>")
+            .with_file("bills/unused.html", "<p>never</p>"),
+    )
+}
+
+fn requested(vault: &MemVault) -> Vec<String> {
+    vault
+        .download_requests()
+        .iter()
+        .map(|path| path.to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_template_that_arrives_during_the_wait_renders() {
+    let vault = templated_vault();
+    vault.set_availability("bills/invoice.html", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+    let server = server(&vault).await;
+
+    // The provider delivers a little after the request.
+    let arriving = Arc::clone(&vault);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        arriving.set_availability("bills/invoice.html", Availability::Local);
+    });
+
+    let (status, _, body) = send(&server, get("/bills/invoice/")).await;
+    let page = String::from_utf8(body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("<h1>Bill</h1><p>LINES</p>"), "{page}");
+    assert_eq!(requested(&vault), ["bills/invoice.html"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_template_that_never_arrives_is_the_downloading_page() {
+    let vault = templated_vault();
+    vault.set_availability("bills/invoice.html", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+    let server = server(&vault).await;
+
+    let (status, headers, body) = send(&server, get("/bills/invoice/")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers[header::RETRY_AFTER], "2");
+    assert_eq!(headers["refresh"], "2");
+    let page = String::from_utf8(body).unwrap();
+    assert!(page.contains("class=\"mbr-downloading\""), "{page}");
+    assert!(!page.contains("Page template error"), "{page}");
+    // Requested once, not once per poll.
+    assert_eq!(requested(&vault), ["bills/invoice.html"]);
+
+    // Arrived by the next `Refresh`: the invoice.
+    vault.set_availability("bills/invoice.html", Availability::Local);
+    let (status, _, _) = send(&server, get("/bills/invoice/")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_not_downloaded_sibling_the_template_uses_is_requested() {
+    let vault = templated_vault();
+    vault.set_availability("bills/lines.html", Availability::NotDownloaded);
+    vault.set_availability("bills/unused.html", Availability::NotDownloaded);
+    let server = server(&vault).await;
+
+    // `MemVault` delivers on request: the retry renders with the partial.
+    let (status, _, body) = send(&server, get("/bills/invoice/")).await;
+    let page = String::from_utf8(body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("<p>LINES</p>"), "{page}");
+    assert_eq!(requested(&vault), ["bills/lines.html"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_needed_sibling_that_never_arrives_is_the_downloading_page() {
+    let vault = templated_vault();
+    vault.set_availability("bills/lines.html", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+    let server = server(&vault).await;
+
+    let (status, headers, _) = send(&server, get("/bills/invoice/")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers[header::RETRY_AFTER], "2");
+    assert_eq!(requested(&vault), ["bills/lines.html"]);
+}

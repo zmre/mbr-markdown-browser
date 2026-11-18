@@ -489,6 +489,11 @@ pub struct MarkdownPageParams<'a> {
     /// ([`crate::calendar::PeriodicIndex::nav`]), site-absolute; `None` for
     /// every other page and whenever `[calendar] enabled = false`.
     pub calendar_nav: Option<&'a CalendarNav>,
+    /// The note's lossless frontmatter
+    /// ([`crate::markdown::MarkdownRenderResult::frontmatter_value`]),
+    /// published to templates as `frontmatter`. `None` leaves the template's
+    /// `frontmatter` to the simplified map.
+    pub frontmatter: Option<&'a Value>,
 }
 
 /// Repository-level configuration for the markdown-page context builder.
@@ -652,6 +657,15 @@ pub fn markdown_extra_context(
     if let UrlMode::RelativeToDepth(depth) = url_mode {
         ctx.insert("relative_base".to_string(), json!(relative_base(*depth)));
         ctx.insert("relative_root".to_string(), json!(relative_root(*depth)));
+    }
+
+    // The note's whole frontmatter, lossless; `Templates` inserts it after
+    // every flat frontmatter key, so a key named `frontmatter` cannot hide it.
+    if let Some(frontmatter) = params.frontmatter {
+        ctx.insert(
+            crate::templates::FRONTMATTER_VARIABLE.to_string(),
+            frontmatter.clone(),
+        );
     }
 
     ctx
@@ -1192,6 +1206,7 @@ mod tests {
             siblings: &siblings,
             slides: None,
             calendar_nav: None,
+            frontmatter: None,
         };
         let root_dir = Path::new("/repo/root");
         let ctx = markdown_extra_context(
@@ -1253,6 +1268,7 @@ mod tests {
             siblings: &siblings,
             slides: None,
             calendar_nav: None,
+            frontmatter: None,
         };
         // Static builds never have a live repo to scope storage against.
         let ctx = markdown_extra_context(
@@ -1517,6 +1533,7 @@ mod tests {
             siblings: &[],
             slides: Some(&page),
             calendar_nav: None,
+            frontmatter: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert_eq!(ctx.get("slides_config"), Some(&json!("{}")));
@@ -1541,6 +1558,7 @@ mod tests {
             siblings: &[],
             slides: None,
             calendar_nav: None,
+            frontmatter: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert!(!ctx.contains_key("prev_page"));

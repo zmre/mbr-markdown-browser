@@ -129,6 +129,14 @@ async fn export(
     relative_path: &Path,
     mut config: Config,
 ) -> Result<ExportedPdf, PdfError> {
+    // A note whose page template is broken, missing or refused would print
+    // the server's error page: refuse before anything is started. First, so
+    // the answer does not depend on the platform or a display. A note
+    // without `template:` costs one frontmatter read.
+    crate::standalone::check_page_template(&config, absolute_path, relative_path)
+        .await
+        .map_err(PdfError::PageTemplate)?;
+
     // Before anything else exists: no backend, or no display, is a refusal.
     pdf_export::preflight()?;
 

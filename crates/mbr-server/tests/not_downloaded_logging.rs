@@ -281,3 +281,35 @@ async fn an_edit_read_of_a_not_downloaded_note_logs_nothing_above_debug() {
     assert_eq!(at_level(&lines, "ERROR"), Vec::<String>::new());
     assert_eq!(at_level(&lines, "WARN"), Vec::<String>::new());
 }
+
+/// A note whose page template never arrives answers the "Downloading" page
+/// on every `Refresh`, and nothing about it is logged above DEBUG.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_template_that_never_arrives_logs_nothing_above_debug() {
+    let vault = Arc::new(
+        MemVault::new()
+            .with_file("index.md", "# Home\n")
+            .with_file(
+                "tamarillo-bill.md",
+                "---\ntemplate: tamarillo.html\n---\nBody\n",
+            )
+            .with_file("tamarillo.html", "<p>{{ markdown | safe }}</p>"),
+    );
+    vault.set_availability("tamarillo.html", Availability::NotDownloaded);
+    vault.hold_downloads(true);
+    let server = server(&vault).await;
+
+    let (status, headers, _) = get(&server, "/tamarillo-bill/").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers[header::RETRY_AFTER], "2");
+
+    let lines = lines_about("tamarillo");
+    assert!(
+        at_level(&lines, "DEBUG")
+            .iter()
+            .any(|line| line.contains("asking for a retry")),
+        "the state is still logged, at DEBUG: {lines:#?}"
+    );
+    assert_eq!(at_level(&lines, "ERROR"), Vec::<String>::new());
+    assert_eq!(at_level(&lines, "WARN"), Vec::<String>::new());
+}

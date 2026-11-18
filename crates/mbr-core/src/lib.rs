@@ -73,6 +73,7 @@ pub mod oembed_cache;
 pub mod outside_link;
 pub mod page_context;
 pub mod page_errors;
+pub mod page_template;
 pub mod path_resolver;
 pub mod pdf_config;
 #[cfg(feature = "media-metadata")]

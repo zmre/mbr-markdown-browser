@@ -33,12 +33,13 @@ use mbr_core::embedded_pico;
 use mbr_core::link_transform::LinkTransformConfig;
 use mbr_core::markdown;
 use mbr_core::page_context::{self, UrlMode};
+use mbr_core::page_template;
 use mbr_core::path_resolver::{self, OwnedPathResolverConfig, ResolvedPath};
 use mbr_core::relationships::{self, RelationTypeRegistry};
 use mbr_core::repo;
 use mbr_core::templates;
 use mbr_core::url_path::{self, url_scheme};
-use mbr_core::vault::VaultPath;
+use mbr_core::vault::{LocalVault, VaultPath};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 use std::borrow::Cow;
@@ -352,6 +353,13 @@ pub fn render_preview_with_config(
         })?;
     let mut rendered = target.render_markdown(&source)?;
     let card = target.contact_card_context(&source, &mut rendered);
+
+    // A note with its own page template (`template:`) is shown through it;
+    // any problem falls back to the ordinary preview below.
+    if let Some(document) = target.page_template_preview(&rendered, &card) {
+        return Ok(document);
+    }
+
     let day = target.day_calendar(&source, &rendered.frontmatter);
 
     render_quicklook_template(
@@ -608,6 +616,127 @@ impl QuickLookTarget {
     /// Just the file name for a note outside its root.
     fn raw_path(&self) -> &Path {
         self.in_root.as_deref().unwrap_or(&self.file_name)
+    }
+
+    /// The preview of a note that names its own page template (`template:`,
+    /// see [`page_template`]): that template rendered as the server renders
+    /// it, then every local URL in the **whole** document through
+    /// [`collect_preview_attachments`], with `/.mbr/*.css` served too
+    /// ([`MbrCssAssets`]). `None` — the ordinary preview — when the note names
+    /// no template, or when anything fails, which is logged: a preview never
+    /// fails because of a template.
+    fn page_template_preview(
+        &self,
+        rendered: &markdown::MarkdownRenderResult,
+        card: &HashMap<String, serde_json::Value>,
+    ) -> Option<PreviewDocument> {
+        let requested = page_template::requested_template(&rendered.frontmatter)?;
+        self.render_page_template(requested, rendered, card)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "QuickLook: page template of {} not used, showing the plain preview: {e}",
+                    self.path.display()
+                );
+            })
+            .ok()
+    }
+
+    /// [`Self::page_template_preview`]'s fallible half.
+    fn render_page_template(
+        &self,
+        requested: Result<&str, page_template::PageTemplateError>,
+        rendered: &markdown::MarkdownRenderResult,
+        card: &HashMap<String, serde_json::Value>,
+    ) -> Result<PreviewDocument, page_template::PageTemplateError> {
+        use page_template::PageTemplateError;
+        let requested = requested?;
+        let outside = || PageTemplateError::OutsideRoot {
+            template: requested.to_string(),
+        };
+        let config = &self.config;
+        // Containment is judged against the canonical root with symlink
+        // mounts off, as for every asset a preview reads (`AssetResolver`).
+        let canonical_root = self.root_path.canonicalize().map_err(|_| outside())?;
+        let vault = LocalVault::new(&canonical_root);
+        let note = self
+            .in_root
+            .as_deref()
+            .and_then(|relative| VaultPath::from_relative_native(relative).ok())
+            .ok_or_else(outside)?;
+        let exempt = exempt_hidden_dirs(config);
+        let template = page_template::resolve_page_template(&vault, &note, requested, &exempt)?;
+
+        let templates =
+            templates::Templates::new(&self.root_path, config.template_folder.as_deref()).map_err(
+                |e| PageTemplateError::Render {
+                    template: template.authored.clone(),
+                    message: e.to_string(),
+                },
+            )?;
+
+        // The context a server page gets, minus what needs a server: no
+        // siblings, no calendar bar, absolute URLs (`relative_root` unset, so
+        // `url()` and the `relative_root` idiom write `/images/…`).
+        let readability =
+            mbr_core::readability::scores(&mbr_core::readability::ReadabilityCounts {
+                words: rendered.word_count,
+                sentences: rendered.sentence_count,
+                syllables: rendered.syllable_count,
+            });
+        let file_path = self.raw_path().to_string_lossy();
+        let mut extra_context = page_context::markdown_extra_context(
+            &page_context::MarkdownPageParams {
+                breadcrumb_path: self.raw_path(),
+                headings: &rendered.headings,
+                has_h1: rendered.has_h1,
+                word_count: rendered.word_count,
+                readability: &readability,
+                file_path: &file_path,
+                modified_secs: None,
+                current_url: "",
+                siblings: &[],
+                slides: rendered.slides.as_ref().map(|s| &s.settings),
+                calendar_nav: None,
+                frontmatter: Some(&rendered.frontmatter_value),
+            },
+            &page_context::MarkdownContextOptions {
+                tag_sources: &config.tag_sources,
+                sidebar_style: &config.sidebar_style,
+                sidebar_max_items: config.sidebar_max_items,
+                graph_depth: config.graph_depth,
+                flashcards_concentric_threshold: config.flashcards_concentric_threshold,
+                flashcards_progress_indicators: config.flashcards_progress_indicators,
+                tasks_enabled: false,
+                review_enabled: false,
+                tasks_default_include: config.tasks_default_include,
+                title_prefix: &config.title_prefix,
+                title_suffix: &config.title_suffix,
+                root_dir: None,
+                slides: &config.slides,
+                calendar: &page_context::CalendarChrome::new(&config.calendar),
+            },
+            &UrlMode::Absolute,
+        );
+        extra_context.extend(card.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut frontmatter = rendered.frontmatter.clone();
+        frontmatter.insert("server_mode".to_string(), false.into());
+
+        let html = templates.render_page_template(
+            &template,
+            &rendered.html,
+            frontmatter,
+            extra_context,
+        )?;
+
+        let resolver = AssetResolver::new(&self.root_path, config);
+        let mbr_css = MbrCssAssets::new(&self.root_path, config);
+        let (html, attachments) = collect_preview_attachments_with(
+            &html,
+            resolver.as_ref(),
+            &self.base_dir_url(),
+            Some(&mbr_css),
+        );
+        Ok(PreviewDocument { html, attachments })
     }
 
     /// Render `source` (this file's markdown, or the top of it) to HTML.
@@ -923,11 +1052,7 @@ impl AssetResolver {
                 index_file: config.index_file.clone(),
                 // Tag pages are not files.
                 tag_sources: Vec::new(),
-                exempt_hidden_dirs: config
-                    .explicit_hidden_dirs
-                    .iter()
-                    .filter_map(|dir| VaultPath::from_relative_native(dir).ok())
-                    .collect(),
+                exempt_hidden_dirs: exempt_hidden_dirs(config),
             },
         })
     }
@@ -1036,6 +1161,9 @@ struct AttachmentCollector<'a> {
     /// The URL of the previewed file's folder; relative attribute values
     /// resolve against it (see [`asset_url_path`]).
     base_dir_url: &'a str,
+    /// Serves `/.mbr/*.css` (a page template's stylesheets) when set; `None`
+    /// for the ordinary preview, which inlines its CSS.
+    mbr_css: Option<&'a MbrCssAssets>,
     /// Resolved path -> already-assigned `cid` id.
     seen: HashMap<PathBuf, String>,
     attachments: Vec<PreviewAttachment>,
@@ -1043,10 +1171,15 @@ struct AttachmentCollector<'a> {
 }
 
 impl<'a> AttachmentCollector<'a> {
-    fn new(resolver: &'a AssetResolver, base_dir_url: &'a str) -> Self {
+    fn new(
+        resolver: &'a AssetResolver,
+        base_dir_url: &'a str,
+        mbr_css: Option<&'a MbrCssAssets>,
+    ) -> Self {
         Self {
             resolver,
             base_dir_url,
+            mbr_css,
             seen: HashMap::new(),
             attachments: Vec::new(),
             attached_bytes: 0,
@@ -1063,7 +1196,13 @@ impl<'a> AttachmentCollector<'a> {
     /// it would blow the size budget.
     fn cid_for(&mut self, url_path: &str) -> Option<String> {
         let resolved = self.resolver.resolve(url_path)?;
+        self.attach(resolved)
+    }
 
+    /// The `cid:` URL for `resolved`, a canonical path some resolver has
+    /// already proven may be shown, attaching it unless it is already
+    /// attached or would blow the size budget.
+    fn attach(&mut self, resolved: PathBuf) -> Option<String> {
         if let Some(id) = self.seen.get(&resolved) {
             return Some(format!("cid:{id}"));
         }
@@ -1091,7 +1230,33 @@ impl<'a> AttachmentCollector<'a> {
     /// The `cid:` URL for one authored URL (still HTML-escaped), or `None` to
     /// leave it as authored.
     fn cid_for_value(&mut self, value: &str) -> Option<String> {
-        asset_url_path(self.base_dir_url, value).and_then(|url_path| self.cid_for(&url_path))
+        let url_path = asset_url_path(self.base_dir_url, value)?;
+        if let Some(mbr_css) = self.mbr_css
+            && let Some(name) = url_path.strip_prefix("/.mbr/")
+        {
+            return self.mbr_css_url(mbr_css, name);
+        }
+        self.cid_for(&url_path)
+    }
+
+    /// The URL for `/.mbr/<name>`, a stylesheet only: the override file as an
+    /// attachment, else the compiled-in default as a `data:` URL (an
+    /// attachment is a file path, and the default has none). Both count
+    /// against the attachment budget. Anything else under `/.mbr/` is left
+    /// as authored (and loads nothing).
+    fn mbr_css_url(&mut self, mbr_css: &MbrCssAssets, name: &str) -> Option<String> {
+        if let Some(path) = mbr_css.override_file(name) {
+            return self.attach(path);
+        }
+        let css = mbr_css.default_css(name)?;
+        let size = u64::try_from(css.len()).ok()?;
+        if size > MAX_ATTACHMENT_BYTES
+            || self.attached_bytes.saturating_add(size) > MAX_TOTAL_ATTACHMENT_BYTES
+        {
+            return None;
+        }
+        self.attached_bytes += size;
+        Some(css_data_url(css))
     }
 
     /// Rewrite one matched `src`/`srcset`/`href`/`poster` attribute, attaching
@@ -1137,11 +1302,25 @@ fn collect_preview_attachments(
     resolver: Option<&AssetResolver>,
     base_dir_url: &str,
 ) -> (String, Vec<PreviewAttachment>) {
+    collect_preview_attachments_with(html, resolver, base_dir_url, None)
+}
+
+/// [`collect_preview_attachments`], optionally also serving `/.mbr/*.css`
+/// from `mbr_css` — for a note's page template, whose `<head>` links mbr's
+/// stylesheets. `/.mbr/` stylesheets come only from the configured template
+/// folder, the repository's `.mbr/` folder (canonically inside either) or the
+/// compiled-in assets ([`MbrCssAssets`]), never from anywhere a URL names.
+fn collect_preview_attachments_with(
+    html: &str,
+    resolver: Option<&AssetResolver>,
+    base_dir_url: &str,
+    mbr_css: Option<&MbrCssAssets>,
+) -> (String, Vec<PreviewAttachment>) {
     let Some(resolver) = resolver else {
         return (html.to_string(), Vec::new());
     };
 
-    let mut collector = AttachmentCollector::new(resolver, base_dir_url);
+    let mut collector = AttachmentCollector::new(resolver, base_dir_url, mbr_css);
 
     // First pass: handle double-quoted attributes
     let result = ASSET_ATTRIBUTE_DOUBLE_QUOTED
@@ -1156,6 +1335,103 @@ fn collect_preview_attachments(
         .into_owned();
 
     (result, collector.attachments)
+}
+
+/// The hidden folders the operator named, as vault paths (what the server's
+/// resolver exempts from the hidden-file rule).
+fn exempt_hidden_dirs(config: &Config) -> Vec<VaultPath> {
+    config
+        .explicit_hidden_dirs
+        .iter()
+        .filter_map(|dir| VaultPath::from_relative_native(dir).ok())
+        .collect()
+}
+
+/// Where a page template's `/.mbr/*.css` comes from in a preview, in the
+/// server's order: the configured `template_folder`, then the repository's
+/// `.mbr/` folder, then the compiled-in default (Pico in the configured
+/// theme for `pico.min.css`).
+///
+/// # Security
+///
+/// Part of the attachment boundary. A name is a `/`-separated relative path
+/// that must parse as a [`VaultPath`] (no `..` past the folder, nothing
+/// absolute), have no hidden segment, and end in `.css`; an override must be
+/// a regular file canonically inside its folder (a symlink out is refused).
+/// No other file is ever read for a `/.mbr/` URL.
+struct MbrCssAssets {
+    /// Canonical override folders, in lookup order.
+    folders: Vec<PathBuf>,
+    theme: String,
+}
+
+impl MbrCssAssets {
+    fn new(root_path: &Path, config: &Config) -> Self {
+        let folders = config
+            .template_folder
+            .iter()
+            .cloned()
+            .chain(std::iter::once(root_path.join(".mbr")))
+            .filter_map(|folder| folder.canonicalize().ok())
+            .collect();
+        Self {
+            folders,
+            theme: config.theme.clone(),
+        }
+    }
+
+    /// The stylesheet `name` as a vault path, or `None` when it is not an
+    /// acceptable name (see the type docs).
+    fn css_name(name: &str) -> Option<VaultPath> {
+        let name = VaultPath::new(name).ok()?;
+        let is_css = name
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("css"));
+        (is_css && !mbr_core::vault::has_hidden_segment(&name, &[])).then_some(name)
+    }
+
+    /// The override for `name`: canonical path of a regular file inside one
+    /// of [`Self::folders`].
+    fn override_file(&self, name: &str) -> Option<PathBuf> {
+        let name = Self::css_name(name)?;
+        self.folders.iter().find_map(|folder| {
+            let candidate = name.to_native(folder).canonicalize().ok()?;
+            (candidate.starts_with(folder) && candidate.is_file()).then_some(candidate)
+        })
+    }
+
+    /// The compiled-in stylesheet for `name`, if there is one.
+    fn default_css(&self, name: &str) -> Option<&'static [u8]> {
+        let name = Self::css_name(name)?;
+        if name.as_str() == "pico.min.css" {
+            return embedded_pico::get_pico_css(&self.theme);
+        }
+        assets::default_file(&format!("/{}", name.as_str()))
+            .filter(|(_, mime)| mime.starts_with("text/css"))
+            .map(|(bytes, _)| bytes)
+    }
+}
+
+/// Characters a CSS `data:` URL inside an HTML attribute must encode: the
+/// percent sign itself, controls and whitespace, the HTML-significant
+/// `"` `'` `&` `<` `>`, and `#` (a fragment). Everything else in a
+/// stylesheet may stay as it is, which keeps the URL close to the CSS's size.
+const CSS_DATA_URL_ENCODE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'<')
+    .add(b'>');
+
+/// `css` as a `data:text/css` URL.
+fn css_data_url(css: &[u8]) -> String {
+    format!(
+        "data:text/css;charset=utf-8,{}",
+        percent_encoding::percent_encode(css, CSS_DATA_URL_ENCODE)
+    )
 }
 
 /// Render the QuickLook HTML template with inlined assets.
@@ -3681,5 +3957,134 @@ mod tests {
                 "stored HTML differs from the render for {stale:?}; rerun with MBR_UPDATE_AGENDA_CASES=1 and review"
             );
         }
+    }
+
+    // ---------------------- page templates ----------------------
+
+    /// An invoice note with a page template, a logo, and the template's
+    /// `<head>` linking mbr's stylesheets the way `_head.html` does.
+    const INVOICE_NOTE: &str = "---\ntitle: Invoice 7\ntemplate: invoice.html\nitems:\n  - {desc: Design, qty: 2, rate: 10.5}\n---\n\nThanks.\n";
+    const INVOICE_TEMPLATE: &str = concat!(
+        "<html><head>",
+        "<link rel=\"stylesheet\" href=\"/.mbr/pico.min.css\">",
+        "<link rel=\"stylesheet\" href=\"/.mbr/theme.css\">",
+        "<link rel=\"stylesheet\" href=\"/.mbr/user.css\">",
+        "<link rel=\"stylesheet\" href=\"/.mbr/config.toml\">",
+        "<link rel=\"stylesheet\" href=\"/.mbr/../secret.css\">",
+        "</head><body>",
+        "<img alt=\"logo\" src=\"{{ url(path='/images/logo.png') }}\">",
+        "{% for i in frontmatter.items %}<p>{{ i.desc }} {{ i.qty * i.rate }}</p>{% endfor %}",
+        "{{ markdown | safe }}</body></html>",
+    );
+
+    fn invoice_repo() -> (tempfile::TempDir, PathBuf, String) {
+        let (tmp, root, note) = thumbnail_repo("bills/7.md", INVOICE_NOTE);
+        write_file(
+            &root.join("bills/invoice.html"),
+            INVOICE_TEMPLATE.as_bytes(),
+        );
+        write_file(&root.join("images/logo.png"), b"png");
+        write_file(&root.join("secret.css"), b"body{}");
+        write_file(&root.join(".mbr/config.toml"), b"");
+        (tmp, root, note)
+    }
+
+    /// Every `<link>`'s `href`, in document order.
+    fn link_hrefs(html: &str) -> Vec<String> {
+        html.split("<link ")
+            .skip(1)
+            .map(|tag| {
+                let href = &tag[tag.find("href=\"").unwrap() + 6..];
+                href[..href.find('"').unwrap()].to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_page_template_renders_and_attaches_its_assets() {
+        let (_tmp, root, note) = invoice_repo();
+        write_file(&root.join(".mbr/theme.css"), b"/* mine */");
+        let document = render_preview(note, None).unwrap();
+        let html = &document.html;
+
+        assert!(html.contains("<p>Design 21</p>"), "{html}");
+        assert!(html.contains("Thanks."), "{html}");
+        // The logo, through `url()` and the asset boundary.
+        let logo = src_of(html, "logo");
+        assert!(logo.starts_with("cid:"), "{logo}");
+        assert_eq!(
+            logo,
+            cid_of(&document.attachments, &root.join("images/logo.png"))
+        );
+
+        let hrefs = link_hrefs(html);
+        // Compiled-in Pico and user.css: data URLs (no file to attach).
+        assert!(
+            hrefs[0].starts_with("data:text/css;charset=utf-8,"),
+            "{}",
+            &hrefs[0][..40]
+        );
+        assert!(hrefs[2].starts_with("data:text/css"), "{}", hrefs[2]);
+        // The `.mbr/theme.css` override: an attachment of that very file.
+        assert_eq!(
+            hrefs[1],
+            cid_of(&document.attachments, &root.join(".mbr/theme.css"))
+        );
+        // Never anything but a stylesheet from `.mbr/` or the defaults.
+        assert_eq!(hrefs[3], "/.mbr/config.toml");
+        assert_eq!(hrefs[4], "/.mbr/../secret.css");
+        assert!(
+            document
+                .attachments
+                .iter()
+                .all(|a| !a.path.ends_with("config.toml") && !a.path.ends_with("secret.css")),
+            "{:?}",
+            document.attachments
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_page_template_mbr_css_symlink_out_is_refused() {
+        let (tmp, root, note) = invoice_repo();
+        write_file(&tmp.path().join("outside.css"), b"leak");
+        std::os::unix::fs::symlink(tmp.path().join("outside.css"), root.join(".mbr/theme.css"))
+            .unwrap();
+        let document = render_preview(note, None).unwrap();
+        let hrefs = link_hrefs(&document.html);
+        // Falls back to the compiled-in theme, never the linked file.
+        assert!(hrefs[1].starts_with("data:text/css"), "{}", hrefs[1]);
+        assert!(
+            document
+                .attachments
+                .iter()
+                .all(|a| !a.path.ends_with("outside.css")),
+            "{:?}",
+            document.attachments
+        );
+    }
+
+    #[test]
+    fn test_broken_page_template_falls_back_to_the_preview() {
+        let (_tmp, root, note) = invoice_repo();
+        write_file(&root.join("bills/invoice.html"), b"{% if %}");
+        let document = render_preview(note.clone(), None).unwrap();
+        assert!(document.html.contains("Thanks."));
+        assert!(!document.html.contains("Design 21"));
+        // The ordinary QuickLook page, with its inline CSS.
+        assert!(document.html.contains("<style>"), "{}", document.html);
+
+        std::fs::remove_file(root.join("bills/invoice.html")).unwrap();
+        let document = render_preview(note, None).unwrap();
+        assert!(document.html.contains("Thanks."));
+    }
+
+    #[test]
+    fn test_thumbnail_ignores_the_page_template() {
+        let (_tmp, _root, note) = invoice_repo();
+        let ThumbnailDocument::Page { document } = render_thumbnail(note, None).unwrap() else {
+            panic!("expected a page thumbnail");
+        };
+        assert!(!document.html.contains("Design 21"));
     }
 }

@@ -366,7 +366,8 @@ numbers and customizing it.
 the export ran and failed (the page could not be prepared, printing failed, the
 written file could not be checked or moved into place; the message names cause
 and path), `2` refused before starting, with nothing rendered (a usage error or
-invalid value, a missing note, a configuration error, an output folder that is
+invalid value, a missing note, a configuration error, a note whose page
+template cannot be used, an output folder that is
 missing, not a folder or not writable, no display, no PDF support on this
 platform).
 

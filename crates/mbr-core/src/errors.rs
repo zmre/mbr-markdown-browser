@@ -34,6 +34,10 @@ pub enum MbrError {
     #[error("Template error: {0}")]
     Template(#[from] TemplateError),
 
+    /// A note's own page template (`template:`) could not be used.
+    #[error("Page template error: {0}")]
+    PageTemplate(#[from] crate::page_template::PageTemplateError),
+
     #[error("Repository error: {0}")]
     Repo(#[from] RepoError),
 
@@ -518,6 +522,20 @@ pub enum BuildError {
 
     #[error("Default Pico theme is missing from embedded assets")]
     MissingDefaultTheme,
+
+    /// Notes whose page template (`template:` in frontmatter) could not be
+    /// used, as `(note, problem)` sorted by note. A static build has no
+    /// fallback for them.
+    #[error("{} page template problem(s):{}", problems.len(), format_page_template_problems(problems))]
+    PageTemplates { problems: Vec<(String, String)> },
+}
+
+/// `BuildError::PageTemplates`' list: one `\n  note: problem` line each.
+fn format_page_template_problems(problems: &[(String, String)]) -> String {
+    problems
+        .iter()
+        .map(|(note, problem)| format!("\n  {note}: {problem}"))
+        .collect()
 }
 
 // Convenience type alias for Results using MbrError

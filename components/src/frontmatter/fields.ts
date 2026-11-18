@@ -196,6 +196,14 @@ const ADDRESS_CHILDREN: readonly FieldDef[] = [
   { key: 'country_code', kind: 'text', label: 'Country code', group: 'contact' },
 ];
 
+/** The frontmatter key naming a note's page template (`page_template.rs`'s `PAGE_TEMPLATE_KEY`). */
+export const PAGE_TEMPLATE_KEY = 'template';
+
+/** Whether `value` reads as a page template path: a string ending in `.html` (any case) with a name before it. */
+export function isPageTemplatePath(value: unknown): boolean {
+  return typeof value === 'string' && /[^/\\]\.html$/i.test(value.trim());
+}
+
 const text = (key: string, label: string, group: FieldGroup, extra: Partial<FieldDef> = {}): FieldDef => ({ key, kind: 'text', label, group, ...extra });
 
 const datetime = (key: string, label: string, group: FieldGroup, extra: Partial<FieldDef> = {}): FieldDef => ({
@@ -325,6 +333,9 @@ export function builtinCatalog(opts: CatalogOptions = {}): FieldCatalog {
     { key: 'date', kind: 'date', label: 'Date', group: 'mbr' },
     { key: 'order', kind: 'number', label: 'Order', group: 'mbr', help: 'Sort position when the listing sorts by `order`.' },
     { key: 'pinned', kind: 'bool', label: 'Pinned', group: 'mbr', help: 'Sorts first when the listing sorts by `pinned`.' },
+    text(PAGE_TEMPLATE_KEY, 'Page template', 'mbr', {
+      help: 'An .html Tera template that replaces the page layout for this note, relative to its folder (invoice.html, ../templates/letter.html) or to the repository root with a leading /.',
+    }),
     relationshipsField(relationshipTypes),
     {
       key: 'slides',
@@ -686,6 +697,9 @@ export function validate(frontmatter: Frontmatter, catalog: FieldCatalog): Field
     if (def.kind === 'enum' && def.closed && !def.enumValues?.some((o) => o.value === String(value))) {
       const known = (def.enumValues ?? []).map((o) => o.value).join(', ');
       hints.push({ path, message: `mbr ignores “${String(value)}” here; expected one of ${known}.` });
+    }
+    if (def.key === PAGE_TEMPLATE_KEY && def.group === 'mbr' && path.length === 1 && !isPageTemplatePath(value)) {
+      hints.push({ path, message: 'A page template is a path to an .html file, e.g. invoice.html.' });
     }
     if (def.kind === 'datetime' && typeof value === 'string' && value.trim() !== '' && !hasUtcOffset(value)) {
       hints.push({ path, message: 'Timestamps should carry a UTC offset (Z or ±HH:MM).' });

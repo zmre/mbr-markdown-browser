@@ -160,6 +160,29 @@ pub struct Repo {
     /// pays one branch per listed file and nothing else.
     #[serde(skip)]
     stamps: Option<Arc<HashMap<PathBuf, FileStamp>>>,
+    /// The files notes name as their page template
+    /// ([`Repo::page_template_files`]), memoized.
+    #[serde(skip)]
+    page_templates: PageTemplateMemo,
+}
+
+/// The memoized set behind [`Repo::page_template_files`]: a
+/// [`OnceLock`](std::sync::OnceLock) cell that an invalidation *replaces*
+/// rather than clears, as the server memoizes its periodic index, so
+/// concurrent first readers wait for one computation and one that started
+/// before a change fills the discarded cell, never the new one.
+///
+/// A clone of a `Repo` starts with an empty memo of its own: the clone's
+/// maps diverge from the original's, and so may its answer.
+#[derive(Default)]
+struct PageTemplateMemo(
+    parking_lot::RwLock<Arc<std::sync::OnceLock<Arc<std::collections::HashSet<PathBuf>>>>>,
+);
+
+impl Clone for PageTemplateMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Clone)]
@@ -214,8 +237,26 @@ impl Serialize for OtherFiles {
     where
         S: Serializer,
     {
+        self.serialize_excluding(serializer, None)
+    }
+}
+
+impl OtherFiles {
+    /// [`Serialize`] without the entries keyed in `excluded`.
+    fn serialize_excluding<S>(
+        &self,
+        serializer: S,
+        excluded: Option<&std::collections::HashSet<PathBuf>>,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         let pin = self.pin();
-        let mut entries: Vec<&OtherFileInfo> = pin.iter().map(|(_, v)| v).collect();
+        let mut entries: Vec<&OtherFileInfo> = pin
+            .iter()
+            .filter(|(key, _)| excluded.is_none_or(|excluded| !excluded.contains(*key)))
+            .map(|(_, v)| v)
+            .collect();
         entries.sort_unstable_by(|a, b| {
             a.url_path
                 .cmp(&b.url_path)
@@ -227,6 +268,25 @@ impl Serialize for OtherFiles {
             s.serialize_element(v)?;
         }
         s.end()
+    }
+}
+
+/// The non-markdown files a reader may see — [`Repo::other_files`] without
+/// the page templates notes name ([`Repo::page_template_files`]) — serialized
+/// like [`OtherFiles`]. What `media.json` publishes, on the server and in a
+/// static build.
+pub struct PublishedOtherFiles<'a> {
+    files: &'a OtherFiles,
+    excluded: Arc<std::collections::HashSet<PathBuf>>,
+}
+
+impl Serialize for PublishedOtherFiles<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let excluded = (!self.excluded.is_empty()).then_some(self.excluded.as_ref());
+        self.files.serialize_excluding(serializer, excluded)
     }
 }
 
@@ -887,6 +947,48 @@ impl Repo {
         &self.exempt_hidden_vault_paths
     }
 
+    /// Every file a note names as its page template (`template:` in its
+    /// frontmatter, see [`crate::page_template`]), by index key. These are
+    /// page structure, not content: the server answers 404 for them, and
+    /// they are left out of `media.json`, search and a static build.
+    ///
+    /// Computed from the index (one pass over the notes; only those with a
+    /// `template` key resolve anything) on first use after a change, then
+    /// memoized until the next scan, surgical update, clear or snapshot
+    /// restore. Never an O(notes) pass per request.
+    pub fn page_template_files(&self) -> Arc<std::collections::HashSet<PathBuf>> {
+        let cell = Arc::clone(&self.page_templates.0.read());
+        Arc::clone(cell.get_or_init(|| {
+            let notes = self.markdown_files.pin();
+            Arc::new(crate::page_template::page_template_files(
+                self.vault.as_ref(),
+                notes
+                    .iter()
+                    .map(|(key, info)| (key.as_path(), info.frontmatter.as_ref())),
+                &self.exempt_hidden_vault_paths,
+            ))
+        }))
+    }
+
+    /// Whether the file at index key `key` is some note's page template.
+    pub fn is_page_template_file(&self, key: &Path) -> bool {
+        self.page_template_files().contains(key)
+    }
+
+    /// [`Self::other_files`] as published: without page templates.
+    pub fn published_other_files(&self) -> PublishedOtherFiles<'_> {
+        PublishedOtherFiles {
+            files: &self.other_files,
+            excluded: self.page_template_files(),
+        }
+    }
+
+    /// Drops the memoized [`Self::page_template_files`]; called wherever the
+    /// notes' frontmatter may have changed.
+    fn invalidate_page_templates(&self) {
+        *self.page_templates.0.write() = Arc::default();
+    }
+
     /// A repository on the local filesystem at `root_dir`, stored through a
     /// [`LocalVault`] (plus a second one for an external static overlay).
     ///
@@ -986,6 +1088,7 @@ impl Repo {
             scan_notify: Arc::new(tokio::sync::Notify::new()),
             media_notify: Arc::new(tokio::sync::Notify::new()),
             stamps: None,
+            page_templates: PageTemplateMemo::default(),
         }
     }
 
@@ -1152,6 +1255,20 @@ impl Repo {
 
     /// Scans one folder of the vault at `location`.
     fn scan_dir(&self, location: ScanLocation, folder: &VaultPath) -> Result<(), RepoError> {
+        let result = self.scan_dir_entries(location, folder);
+        // Once per folder, not per note, and *after* its notes are indexed: a
+        // reader during the scan memoizes what it saw, and the next folder's
+        // end (or this one's) discards it.
+        self.invalidate_page_templates();
+        result
+    }
+
+    /// [`Self::scan_dir`]'s listing and indexing.
+    fn scan_dir_entries(
+        &self,
+        location: ScanLocation,
+        folder: &VaultPath,
+    ) -> Result<(), RepoError> {
         let Some(vault) = self.vault_at(location) else {
             return Ok(());
         };
@@ -1770,6 +1887,7 @@ impl Repo {
         // `populate_media_metadata()` a no-op and leave `media_populated` false
         // forever, hanging every later `wait_for_media()`.
         self.media_population_started.store(false, Ordering::SeqCst);
+        self.invalidate_page_templates();
         // Note: scan_complete is NOT reset here. It tracks whether the initial background
         // scan finished. After clear(), scan_all() will re-scan synchronously in handlers.
     }
@@ -1790,6 +1908,7 @@ impl Repo {
     pub fn invalidate_file(&self, abs_path: &Path, event: &crate::change_event::ChangeEventType) {
         self.invalidate_file_entry(abs_path, event);
         self.restamp(abs_path, event);
+        self.invalidate_page_templates();
     }
 
     /// Keeps a change-tracked file's stamp in step with an applied change —
@@ -2735,6 +2854,66 @@ mod tests {
         )
     }
 
+    /// A note's page template is tracked by the memo across surgical
+    /// updates, and `media.json`'s view leaves it out while it is one.
+    #[test]
+    fn test_page_template_files_follow_the_notes() {
+        let tmp = visible_tempdir();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("inv")).unwrap();
+        std::fs::write(
+            root.join("inv/a.md"),
+            "---\ntemplate: invoice.html\n---\nA\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("inv/invoice.html"), "<p>{{ title }}</p>").unwrap();
+        std::fs::write(root.join("inv/logo.png"), b"png").unwrap();
+        let repo = test_repo(&root);
+        repo.scan_all().unwrap();
+        let template = root.join("inv/invoice.html");
+
+        assert!(repo.is_page_template_file(&template));
+        assert!(!repo.is_page_template_file(&root.join("inv/logo.png")));
+        let media = serde_json::to_value(repo.published_other_files()).unwrap();
+        let urls: Vec<&str> = media
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f.get("url_path").and_then(|u| u.as_str()))
+            .collect();
+        assert_eq!(urls, ["/inv/logo.png"]);
+        // The raw index still knows the file; search does not show it.
+        assert!(repo.other_files.pin().contains_key(&template));
+        let found = |q: &str| {
+            crate::search::search_other_files(&repo, q, None, None, 10)
+                .into_iter()
+                .map(|r| r.url_path)
+                .collect::<Vec<_>>()
+        };
+        assert!(found("invoice").is_empty());
+        assert_eq!(found("logo"), ["/inv/logo.png"]);
+
+        // The note stops naming it: the next question sees the change.
+        std::fs::write(root.join("inv/a.md"), "---\ntitle: A\n---\nA\n").unwrap();
+        repo.invalidate_file(
+            &root.join("inv/a.md"),
+            &crate::change_event::ChangeEventType::Modified,
+        );
+        assert!(!repo.is_page_template_file(&template));
+
+        // And names it again.
+        std::fs::write(
+            root.join("inv/a.md"),
+            "---\ntemplate: invoice.html\n---\nA\n",
+        )
+        .unwrap();
+        repo.invalidate_file(
+            &root.join("inv/a.md"),
+            &crate::change_event::ChangeEventType::Modified,
+        );
+        assert!(repo.is_page_template_file(&template));
+    }
+
     /// The bug this exemption exists for: `mbr -s .scratch` roots at the
     /// enclosing repository (correctly), and the scan then skipped the one
     /// directory the user asked for — `site.json` and the directory listing for
@@ -2830,7 +3009,6 @@ mod tests {
 
     /// A visible temp dir: `tempfile`'s default `.tmpXXXX` name is hidden, and
     /// a symlink target under a hidden directory is refused as a mount.
-    #[cfg(unix)]
     fn visible_tempdir() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("mbr-repo-test-")

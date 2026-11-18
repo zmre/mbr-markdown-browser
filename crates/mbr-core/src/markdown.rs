@@ -250,6 +250,17 @@ pub struct MarkdownRenderResult {
     /// `background_image` is rewritten with the image transform, so it
     /// resolves relative to the note exactly like `![](…)` on the same page.
     pub slides: Option<crate::slides::SlideFrontmatter>,
+    /// The note's whole frontmatter, **lossless**: nested maps stay maps,
+    /// lists of maps stay lists, numbers stay numbers (a float is a float,
+    /// not the string the simplified [`Self::frontmatter`] holds), `null`
+    /// stays `null`. A JSON object, empty without frontmatter.
+    ///
+    /// Read from the raw YAML, like `contact` and `slides`. It is the
+    /// `frontmatter` variable of every page template
+    /// (`page_context::markdown_extra_context`), so a template can loop over
+    /// an invoice's `items: [{desc, qty, rate}]` and compute
+    /// `{{ i.qty * i.rate }}`. Not rewritten: a URL in it is as authored.
+    pub frontmatter_value: serde_json::Value,
 }
 
 struct EventState {
@@ -2960,6 +2971,8 @@ fn finalize_render(
         frontmatter.insert("title".to_string(), serde_json::Value::String(h1_text));
     }
 
+    let frontmatter_value = lossless_frontmatter(&state.metadata_parsed);
+
     let contact = state
         .metadata_parsed
         .as_ref()
@@ -2996,6 +3009,7 @@ fn finalize_render(
         ambiguous_wikilinks: state.ambiguous_wikilinks,
         contact,
         slides,
+        frontmatter_value,
     })
 }
 
@@ -3379,6 +3393,16 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
             hm
         }
         None => SimpleMetadata::new(),
+    }
+}
+
+/// The whole frontmatter as JSON, structure and types kept (see
+/// [`MarkdownRenderResult::frontmatter_value`]): an empty object when there is
+/// no frontmatter or it is not a map.
+pub fn lossless_frontmatter(y: &Option<Yaml>) -> serde_json::Value {
+    match y {
+        Some(yaml @ Yaml::Hash(_)) => crate::relationships::yaml_to_json(yaml),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
     }
 }
 
@@ -4018,6 +4042,41 @@ mod tests {
             plain_options(root, server_mode),
         )
         .unwrap()
+    }
+
+    /// `frontmatter_value` keeps what the simplified map loses: nested maps,
+    /// lists of maps, floats as numbers, nulls.
+    #[test]
+    fn frontmatter_value_is_lossless() {
+        let result = render_str_with_mode(
+            "---\ntitle: Invoice\nclient:\n  name: Acme\n  address: {city: Oslo}\n\
+             items:\n  - {desc: Design, qty: 2, rate: 150.5}\n  - {desc: Build, qty: 1, rate: 99}\n\
+             tax: 0.25\npaid: null\ntags: [a, 1, true]\n---\n\nBody\n",
+            true,
+        );
+        assert_eq!(
+            result.frontmatter_value,
+            serde_json::json!({
+                "title": "Invoice",
+                "client": {"name": "Acme", "address": {"city": "Oslo"}},
+                "items": [
+                    {"desc": "Design", "qty": 2, "rate": 150.5},
+                    {"desc": "Build", "qty": 1, "rate": 99},
+                ],
+                "tax": 0.25,
+                "paid": null,
+                "tags": ["a", 1, true],
+            })
+        );
+        // The simplified map is unchanged: flattened, float as a string.
+        assert_eq!(result.frontmatter.get("client.name"), Some(&"Acme".into()));
+        assert_eq!(result.frontmatter.get("tax"), Some(&"0.25".into()));
+    }
+
+    #[test]
+    fn frontmatter_value_is_an_empty_object_without_frontmatter() {
+        let result = render_str_with_mode("# Just a body\n", true);
+        assert_eq!(result.frontmatter_value, serde_json::json!({}));
     }
 
     #[test]

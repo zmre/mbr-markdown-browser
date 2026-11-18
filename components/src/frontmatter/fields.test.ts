@@ -13,6 +13,7 @@ import {
   hasUtcOffset,
   humanizeKey,
   isContactType,
+  isPageTemplatePath,
   isSlideDeck,
   kindOfValue,
   parseDateTime,
@@ -207,6 +208,26 @@ describe('addableFields', () => {
     expect(person).not.toContain('born');
     const attested = addableFields({ type: ATTESTED_COMPUTATION_TYPE }, catalog).map((f) => f.key);
     expect(attested.indexOf('runtime')).toBeLessThan(attested.indexOf('status'));
+  });
+});
+
+describe('page template', () => {
+  it('is a plain text field of mbr’s', () => {
+    expect(fieldFor(['template'], {}, catalog)).toMatchObject({ kind: 'text', group: 'mbr', label: 'Page template' });
+  });
+
+  it('reads an .html path as a template path', () => {
+    expect(isPageTemplatePath('invoice.html')).toBe(true);
+    expect(isPageTemplatePath('../t/Letter.HTML')).toBe(true);
+    expect(isPageTemplatePath('/shared/base.html ')).toBe(true);
+    expect(isPageTemplatePath('invoice.htm')).toBe(false);
+    expect(isPageTemplatePath('dir/.html')).toBe(false);
+    expect(isPageTemplatePath(5)).toBe(false);
+  });
+
+  it('hints at a value that is not an .html path, only at the top level', () => {
+    expect(validate({ template: 'invoice.html' }, catalog)).toEqual([]);
+    expect(validate({ template: 'invoice' }, catalog)).toEqual([{ path: ['template'], message: expect.stringContaining('.html') }]);
   });
 });
 

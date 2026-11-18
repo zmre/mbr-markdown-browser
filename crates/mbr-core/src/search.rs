@@ -1216,12 +1216,15 @@ impl SearchEngine {
             ))
         };
 
-        // Collect searchable files (PDFs and text files with extracted text)
+        // Collect searchable files (PDFs and text files with extracted text);
+        // a note's page template is page structure, never a result.
+        let templates = self.repo.page_template_files();
         let files: Vec<_> = self
             .repo
             .other_files
             .pin()
             .iter()
+            .filter(|(key, _)| !templates.contains(*key))
             .filter(|(_, info)| info.is_searchable())
             .filter(|(_, info)| {
                 self.matches_other_file_folder_filter(info, &query.folder, &query.folder_scope)
@@ -1421,10 +1424,13 @@ pub fn search_other_files(
 ) -> Vec<SearchResult> {
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
+    // A note's page template is page structure, never a result.
+    let templates = repo.page_template_files();
     let files: Vec<_> = repo
         .other_files
         .pin()
         .iter()
+        .filter(|(key, _)| !templates.contains(*key))
         .filter(|(_, info)| {
             // Folder filter
             if let Some(folder_path) = folder {

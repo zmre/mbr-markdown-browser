@@ -30,6 +30,7 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | [Flashcards](flashcards/) | Practise a note's definition lists, with optional spaced repetition |
 | [Kanban](kanban/) | Show lists as columns of cards |
 | [Page Styles and Types](page-styles/) | Restyle a whole page from frontmatter |
+| [Custom Page Templates](custom-page-templates/) | Give one note a layout of its own (`template: invoice.html`), with its frontmatter as data |
 | [Contacts](contacts/) | People and organizations as notes, with a contact card |
 | [Relationships](relationships/) | Typed links between notes, family trees and org charts |
 
@@ -53,6 +54,7 @@ no syntax beyond ordinary markdown and a line of frontmatter.
 | Calendar and day companion | ✓ | ✓ | ✓ | ✓ | day calendar |
 | Task browser | ✓ | ✓ | | ✓ | |
 | Slides, kanban, page styles | ✓ | ✓ | ✓ | ✓ | |
+| Custom page templates | ✓ | ✓ | ✓ (a broken one fails the build) | ✓ | ✓ (falls back to the plain preview) |
 | Flashcards | ✓ | ✓ | ✓ (no spaced repetition) | ✓ | |
 | Contacts and relationship charts | ✓ | ✓ | ✓ | ✓ | contact card |
 | Editing and properties | ✓ (on by default) | with `--edit` | | ✓ | |
