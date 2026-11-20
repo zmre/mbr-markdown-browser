@@ -2579,6 +2579,9 @@ fn render_site_json(
     if params.relationship_tracking {
         repo.relationship_index.inject_into_site_json(&mut value);
     }
+    // Per-note resolved frontmatter links (`frontmatter_links`), for notes
+    // that have any.
+    repo.inject_frontmatter_links_into_site_json(&mut value);
 
     Ok(axum::body::Bytes::from(serde_json::to_vec(&value)?))
 }
@@ -6834,8 +6837,9 @@ impl Server {
         use mbr_core::page_errors::{
             PageErrors, ambiguous_relationship_endpoint_errors, ambiguous_wikilink_errors,
             contact_problem_errors, detect_unresolved_wikilinks, frontmatter_parse_errors,
-            relationship_cycle_errors, slide_setting_errors, validate_internal_links,
-            validate_media_references, validate_rendered_links, validate_slide_background,
+            relationship_cycle_errors, slide_setting_errors, validate_frontmatter_links,
+            validate_internal_links, validate_media_references, validate_rendered_links,
+            validate_slide_background,
         };
 
         // Only handle exact `errors.json` tails. This keeps the endpoint
@@ -7045,6 +7049,12 @@ impl Server {
                 &page_url_path,
             ));
             errors.extend(detect_unresolved_wikilinks(&html_for_scan));
+            // Frontmatter links are not in the body's HTML: judged by their
+            // resolved targets, reported like a broken body link.
+            errors.extend(validate_frontmatter_links(
+                &outbound_links,
+                &resolver_config,
+            ));
             #[cfg(feature = "media-metadata")]
             errors.extend(
                 Self::detect_unplayable_media(
@@ -8193,6 +8203,16 @@ impl Server {
         let contact = render_result.contact;
         let slides = render_result.slides;
         let frontmatter_value = render_result.frontmatter_value;
+        // Re-checked against the repository: the render could only assume the
+        // targets exist. A few path-resolver lookups, and none for the
+        // overwhelming majority of notes, which have no frontmatter links.
+        let mut frontmatter_links = render_result.frontmatter_links;
+        if !frontmatter_links.is_empty() {
+            mbr_core::frontmatter_links::check_targets(
+                &mut frontmatter_links,
+                &config.repo.link_lookup(),
+            );
+        }
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -8307,6 +8327,7 @@ impl Server {
                 slides: slides.as_ref().map(|s| &s.settings),
                 calendar_nav: calendar_nav.as_ref(),
                 frontmatter: Some(&frontmatter_value),
+                frontmatter_links: Some(&frontmatter_links),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,
@@ -9161,6 +9182,7 @@ fn build_tag_page_outbound_links(
             text: page.title,
             anchor: None,
             internal: true,
+            origin: None,
         });
     }
 
@@ -9176,6 +9198,7 @@ fn build_tag_page_outbound_links(
         text: label,
         anchor: None,
         internal: true,
+        origin: None,
     });
 
     outbound
@@ -9198,6 +9221,7 @@ fn build_tag_index_outbound_links(
             text: tag.display,
             anchor: None,
             internal: true,
+            origin: None,
         })
         .collect()
 }
@@ -9669,6 +9693,7 @@ mod tests {
             modified: 0,
             calendar: None,
             relationships: Vec::new(),
+            frontmatter_links: Vec::new(),
         }
     }
 
@@ -10442,6 +10467,7 @@ mod tests {
                 text: "Other".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             }],
         );
 
@@ -10452,6 +10478,7 @@ mod tests {
                 from: "/docs/guide/".to_string(),
                 text: "Other".to_string(),
                 anchor: None,
+                origin: None,
             }],
         );
 

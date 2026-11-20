@@ -18,13 +18,40 @@ server-only.
 | `/` | GET | Home page (root directory listing) |
 | `/{path}/` | GET | Markdown page or directory |
 | `/{path}` | GET | `301` to the canonical `/{path}/` when it names a markdown page |
-| `/.mbr/site.json` | GET | Full site metadata as JSON |
+| `/.mbr/site.json` | GET | Full site metadata as JSON; see [Frontmatter links in site.json](#frontmatter-links-in-site-json) |
+| `/{path}/links.json` | GET | A page's links: `outbound`, `inbound` (backlinks) and `relationships`. A [frontmatter link](../features/links/#frontmatter-links) carries `"kind": "frontmatter"` and its `"key"` in both lists |
 | `/.mbr/media.json` | GET | Every non-markdown file with its metadata; see [Media catalog](#media-catalog) |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/tasks` | POST | Task query for the task browser and the calendar's task marks (`404` with `--no-tasks`) |
 | `/.mbr/ws/changes` | WS | WebSocket for live reload. Same-origin only. `?source=<note>` (the page's `markdown_source`) adds `content_hash` — the note's current fingerprint, as in `markdown_source_hash` — to frames about that note; frames under the template folder carry `template: true` |
 | `/.mbr/outside/?path=…` | GET | Where a link out of the repository leads; see [Outside links](#outside-links) |
 | `/.mbr/*` | GET | Static assets (CSS, JS, fonts) |
+
+## Frontmatter links in site.json
+
+Each `markdown_files` entry whose note has
+[frontmatter links](../features/links/#frontmatter-links) has a
+`frontmatter_links` object beside its raw `frontmatter`, keyed like it: an
+entry for a single value, a list of entries for a list value (its link
+elements only). URLs are site-absolute, like every `url_path`:
+
+```json
+{
+  "url_path": "/invoices/2026-11-17 Customer X Invoice 105/",
+  "frontmatter": { "customer": "[[Customer X]]", "contracts": ["[[MSA 2026|MSA]]", "/c/sow3.pdf"] },
+  "frontmatter_links": {
+    "customer": { "url": "/customers/Customer X/", "title": "Customer X", "text": "Customer X", "raw": "[[Customer X]]", "resolved": true },
+    "contracts": [
+      { "url": "/customers/MSA 2026/", "title": "Customer X MSA 2026", "text": "MSA", "raw": "[[MSA 2026|MSA]]", "label": "MSA", "resolved": true },
+      { "url": "/c/sow3.pdf", "title": "sow3.pdf", "text": "sow3.pdf", "raw": "/c/sow3.pdf", "resolved": true }
+    ]
+  }
+}
+```
+
+`resolved` is `false` when nothing is served at `url` (the page-problems panel
+reports it). Notes without frontmatter links have no `frontmatter_links` key.
+Static builds write the same.
 
 ## Media catalog
 
