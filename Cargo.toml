@@ -464,3 +464,7 @@ harness = false
 [[bench]]
 name = "tasks"
 harness = false
+
+[[bench]]
+name = "standalone_render"
+harness = false

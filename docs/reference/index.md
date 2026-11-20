@@ -19,6 +19,7 @@ and how to work on it.
 | [HTTP API](http-api/) | The server's endpoints: pages, `site.json`, search, tasks |
 | [Integration](integration/) | Using mbr with Obsidian, VS Code, Git, CI/CD, and other tools |
 | [Library API](library-api/) | Using mbr's note index from Rust: `mbr_core::Site` |
+| [Embedding mbr in an App](embedding/) | Using mbr's crates from another Rust program: its router, a host theme, rendering a note from a string |
 
 ## Working on mbr
 

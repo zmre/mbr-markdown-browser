@@ -25,6 +25,10 @@ pub enum ServerError {
     #[error("Template initialization failed: {0}")]
     TemplateInit(#[from] TemplateError),
 
+    /// A `ServerConfig::theme_vars` entry was refused.
+    #[error("Host theme refused: {0}")]
+    HostHead(#[from] mbr_core::host_head::HostHeadError),
+
     #[error("Tracing initialization failed")]
     TracingInit,
 }

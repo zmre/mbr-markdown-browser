@@ -108,6 +108,10 @@ reveal.js are fetched only on pages that need them, and they are inserted
 > Without it the loader falls back to appending, which puts KaTeX, highlight.js
 > and reveal.js after `user.css` and lets them win at equal specificity.
 
+An app that [embeds mbr](../reference/embedding/#theming-mbr-pages) can set
+these same variables on every page without a file in the repository. Its
+values are `!important`, so they win over `user.css`.
+
 ## Full Theme Override
 
 To completely replace the default theme, create `.mbr/theme.css`:
