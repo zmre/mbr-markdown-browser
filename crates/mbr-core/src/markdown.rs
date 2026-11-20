@@ -82,6 +82,32 @@ fn load_first_yaml_doc(text: &str) -> Option<Yaml> {
         .and_then(|docs| docs.into_iter().next())
 }
 
+/// A note's frontmatter, found in its source text exactly as the renderer
+/// finds it (BOM stripped, [`crate::frontmatter::leading_metadata`]): the
+/// unresolved frontmatter links and the byte range of the whole metadata block
+/// in `source` (empty at 0 when there is none).
+///
+/// For text-level link tools (the server's grep-based backlink fallback) that
+/// must treat frontmatter links the way the index does without rendering.
+pub fn frontmatter_link_sources_in(
+    source: &str,
+) -> (
+    Vec<crate::frontmatter_links::FrontmatterLinkSource>,
+    std::ops::Range<usize>,
+) {
+    let bom = source.len() - strip_bom(source).len();
+    let Some(leading) = crate::frontmatter::leading_metadata(
+        &source[bom..],
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    ) else {
+        return (Vec::new(), 0..0);
+    };
+    let links = load_first_yaml_doc(&source[bom..][leading.content.clone()])
+        .map(|yaml| crate::frontmatter_links::find_frontmatter_links(&yaml))
+        .unwrap_or_default();
+    (links, bom..bom + leading.body_start)
+}
+
 /// Result of parsing a markdown file without rendering to HTML.
 ///
 /// Owns the source string so consumers can iterate over events
@@ -261,6 +287,14 @@ pub struct MarkdownRenderResult {
     /// an invoice's `items: [{desc, qty, rate}]` and compute
     /// `{{ i.qty * i.rate }}`. Not rewritten: a URL in it is as authored.
     pub frontmatter_value: serde_json::Value,
+    /// The frontmatter values that are links (`customer: "[[Customer X]]"`,
+    /// `contract: ./MSA.pdf`), resolved against this page; see
+    /// [`crate::frontmatter_links`]. Their targets are checked with
+    /// [`crate::frontmatter_links::AssumeTargetsExist`], since a render has
+    /// no repository: a caller that has one re-checks them with
+    /// [`crate::frontmatter_links::check_targets`]. They are also in
+    /// [`Self::outbound_links`], first (frontmatter precedes the body).
+    pub frontmatter_links: Vec<crate::frontmatter_links::FrontmatterLink>,
 }
 
 struct EventState {
@@ -2949,14 +2983,15 @@ fn finalize_render(
     // Write to a new String buffer with MBR extensions (sections, mermaid)
     let mut html_output = String::with_capacity(markdown_input.len() * 2);
 
-    // Deduplicate outbound links by target URL - if a page links to the same
-    // target multiple times, we only keep the first occurrence
-    let mut seen_targets: HashSet<String> = HashSet::new();
-    let deduplicated_links: Vec<OutboundLink> = state
-        .collected_links
-        .into_iter()
-        .filter(|link| seen_targets.insert(link.to.clone()))
-        .collect();
+    let frontmatter_link_sources = frontmatter_link_sources(&state);
+    let frontmatter_links = crate::frontmatter_links::resolve_frontmatter_links(
+        &frontmatter_link_sources,
+        &state.link_transform_config,
+        &state.valid_tag_sources,
+        state.wikilink_index.as_deref(),
+        &crate::frontmatter_links::AssumeTargetsExist,
+    );
+    let deduplicated_links = page_outbound_links(&frontmatter_link_sources, &state);
 
     crate::html::push_html_with_config(&mut html_output, processed_events.into_iter(), html_config);
 
@@ -3010,7 +3045,66 @@ fn finalize_render(
         contact,
         slides,
         frontmatter_value,
+        frontmatter_links,
     })
+}
+
+/// The frontmatter links of the page `state` rendered (none without
+/// frontmatter).
+fn frontmatter_link_sources(
+    state: &EventState,
+) -> Vec<crate::frontmatter_links::FrontmatterLinkSource> {
+    state
+        .metadata_parsed
+        .as_ref()
+        .map(crate::frontmatter_links::find_frontmatter_links)
+        .unwrap_or_default()
+}
+
+/// A page's outbound links, as both [`finalize_render`] and
+/// [`extract_outbound_links_from_str`] publish them: the frontmatter links
+/// first (frontmatter precedes the body), then the body's, deduplicated by
+/// target — if a page links to the same target several times only the first
+/// occurrence is kept.
+fn page_outbound_links(
+    frontmatter_link_sources: &[crate::frontmatter_links::FrontmatterLinkSource],
+    state: &EventState,
+) -> Vec<OutboundLink> {
+    let frontmatter = crate::frontmatter_links::frontmatter_outbound_links(
+        frontmatter_link_sources,
+        &state.link_transform_config,
+        &state.valid_tag_sources,
+        state.wikilink_index.as_deref(),
+    );
+    let mut seen_targets: HashSet<String> = HashSet::new();
+    frontmatter
+        .into_iter()
+        .chain(state.collected_links.iter().cloned())
+        .filter(|link| seen_targets.insert(link.to.clone()))
+        .collect()
+}
+
+/// Every frontmatter link in `yaml` (a note's raw frontmatter) resolved
+/// against the page `page` and checked with `lookup`: the public entry point
+/// for [`crate::frontmatter_links`]. `page` is the note's link-transform
+/// configuration (its URL and index flag), `wikilink_index` resolves
+/// `[[Name]]` exactly as a body wikilink is, and `lookup` says which targets
+/// exist (a [`crate::repo::Repo`], or
+/// [`crate::frontmatter_links::AssumeTargetsExist`]).
+pub fn frontmatter_links(
+    yaml: &Yaml,
+    page: &LinkTransformConfig,
+    valid_tag_sources: &HashSet<String>,
+    wikilink_index: Option<&WikilinkIndex>,
+    lookup: &dyn crate::frontmatter_links::LinkTargetLookup,
+) -> Vec<crate::frontmatter_links::FrontmatterLink> {
+    crate::frontmatter_links::resolve_frontmatter_links(
+        &crate::frontmatter_links::find_frontmatter_links(yaml),
+        page,
+        valid_tag_sources,
+        wikilink_index,
+        lookup,
+    )
 }
 
 /// Synchronous counterpart of [`render_with_cache`] for use from rayon threads:
@@ -3201,12 +3295,7 @@ pub fn extract_outbound_links_from_str(
         wikilink_index,
     );
 
-    let mut seen_targets: HashSet<String> = HashSet::new();
-    state
-        .collected_links
-        .into_iter()
-        .filter(|link| seen_targets.insert(link.to.clone()))
-        .collect()
+    page_outbound_links(&frontmatter_link_sources(&state), &state)
 }
 
 /// Compute no-network oembed results (Giphy, gist, bare-URL media) for all
@@ -3474,6 +3563,9 @@ pub struct FileMetadata {
     pub metadata: SimpleMetadata,
     /// Typed relationships declared in frontmatter (unresolved endpoints).
     pub relationships: Vec<crate::relationships::RawRelationship>,
+    /// Frontmatter values that are links, unresolved
+    /// ([`crate::frontmatter_links::find_frontmatter_links`]).
+    pub frontmatter_links: Vec<crate::frontmatter_links::FrontmatterLinkSource>,
 }
 
 pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadata, MarkdownError> {
@@ -3528,6 +3620,7 @@ pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
     );
     let mut hm = SimpleMetadata::new();
     let mut relationships = Vec::new();
+    let mut frontmatter_links = Vec::new();
     if let Some(leading) = &leading {
         // A parse failure discards the *entire* frontmatter: `type`,
         // `aliases`, `relationships` and all. This is the scan path that
@@ -3552,6 +3645,7 @@ pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
 
         if let Some(ref yaml) = metadata_parsed {
             relationships = crate::relationships::parse_relationships(yaml);
+            frontmatter_links = crate::frontmatter_links::find_frontmatter_links(yaml);
         }
         hm = yaml_frontmatter_simplified(&metadata_parsed);
     }
@@ -3569,6 +3663,7 @@ pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
     FileMetadata {
         metadata: hm,
         relationships,
+        frontmatter_links,
     }
 }
 
@@ -3848,6 +3943,7 @@ fn process_event(
                     text: std::mem::take(&mut state.current_link_text),
                     anchor,
                     internal,
+                    origin: None,
                 };
                 state.collected_links.push(link);
             }
@@ -9478,6 +9574,72 @@ mod tests {
             read_source(vault.as_ref(), Path::new("/etc/hosts")).is_err(),
             "keys outside the vault must not be readable"
         );
+    }
+
+    #[test]
+    fn frontmatter_links_lead_the_outbound_links_in_both_entry_points() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = concat!(
+            "---\n",
+            "customer: \"[[Acme|ACME]]\"\n",
+            "contract: ./msa.pdf\n",
+            "note: \"see [[Acme]]\"\n",
+            "---\n",
+            "Body [[Acme]] and [x](other.md).\n"
+        );
+        let file = dir.path().join("inv.md");
+        fs::write(&file, source).unwrap();
+        let config = LinkTransformConfig {
+            current_page_url: "/inv/".to_string(),
+            ..LinkTransformConfig::default()
+        };
+        let rendered = render_sync(
+            file.clone(),
+            dir.path(),
+            0,
+            config.clone(),
+            None,
+            true,
+            false,
+            HashSet::new(),
+            ReviewLines::Omit,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
+        let summary: Vec<(&str, Option<&crate::link_index::LinkOrigin>)> = rendered
+            .outbound_links
+            .iter()
+            .map(|l| (l.to.as_str(), l.origin.as_ref()))
+            .collect();
+        let frontmatter = |key: &str| crate::link_index::LinkOrigin::Frontmatter {
+            key: key.to_string(),
+        };
+        // Frontmatter first; the body's `[[Acme]]` names the same target and
+        // is deduplicated away; `note` is text.
+        assert_eq!(
+            summary,
+            vec![
+                ("Acme", Some(&frontmatter("customer"))),
+                ("./msa.pdf", Some(&frontmatter("contract"))),
+                ("other.md", None),
+            ]
+        );
+        assert_eq!(rendered.outbound_links[0].text, "ACME");
+        assert_eq!(rendered.frontmatter_links.len(), 2);
+        assert_eq!(rendered.frontmatter_links[1].target, "/msa.pdf");
+
+        let extracted = extract_outbound_links_from_str(
+            source,
+            &file,
+            dir.path(),
+            config,
+            true,
+            HashSet::new(),
+            None,
+        );
+        assert_eq!(extracted, rendered.outbound_links);
     }
 }
 

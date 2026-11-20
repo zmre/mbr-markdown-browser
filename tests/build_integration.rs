@@ -4118,3 +4118,70 @@ async fn test_build_fails_listing_every_broken_page_template() {
     );
     assert!(message.contains("nope"), "{message}");
 }
+
+#[tokio::test]
+async fn test_build_publishes_frontmatter_links() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "customers/acme.md",
+        "---\ntitle: Acme Corp\n---\nCustomer.\n",
+    );
+    repo.create_static_file("customers/msa.pdf", b"%PDF-1.4\n%%EOF\n");
+    repo.create_markdown(
+        "invoices/deep/inv-1.md",
+        concat!(
+            "---\n",
+            "customer: \"[[Acme Corp]]\"\n",
+            "contracts: [\"/customers/msa.pdf\"]\n",
+            "template: /invoices/tpl.html\n",
+            "---\nBody.\n"
+        ),
+    );
+    repo.create_markdown(
+        "invoices/tpl.html",
+        "<a id=\"c\" href=\"{{ frontmatter_links.customer.url | safe }}\">{{ frontmatter_links.customer.title }}</a><a id=\"m\" href=\"{{ frontmatter_links.contracts[0].url | safe }}\">pdf</a>",
+    );
+    let output = build_site(&repo).await;
+
+    // The customer's backlinks include the invoice, with its origin.
+    let links: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join("customers/acme/links.json")).unwrap(),
+    )
+    .unwrap();
+    let inbound = links["inbound"].as_array().unwrap();
+    assert!(
+        inbound.iter().any(|l| l["from"] == "/invoices/deep/inv-1/"
+            && l["kind"] == "frontmatter"
+            && l["key"] == "customer"),
+        "{inbound:?}"
+    );
+
+    // site.json: resolved, site-absolute.
+    let site: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join(".mbr/site.json")).unwrap()).unwrap();
+    let invoice = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/invoices/deep/inv-1/")
+        .unwrap();
+    assert_eq!(
+        invoice["frontmatter_links"]["customer"]["url"],
+        "/customers/acme/"
+    );
+    assert_eq!(
+        invoice["frontmatter_links"]["contracts"][0]["resolved"],
+        true
+    );
+
+    // The page template gets URLs relative to the page, as every static link is.
+    let page = fs::read_to_string(output.join("invoices/deep/inv-1/index.html")).unwrap();
+    assert!(
+        page.contains(r#"<a id="c" href="../../../customers/acme/">Acme Corp</a>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<a id="m" href="../../../customers/msa.pdf">pdf</a>"#),
+        "{page}"
+    );
+}

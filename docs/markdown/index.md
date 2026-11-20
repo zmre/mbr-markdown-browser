@@ -26,6 +26,7 @@ calendar, contacts) is under [Features](../features/).
 |--------|-----------|------|
 | Frontmatter | `---` / `title: …` / `---` at the top | [Frontmatter](frontmatter/) |
 | Links and wikilinks | `[text](other.md)`, `[[Other Note]]`, `[[Tags:rust]]` | [Links and Wikilinks](links/) |
+| Frontmatter links | `customer: "[[Customer X]]"`, `contract: /c/msa.pdf` | [Frontmatter](frontmatter/#links-in-frontmatter) |
 | Alerts | `> [!NOTE]`, `!> tip` | [Alerts](alerts/) |
 | Tasks | `- [ ] Call Bob !! @due(2026-11-10) #work`, `TODO:` | [Tasks](tasks/) |
 | Agenda entries | `* 9:00 - 10:00 Standup` | [Day Agenda Entries](agenda/) |

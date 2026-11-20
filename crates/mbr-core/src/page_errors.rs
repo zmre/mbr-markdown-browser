@@ -464,6 +464,46 @@ pub fn validate_internal_links(
         .collect()
 }
 
+/// Validates a page's **frontmatter** links ([`crate::frontmatter_links`]):
+/// each one whose target the server would 404 is a
+/// [`PageError::BrokenInternalLink`], exactly like a broken body link, its
+/// text prefixed with the key (`customer: Customer X`) so the author knows
+/// where to look.
+///
+/// `outbound` is the page's resolved outbound list (body links are skipped
+/// here: [`validate_rendered_links`] judges them from the HTML). Frontmatter
+/// links are not in the body's HTML, so the resolved target is the only thing
+/// to check, as for a tag page ([`validate_internal_links`]).
+pub fn validate_frontmatter_links(
+    outbound: &[OutboundLink],
+    resolver_config: &PathResolverConfig,
+) -> Vec<PageError> {
+    outbound
+        .iter()
+        .filter_map(|link| {
+            link.origin
+                .as_ref()
+                .map(|crate::link_index::LinkOrigin::Frontmatter { key }| (key, link))
+        })
+        .flat_map(|(key, link)| {
+            validate_internal_links(std::slice::from_ref(link), resolver_config)
+                .into_iter()
+                .map(move |error| match error {
+                    PageError::BrokenInternalLink {
+                        target,
+                        text,
+                        anchor,
+                    } => PageError::BrokenInternalLink {
+                        target,
+                        text: format!("{key}: {text}"),
+                        anchor,
+                    },
+                    other => other,
+                })
+        })
+        .collect()
+}
+
 /// Validates `<img>`, `<video>`, `<audio>` and `<source>` `src` attributes in
 /// the rendered HTML.
 ///
@@ -852,6 +892,7 @@ mod tests {
             text: "bad".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -876,6 +917,7 @@ mod tests {
             text: "ok".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -895,6 +937,7 @@ mod tests {
             text: "ext".to_string(),
             anchor: None,
             internal: false,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -925,6 +968,7 @@ mod tests {
             anchor: None,
             // Deliberately mislabelled, as the old renderer did.
             internal: true,
+            origin: None,
         })
         .collect::<Vec<_>>();
 
@@ -945,6 +989,7 @@ mod tests {
             text: "anchor".to_string(),
             anchor: Some("#section".to_string()),
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -969,12 +1014,14 @@ mod tests {
                 text: "no trailing slash".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             },
             OutboundLink {
                 to: "/IronCore%20Swag%20T-shirts%20Gifts/".to_string(),
                 text: "trailing slash".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             },
         ];
 
@@ -996,6 +1043,7 @@ mod tests {
             text: "apostrophe".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -1016,6 +1064,7 @@ mod tests {
             text: "unicode".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -1036,6 +1085,7 @@ mod tests {
             text: "anchor and query".to_string(),
             anchor: Some("#top".to_string()),
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -1055,6 +1105,7 @@ mod tests {
             text: "gone".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         let errs = validate_internal_links(&outbound, &cfg);
@@ -2249,5 +2300,40 @@ mod tests {
         );
         let back: PageErrors = serde_json::from_str(r#"{"page_url":"/x/","errors":[]}"#).unwrap();
         assert!(!back.not_downloaded, "absent means downloaded");
+    }
+
+    #[test]
+    fn frontmatter_links_with_missing_targets_are_broken_links_named_by_key() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("there.pdf"), b"%PDF").unwrap();
+        let exts = vec!["md".to_string()];
+        let tags: Vec<String> = Vec::new();
+        let config = make_config(temp.path(), &exts, "index.md", &tags);
+        let link = |to: &str, key: Option<&str>| OutboundLink {
+            to: to.to_string(),
+            text: "name".to_string(),
+            anchor: None,
+            internal: true,
+            origin: key.map(|key| crate::link_index::LinkOrigin::Frontmatter {
+                key: key.to_string(),
+            }),
+        };
+        let errors = validate_frontmatter_links(
+            &[
+                link("/there.pdf", Some("ok")),
+                link("/gone.pdf", Some("contract")),
+                // A body link is judged from the HTML, never here.
+                link("/body-gone/", None),
+            ],
+            &config,
+        );
+        assert_eq!(
+            errors,
+            vec![PageError::BrokenInternalLink {
+                target: "/gone.pdf".to_string(),
+                text: "contract: name".to_string(),
+                anchor: None,
+            }]
+        );
     }
 }

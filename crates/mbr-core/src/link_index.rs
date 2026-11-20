@@ -22,6 +22,26 @@ pub struct OutboundLink {
     pub anchor: Option<String>,
     /// Whether this is an internal link (true) or external (false)
     pub internal: bool,
+    /// Where the link was written, when not in the body: a frontmatter value
+    /// is `{"kind": "frontmatter", "key": "<field>"}` on the wire
+    /// ([`crate::frontmatter_links`]). `None` (and nothing on the wire) for a
+    /// body link, so every existing `links.json` is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LinkOrigin>,
+}
+
+/// Where a link that is not a body link was written.
+///
+/// Serialized internally tagged and flattened into its link, so a frontmatter
+/// link carries `"kind": "frontmatter", "key": "customer"` beside `to`/`from`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum LinkOrigin {
+    /// A frontmatter value (`customer: "[[Customer X]]"`); `key` is the field.
+    Frontmatter {
+        /// The frontmatter key the value sits under.
+        key: String,
+    },
 }
 
 /// An inbound link pointing to a markdown page.
@@ -34,6 +54,10 @@ pub struct InboundLink {
     /// Optional anchor fragment targeted
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
+    /// The outbound link's [`OutboundLink::origin`]: `kind`/`key` on the wire
+    /// for a frontmatter link, nothing for a body link.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LinkOrigin>,
 }
 
 /// Sorts inbound links into a deterministic, mode-independent order.
@@ -56,7 +80,9 @@ pub struct InboundLink {
 /// hash order this function exists to remove. Sorting on the full contents
 /// costs nothing and does not depend on that invariant holding.
 pub fn sort_inbound_links(links: &mut [InboundLink]) {
-    links.sort_by(|a, b| (&a.from, &a.text, &a.anchor).cmp(&(&b.from, &b.text, &b.anchor)));
+    links.sort_by(|a, b| {
+        (&a.from, &a.text, &a.anchor, &a.origin).cmp(&(&b.from, &b.text, &b.anchor, &b.origin))
+    });
 }
 
 /// Links data for a single page (used in API responses).
@@ -323,12 +349,33 @@ pub fn resolve_outbound_links(
                 Some(OutsideResolution::Unchanged) => link.internal = false,
                 None => {
                     let href = transform_link(&link.to, page);
-                    link.to = resolve_relative_url(base_url, &href, true);
+                    let resolved = resolve_relative_url(base_url, &href, true);
+                    // `resolve_relative_url` gives every result a trailing
+                    // slash, which is right for a page and wrong for a file:
+                    // `../shared/x.pdf` is served at `/shared/x.pdf`, the
+                    // spelling a root-relative `/shared/x.pdf` keeps above.
+                    link.to = if names_file(&href) {
+                        resolved.trim_end_matches('/').to_string()
+                    } else {
+                        resolved
+                    };
                 }
             }
             link
         })
         .collect()
+}
+
+/// Whether a transformed href names a file (`../x.pdf`) rather than a page or
+/// folder: no trailing slash, and a last segment with an extension. Markdown
+/// targets never qualify, because [`transform_link`] has already turned
+/// `x.md` into `x/`.
+fn names_file(href: &str) -> bool {
+    !href.ends_with('/')
+        && href
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| last.contains('.') && !last.starts_with('.'))
 }
 
 /// A cached entry for outbound links.
@@ -594,6 +641,7 @@ impl InboundIndex {
                         from: source_url.to_string(),
                         text: link.text.clone(),
                         anchor: link.anchor.clone(),
+                        origin: link.origin.clone(),
                     },
                 );
                 link.to.clone()
@@ -687,6 +735,7 @@ mod tests {
             text: text.to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }
     }
 
@@ -723,6 +772,7 @@ mod tests {
             text: "out".to_string(),
             anchor: None,
             internal: false,
+            origin: None,
         };
         index.set_page_links("/a/", &[external]);
 
@@ -919,6 +969,7 @@ mod tests {
             text: "Other Page".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links.clone());
@@ -944,6 +995,7 @@ mod tests {
             text: "Other Page".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links.clone());
@@ -967,6 +1019,7 @@ mod tests {
             text: "A".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
         let two = vec![
             OutboundLink {
@@ -974,12 +1027,14 @@ mod tests {
                 text: "A".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             },
             OutboundLink {
                 to: "/b/".to_string(),
                 text: "B".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             },
         ];
 
@@ -1003,6 +1058,7 @@ mod tests {
             text: "Other".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
         cache.insert("/a/".to_string(), links.clone());
         cache.insert("/b/".to_string(), links);
@@ -1023,6 +1079,7 @@ mod tests {
             text: "Other".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links);
@@ -1036,6 +1093,7 @@ mod tests {
             text: "Guide".to_string(),
             anchor: Some("#intro".to_string()),
             internal: true,
+            origin: None,
         };
 
         let json = serde_json::to_string(&link).unwrap();
@@ -1052,6 +1110,7 @@ mod tests {
             text: "Docs".to_string(),
             anchor: None,
             internal: true,
+            origin: None,
         };
 
         let json = serde_json::to_string(&link).unwrap();
@@ -1071,6 +1130,7 @@ mod tests {
             from: from.to_string(),
             text: text.to_string(),
             anchor: anchor.map(str::to_string),
+            origin: None,
         }
     }
 
@@ -1223,6 +1283,7 @@ mod tests {
             text: "Top".to_string(),
             anchor: Some("#top".to_string()),
             internal: true,
+            origin: None,
         }];
 
         let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));
@@ -1241,12 +1302,14 @@ mod tests {
                 text: "Top".to_string(),
                 anchor: Some("#top".to_string()),
                 internal: true,
+                origin: None,
             },
             OutboundLink {
                 to: "intro/".to_string(),
                 text: "Intro".to_string(),
                 anchor: None,
                 internal: true,
+                origin: None,
             },
         ];
 
@@ -1275,6 +1338,7 @@ mod tests {
             text: String::new(),
             anchor: None,
             internal: true,
+            origin: None,
         }
     }
 
@@ -1336,6 +1400,7 @@ mod tests {
                 text: String::new(),
                 anchor: None,
                 internal: false,
+                origin: None,
             },
         ];
         let resolved = resolve_outbound_links(links, &page_config("/docs/guide/", false));

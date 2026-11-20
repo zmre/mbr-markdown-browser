@@ -56,6 +56,8 @@ is a slide with a heading and a list, never a second metadata block.
   [body class](../features/page-styles/) that restyles the whole page
 - **Relationships**: typed links between notes, see
   [Relationships](../features/relationships/)
+- **Links**: a value that is a `[[wikilink]]` or a path to a file links to it,
+  see [Links in frontmatter](#links-in-frontmatter)
 - **Your own fields**: searchable as `field:value`, and available to
   [templates](../customization/templates/) as `frontmatter_json`
 
@@ -76,6 +78,7 @@ is a slide with a heading and a list, never a second metadata block.
 | `slides` | Per-deck settings, see [Deck Settings](../features/slides/#deck-settings) |
 | `template` | An `.html` file, relative to the note's folder, that replaces the page layout for this note; see [Custom Page Templates](../features/custom-page-templates/) |
 | `author` | Author name, available to templates |
+| A wikilink or path value | A link to that note or file; see [Links in frontmatter](#links-in-frontmatter) |
 | Any other field | Searchable, and available to templates, each as its own variable and all of them, structure intact, as `frontmatter` (see [Custom Page Templates](../features/custom-page-templates/#variables)) |
 
 Contacts read many more (`company`, `emails`, `phones`, `dates`, …); see
@@ -120,6 +123,38 @@ A note answers to each alias in [wikilinks](links/#wikilinks) and in
 relationship targets, after titles and before file names. Person notes can
 label them (`maiden_name: Mary Smith`); see
 [Aliases](../features/contacts/#aliases).
+
+## Links in frontmatter
+
+A value that is **only** a wikilink, or **only** a path to a file, is a link:
+
+```yaml
+---
+customer: "[[Customer X]]"
+owner: "[[People/Ann Lee|Ann]]"
+contracts:
+  - "[[Customer X MSA 2026]]"
+  - "/customers/contracts/Customer X SOW 3 renewal (signed).pdf"
+  - ./scans/po-75334.pdf
+---
+```
+
+- **Wikilinks**: `[[Target]]` or `[[Target|Label]]`, resolved exactly like a
+  [wikilink in the body](links/#wikilinks): a note of that name in the same
+  folder first, else the first note with that title, alias or file name.
+  Quote it: an unquoted `[[…]]` is a YAML list.
+- **Paths**: a value starting with `/` (from the repository root), `./` or
+  `../` (from the note's folder), to a file of any kind: a note, a PDF, an
+  image. Values that do not start that way are never paths, so `1/2` or
+  `see notes/` stay text.
+- At the **top level** of the frontmatter, or as an element of a **list of
+  strings**. Text around the link (`"see [[X]]"`), a value inside a nested
+  map and a list of maps are not links.
+- `template`, `relationships` and the private contact fields (`emails`,
+  `phones`, `addresses`, …) are never links.
+
+What mbr does with them (backlinks, the info panel, broken-link reports,
+templates) is in [Frontmatter links](../features/links/#frontmatter-links).
 
 ## Editing frontmatter
 

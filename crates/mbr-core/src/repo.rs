@@ -327,6 +327,12 @@ pub struct MarkdownInfo {
     /// relationship index in site.json/links.json instead.
     #[serde(skip)]
     pub relationships: Vec<RawRelationship>,
+    /// Frontmatter values that are links, unresolved
+    /// ([`crate::frontmatter_links`]). Skipped in serialization: `site.json`
+    /// gets them resolved, as `frontmatter_links`
+    /// ([`Repo::inject_frontmatter_links_into_site_json`]).
+    #[serde(skip)]
+    pub frontmatter_links: Vec<crate::frontmatter_links::FrontmatterLinkSource>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1420,6 +1426,7 @@ impl Repo {
                         frontmatter: None,
                         calendar: None,
                         relationships: Vec::new(),
+                        frontmatter_links: Vec::new(),
                     };
                     markdown.push((key, entry.path, mdfile));
                 } else {
@@ -1478,6 +1485,7 @@ impl Repo {
                 let details = if let Some(file_meta) = file_meta {
                     let frontmatter = file_meta.metadata;
                     let relationships = file_meta.relationships;
+                    let frontmatter_links = file_meta.frontmatter_links;
                     // Extract tags from frontmatter for each configured tag source
                     let title = get_page_title(&frontmatter, &mddetails.raw_path);
                     let description = frontmatter
@@ -1511,6 +1519,7 @@ impl Repo {
                             .resolve(&mddetails.raw_path, Some(&frontmatter)),
                         frontmatter: Some(frontmatter),
                         relationships,
+                        frontmatter_links,
                         ..mddetails
                     }
                 } else {
@@ -1975,9 +1984,9 @@ impl Repo {
                         );
                         let file_meta =
                             crate::markdown::extract_metadata_from_vault(vault, &path).ok();
-                        let (frontmatter, relationships) = match file_meta {
-                            Some(fm) => (Some(fm.metadata), fm.relationships),
-                            None => (None, Vec::new()),
+                        let (frontmatter, relationships, frontmatter_links) = match file_meta {
+                            Some(fm) => (Some(fm.metadata), fm.relationships, fm.frontmatter_links),
+                            None => (None, Vec::new(), Vec::new()),
                         };
 
                         // Add tags from frontmatter
@@ -2016,6 +2025,7 @@ impl Repo {
                             modified,
                             frontmatter,
                             relationships,
+                            frontmatter_links,
                         };
                         self.markdown_files
                             .pin()
@@ -2045,9 +2055,9 @@ impl Repo {
                         );
                         let file_meta =
                             crate::markdown::extract_metadata_from_vault(vault, &path).ok();
-                        let (frontmatter, relationships) = match file_meta {
-                            Some(fm) => (Some(fm.metadata), fm.relationships),
-                            None => (None, Vec::new()),
+                        let (frontmatter, relationships, frontmatter_links) = match file_meta {
+                            Some(fm) => (Some(fm.metadata), fm.relationships, fm.frontmatter_links),
+                            None => (None, Vec::new(), Vec::new()),
                         };
                         let raw_path = self.relative_to_root(abs_path);
                         let info = MarkdownInfo {
@@ -2058,6 +2068,7 @@ impl Repo {
                             modified,
                             frontmatter,
                             relationships,
+                            frontmatter_links,
                         };
                         self.markdown_files
                             .pin()
@@ -2478,6 +2489,187 @@ pub fn extract_tag_values(value: &serde_json::Value) -> Vec<String> {
     }
 }
 
+/// Frontmatter links over a scanned repository ([`crate::frontmatter_links`]).
+impl Repo {
+    /// The path-resolution configuration for this repository: what the server
+    /// would serve, through its vaults (static overlay included).
+    pub fn resolver_config(&self) -> crate::path_resolver::OwnedPathResolverConfig {
+        crate::path_resolver::OwnedPathResolverConfig::for_repo(
+            self,
+            &self.static_folder,
+            &self.markdown_extensions,
+            &self.index_file,
+            crate::config::tag_sources_to_url_sources(&self.tag_sources),
+        )
+    }
+
+    /// A [`crate::frontmatter_links::LinkTargetLookup`] over this repository,
+    /// with its resolver configuration built once: hold it for a batch of
+    /// lookups. `Repo` itself is a lookup too, building one per call.
+    pub fn link_lookup(&self) -> RepoLinkLookup<'_> {
+        RepoLinkLookup {
+            repo: self,
+            resolver: self.resolver_config(),
+        }
+    }
+
+    /// The link-transform configuration of the note `info` as the server
+    /// renders it: its URL and index flag, the path resolver's directory probe
+    /// and the repository's outside-link context. `probe` is
+    /// [`Self::directory_url_probe`], passed in so a batch builds it once.
+    fn note_link_config(
+        &self,
+        info: &MarkdownInfo,
+        probe: &crate::link_transform::DirectoryUrlProbe,
+        outside_links: &crate::outside_link::OutsideLinkContext,
+    ) -> crate::link_transform::LinkTransformConfig {
+        crate::link_transform::LinkTransformConfig {
+            markdown_extensions: self.markdown_extensions.clone(),
+            index_file: self.index_file.clone(),
+            is_index_file: info
+                .raw_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == self.index_file),
+            url_depth: None,
+            current_page_url: info.url_path.clone(),
+            directory_url_probe: Some(Arc::clone(probe)),
+            outside_links: Some(outside_links.clone()),
+        }
+    }
+
+    /// The probe [`crate::link_transform::filesystem_directory_url_probe`]
+    /// over this repository.
+    fn directory_url_probe(&self) -> crate::link_transform::DirectoryUrlProbe {
+        crate::link_transform::filesystem_directory_url_probe(self.resolver_config())
+    }
+
+    /// The note `info`'s frontmatter links, resolved against the whole
+    /// repository: wikilinks through [`Self::wikilink_index`], targets checked
+    /// with [`Self::link_lookup`]. Empty for a note without any (no I/O).
+    pub fn frontmatter_links_of(
+        &self,
+        info: &MarkdownInfo,
+    ) -> Vec<crate::frontmatter_links::FrontmatterLink> {
+        if info.frontmatter_links.is_empty() {
+            return Vec::new();
+        }
+        let probe = self.directory_url_probe();
+        let outside_links = crate::outside_link::OutsideLinkContext::for_repo(self);
+        self.resolve_note_frontmatter_links(info, &probe, &outside_links, &self.link_lookup())
+    }
+
+    fn resolve_note_frontmatter_links(
+        &self,
+        info: &MarkdownInfo,
+        probe: &crate::link_transform::DirectoryUrlProbe,
+        outside_links: &crate::outside_link::OutsideLinkContext,
+        lookup: &RepoLinkLookup<'_>,
+    ) -> Vec<crate::frontmatter_links::FrontmatterLink> {
+        crate::frontmatter_links::resolve_frontmatter_links(
+            &info.frontmatter_links,
+            &self.note_link_config(info, probe, outside_links),
+            &crate::config::tag_sources_to_set(&self.tag_sources),
+            Some(&self.wikilink_index),
+            lookup,
+        )
+    }
+
+    /// Adds a `frontmatter_links` object (`{key: {url, title, text, raw,
+    /// resolved}}`, a list for a list value; see
+    /// [`crate::frontmatter_links::links_by_key`]) to every
+    /// `markdown_files` entry of a serialized `site.json` whose note has
+    /// frontmatter links. URLs are site-absolute, as every `url_path` there
+    /// is. Notes without any get no key, so `site.json` grows only by what
+    /// the feature adds.
+    pub fn inject_frontmatter_links_into_site_json(&self, value: &mut serde_json::Value) {
+        let by_url: std::collections::HashMap<String, MarkdownInfo> = self
+            .markdown_files
+            .pin()
+            .iter()
+            .filter(|(_, info)| !info.frontmatter_links.is_empty())
+            .map(|(_, info)| (info.url_path.clone(), info.clone()))
+            .collect();
+        if by_url.is_empty() {
+            return;
+        }
+        let Some(files) = value
+            .get_mut("markdown_files")
+            .and_then(|v| v.as_array_mut())
+        else {
+            return;
+        };
+        let probe = self.directory_url_probe();
+        let outside_links = crate::outside_link::OutsideLinkContext::for_repo(self);
+        let lookup = self.link_lookup();
+        for entry in files {
+            let Some(info) = entry
+                .get("url_path")
+                .and_then(|v| v.as_str())
+                .and_then(|url| by_url.get(url))
+            else {
+                continue;
+            };
+            let links = self.resolve_note_frontmatter_links(info, &probe, &outside_links, &lookup);
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "frontmatter_links".to_string(),
+                    serde_json::Value::Object(crate::frontmatter_links::links_by_key(
+                        &links,
+                        crate::frontmatter_links::LinkUrlStyle::Absolute,
+                    )),
+                );
+            }
+        }
+    }
+}
+
+/// [`Repo::link_lookup`]: a target exists when the path resolver serves
+/// something at it — the very check `errors.json` makes of a body link — and
+/// is called by its note's title, or its file or folder name.
+pub struct RepoLinkLookup<'a> {
+    repo: &'a Repo,
+    resolver: crate::path_resolver::OwnedPathResolverConfig,
+}
+
+impl crate::frontmatter_links::LinkTargetLookup for RepoLinkLookup<'_> {
+    fn lookup(&self, site_url: &str) -> Option<crate::frontmatter_links::LinkTargetInfo> {
+        use crate::path_resolver::{ResolvedPath, normalize_link_target, resolve_request_path};
+        let name_of = |path: &Path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        };
+        let title = match resolve_request_path(
+            &self.resolver.as_config(),
+            &normalize_link_target(site_url),
+        ) {
+            ResolvedPath::NotFound => return None,
+            ResolvedPath::MarkdownFile(key) => {
+                let pin = self.repo.markdown_files.pin();
+                match pin.get(&key) {
+                    Some(info) => Some(match &info.frontmatter {
+                        Some(fm) => get_page_title(fm, &info.raw_path),
+                        None => name_of(&info.raw_path.with_extension(""))?,
+                    }),
+                    None => name_of(&key.with_extension("")),
+                }
+            }
+            ResolvedPath::StaticFile(path) | ResolvedPath::DirectoryListing(path) => name_of(&path),
+            ResolvedPath::TagPage { value, .. } => Some(value),
+            ResolvedPath::TagSourceIndex { source } => Some(source),
+            ResolvedPath::Redirect(_) => None,
+        };
+        Some(crate::frontmatter_links::LinkTargetInfo { title })
+    }
+}
+
+impl crate::frontmatter_links::LinkTargetLookup for Repo {
+    fn lookup(&self, site_url: &str) -> Option<crate::frontmatter_links::LinkTargetInfo> {
+        self.link_lookup().lookup(site_url)
+    }
+}
+
 /// Gets the page title from frontmatter or falls back to filename.
 ///
 /// Priority:
@@ -2852,6 +3044,95 @@ mod tests {
             &[],
             &[],
         )
+    }
+
+    /// Frontmatter links: the scan keeps their sources, `Repo` resolves them
+    /// with the wikilink index and checks targets with the path resolver, and
+    /// `site.json` gets them only on notes that have any.
+    #[test]
+    fn test_frontmatter_links_resolve_against_the_repository() {
+        use crate::frontmatter_links::LinkTargetLookup;
+        let tmp = visible_tempdir();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("customers/contracts")).unwrap();
+        std::fs::create_dir_all(root.join("invoices")).unwrap();
+        std::fs::write(
+            root.join("customers/acme.md"),
+            "---\ntitle: Acme Corp\n---\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("customers/contracts/msa.pdf"), b"%PDF").unwrap();
+        std::fs::write(
+            root.join("invoices/inv.md"),
+            concat!(
+                "---\n",
+                "customer: \"[[Acme Corp]]\"\n",
+                "contracts: [\"../customers/contracts/msa.pdf\", \"/customers/gone.pdf\"]\n",
+                "---\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("plain.md"), "# Plain\n").unwrap();
+        let repo = test_repo(&root).with_change_tracking();
+        repo.scan_all().unwrap();
+        repo.build_wikilink_index();
+
+        let info = repo
+            .markdown_files
+            .pin()
+            .get(&root.join("invoices/inv.md"))
+            .cloned()
+            .unwrap();
+        assert_eq!(info.frontmatter_links.len(), 3);
+        let links = repo.frontmatter_links_of(&info);
+        let summary: Vec<(&str, Option<&str>)> = links
+            .iter()
+            .map(|l| {
+                (
+                    l.target.as_str(),
+                    l.resolved.as_ref().map(|r| r.title.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("/customers/acme/", Some("Acme Corp")),
+                ("/customers/contracts/msa.pdf", Some("msa.pdf")),
+                ("/customers/gone.pdf", None),
+            ]
+        );
+        assert!(repo.lookup("/customers/acme/").is_some());
+        assert!(repo.lookup("/nowhere/").is_none());
+
+        let mut site = serde_json::json!({
+            "markdown_files": [
+                {"url_path": "/invoices/inv/"},
+                {"url_path": "/plain/"},
+            ]
+        });
+        repo.inject_frontmatter_links_into_site_json(&mut site);
+        assert_eq!(
+            site["markdown_files"][0]["frontmatter_links"]["customer"]["url"],
+            "/customers/acme/"
+        );
+        assert_eq!(
+            site["markdown_files"][0]["frontmatter_links"]["contracts"][1]["resolved"],
+            false
+        );
+        assert!(site["markdown_files"][1].get("frontmatter_links").is_none());
+
+        // A snapshot keeps the sources, so a restored repository publishes
+        // the same links.
+        let restored = test_repo(&root).with_change_tracking();
+        restored.restore_snapshot(repo.snapshot()).unwrap();
+        let again = restored
+            .markdown_files
+            .pin()
+            .get(&root.join("invoices/inv.md"))
+            .cloned()
+            .unwrap();
+        assert_eq!(again.frontmatter_links, info.frontmatter_links);
     }
 
     /// A note's page template is tracked by the memo across surgical
@@ -3929,6 +4210,7 @@ mod tests {
                         frontmatter: None,
                         calendar: None,
                         relationships: Vec::new(),
+                        frontmatter_links: Vec::new(),
                     },
                 );
             }

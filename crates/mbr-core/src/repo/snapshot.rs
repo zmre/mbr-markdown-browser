@@ -42,7 +42,7 @@ use crate::vault::{Availability, Entry, Vault, VaultPath};
 
 /// The on-disk shape of a [`RepoSnapshot`]. Bump on any change to the
 /// serialized types; a snapshot of another format is ignored, never migrated.
-pub const SNAPSHOT_FORMAT: u32 = 2;
+pub const SNAPSHOT_FORMAT: u32 = 3;
 
 /// What a listing says about a file, compared across scans to decide whether
 /// it changed. Nanosecond modification times, so two edits within one second
@@ -153,6 +153,8 @@ struct SnapshotNote {
     calendar: Option<crate::calendar::NoteCalendar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     relationships: Vec<RawRelationship>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frontmatter_links: Vec<crate::frontmatter_links::FrontmatterLinkSource>,
 }
 
 /// One non-markdown file: just enough to list it and serve its basic metadata.
@@ -278,6 +280,7 @@ impl Repo {
                     frontmatter: info.frontmatter.clone(),
                     calendar: info.calendar,
                     relationships: info.relationships.clone(),
+                    frontmatter_links: info.frontmatter_links.clone(),
                 })
             })
             .collect();
@@ -341,6 +344,7 @@ impl Repo {
                 frontmatter: note.frontmatter,
                 calendar: note.calendar,
                 relationships: note.relationships,
+                frontmatter_links: note.frontmatter_links,
             };
             if let Some(stamps) = &stamps {
                 stamps.insert(key.clone(), note.stamp);
@@ -889,7 +893,7 @@ mod tests {
             Err(SnapshotError::WrongFormat { found: 999 })
         ));
         assert!(matches!(
-            RepoSnapshot::from_bytes(br#"{"format":2,"markdown":7}"#),
+            RepoSnapshot::from_bytes(br#"{"format":3,"markdown":7}"#),
             Err(SnapshotError::Corrupt(_))
         ));
         // A different scan configuration.

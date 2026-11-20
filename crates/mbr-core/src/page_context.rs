@@ -494,6 +494,14 @@ pub struct MarkdownPageParams<'a> {
     /// published to templates as `frontmatter`. `None` leaves the template's
     /// `frontmatter` to the simplified map.
     pub frontmatter: Option<&'a Value>,
+    /// The note's frontmatter links
+    /// ([`crate::markdown::MarkdownRenderResult::frontmatter_links`], checked
+    /// against the repository when there is one), published to templates as
+    /// `frontmatter_links.<key>` = `{url, title, text, raw, resolved}` (a
+    /// list for a list value). URLs follow `url_mode`. `None` or empty leaves
+    /// `frontmatter_links` an empty map, so `{% if frontmatter_links.x %}`
+    /// works on every page.
+    pub frontmatter_links: Option<&'a [crate::frontmatter_links::FrontmatterLink]>,
 }
 
 /// Repository-level configuration for the markdown-page context builder.
@@ -668,8 +676,26 @@ pub fn markdown_extra_context(
         );
     }
 
+    let link_style = match url_mode {
+        UrlMode::Absolute => crate::frontmatter_links::LinkUrlStyle::Absolute,
+        UrlMode::RelativeToDepth(depth) => {
+            crate::frontmatter_links::LinkUrlStyle::RelativeToDepth(*depth)
+        }
+    };
+    ctx.insert(
+        FRONTMATTER_LINKS_VARIABLE.to_string(),
+        Value::Object(crate::frontmatter_links::links_by_key(
+            params.frontmatter_links.unwrap_or_default(),
+            link_style,
+        )),
+    );
+
     ctx
 }
+
+/// The template variable holding a note's frontmatter links
+/// ([`MarkdownPageParams::frontmatter_links`]).
+pub const FRONTMATTER_LINKS_VARIABLE: &str = "frontmatter_links";
 
 /// Inserts the deck settings as script-safe JSON for `_head.html`:
 /// `slides_config` (the repository's `[slides]` table, page-independent) and
@@ -794,6 +820,7 @@ mod tests {
             modified: 1700000000,
             calendar: None,
             relationships: Vec::new(),
+            frontmatter_links: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -816,6 +843,7 @@ mod tests {
             modified: 1700000000,
             calendar: None,
             relationships: Vec::new(),
+            frontmatter_links: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -841,6 +869,7 @@ mod tests {
             modified: 1700000000,
             calendar: None,
             relationships: Vec::new(),
+            frontmatter_links: Vec::new(),
         };
 
         let json = markdown_file_to_json(&file_info);
@@ -1207,6 +1236,7 @@ mod tests {
             slides: None,
             calendar_nav: None,
             frontmatter: None,
+            frontmatter_links: None,
         };
         let root_dir = Path::new("/repo/root");
         let ctx = markdown_extra_context(
@@ -1269,6 +1299,7 @@ mod tests {
             slides: None,
             calendar_nav: None,
             frontmatter: None,
+            frontmatter_links: None,
         };
         // Static builds never have a live repo to scope storage against.
         let ctx = markdown_extra_context(
@@ -1534,6 +1565,7 @@ mod tests {
             slides: Some(&page),
             calendar_nav: None,
             frontmatter: None,
+            frontmatter_links: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert_eq!(ctx.get("slides_config"), Some(&json!("{}")));
@@ -1559,6 +1591,7 @@ mod tests {
             slides: None,
             calendar_nav: None,
             frontmatter: None,
+            frontmatter_links: None,
         };
         let ctx = markdown_extra_context(&params, &markdown_opts(&[], None), &UrlMode::Absolute);
         assert!(!ctx.contains_key("prev_page"));
