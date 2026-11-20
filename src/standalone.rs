@@ -97,6 +97,8 @@ pub async fn render_note(
             // A single file has no repository index.
             calendar_nav: None,
             frontmatter: Some(&render_result.frontmatter_value),
+            // No repository: the render's links, targets assumed to exist.
+            frontmatter_links: Some(&render_result.frontmatter_links),
         },
         &crate::page_context::MarkdownContextOptions {
             tag_sources: &config.tag_sources,

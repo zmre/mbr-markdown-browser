@@ -544,7 +544,7 @@ impl LinkChecker {
         };
 
         let resolver = self.resolver.as_config();
-        let found = Found::collect(&rendered, &resolver, page_url);
+        let found = Found::collect(&rendered, &resolver, page_url, &self.repo);
         if found.is_empty() {
             return NoteOutcome::Checked(FileProblems {
                 path,
@@ -655,6 +655,9 @@ struct Found {
     /// Literal `[[…]]` left in the page.
     unresolved: Vec<String>,
     ambiguous: Vec<crate::wikilink_index::AmbiguousWikilink>,
+    /// Frontmatter links whose target is missing
+    /// ([`page_errors::validate_frontmatter_links`]'s verdict).
+    frontmatter: Vec<crate::frontmatter_links::FrontmatterLink>,
 }
 
 impl Found {
@@ -662,6 +665,7 @@ impl Found {
         rendered: &markdown::MarkdownRenderResult,
         resolver: &PathResolverConfig<'_>,
         page_url: &str,
+        repo: &Repo,
     ) -> Self {
         let html = &rendered.html;
         let mut seen = HashSet::new();
@@ -691,6 +695,7 @@ impl Found {
             media,
             unresolved,
             ambiguous: rendered.ambiguous_wikilinks.clone(),
+            frontmatter: missing_frontmatter_links(rendered, repo),
         }
     }
 
@@ -699,7 +704,25 @@ impl Found {
             && self.media.is_empty()
             && self.unresolved.is_empty()
             && self.ambiguous.is_empty()
+            && self.frontmatter.is_empty()
     }
+}
+
+/// The render's frontmatter links whose target the server would 404, judged
+/// with the repository's own lookup, as the server's `errors.json` judges them.
+fn missing_frontmatter_links(
+    rendered: &markdown::MarkdownRenderResult,
+    repo: &Repo,
+) -> Vec<crate::frontmatter_links::FrontmatterLink> {
+    if rendered.frontmatter_links.is_empty() {
+        return Vec::new();
+    }
+    let mut links = rendered.frontmatter_links.clone();
+    crate::frontmatter_links::check_targets(&mut links, &repo.link_lookup());
+    links
+        .into_iter()
+        .filter(|link| link.internal && link.resolved.is_none())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,6 +1093,48 @@ impl NoteContext<'_> {
                 .collect::<Vec<_>>()
         });
 
+        let frontmatter = found.frontmatter.into_iter().flat_map(|link| {
+            use crate::frontmatter_links::FrontmatterLinkForm;
+            let (syntax, style) = match link.form {
+                FrontmatterLinkForm::Wikilink => (
+                    Syntax::Wikilink,
+                    DestinationStyle::Wikilink {
+                        text: link.label.clone(),
+                        suffix: link.anchor.clone().unwrap_or_default(),
+                    },
+                ),
+                FrontmatterLinkForm::Path => (
+                    Syntax::Link,
+                    DestinationStyle::of_destination(&link.raw, true),
+                ),
+            };
+            let target = link.target.clone();
+            let base = Problem {
+                line: None,
+                kind: ProblemKind::BrokenLink,
+                reason: Reason::Missing,
+                syntax: Some(syntax),
+                media: None,
+                authored: Some(format!("{}: {}", link.key, link.raw)),
+                destination: Some(link.raw.clone()),
+                text: Some(format!("{}: {}", link.key, link.text())),
+                href: Some(target.clone()),
+                target: Some(target.clone()),
+                suggestions: Vec::new(),
+                folder: None,
+                resolved_to: None,
+                candidates: Vec::new(),
+            };
+            // The frontmatter is the first lines of the file, so the first
+            // line holding the value is where it is written.
+            let line = self
+                .located
+                .lines_containing(&link.raw, true)
+                .first()
+                .map(|(line, _)| *line);
+            std::iter::once(self.suggest(Problem { line, ..base }, &target, &style))
+        });
+
         let ambiguous = found.ambiguous.into_iter().flat_map(|found| {
             let name = found
                 .raw
@@ -1111,6 +1176,7 @@ impl NoteContext<'_> {
         links
             .chain(media)
             .chain(unresolved)
+            .chain(frontmatter)
             .chain(ambiguous)
             .collect()
     }
@@ -2052,6 +2118,7 @@ mod tests {
             media: Vec::new(),
             unresolved: vec!["[[Old Name]]".to_string()],
             ambiguous: Vec::new(),
+            frontmatter: Vec::new(),
         };
         let problems = context.problems(found);
         assert_eq!(problems.len(), 1);
@@ -2075,5 +2142,45 @@ mod tests {
         assert_eq!(report.unreadable[0].path, "b.md");
         assert!(!report.has_problems());
         assert!(report.to_markdown().contains("## Could not be checked"));
+    }
+
+    #[test]
+    fn missing_frontmatter_link_targets_are_reported_with_suggestions() {
+        let dir = repo(&[
+            ("customers/acme.md", "# Acme\n"),
+            (
+                "invoices/inv.md",
+                concat!(
+                    "---\n",
+                    "customer: \"[[Acme]]\"\n",
+                    "contract: /customers/acme-msa.pdf\n",
+                    "old: \"[[customers/acme-old]]\"\n",
+                    "---\nBody.\n"
+                ),
+            ),
+        ]);
+        let report = check(&dir);
+        let problems = problems(&report, "invoices/inv.md");
+        let found: Vec<(Option<usize>, &str, Option<&str>)> = problems
+            .iter()
+            .map(|p| (p.line, p.text.as_deref().unwrap(), p.target.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    Some(3),
+                    "contract: acme-msa.pdf",
+                    Some("/customers/acme-msa.pdf")
+                ),
+                (
+                    Some(4),
+                    "old: customers/acme-old",
+                    Some("/invoices/customers/acme-old/")
+                ),
+            ],
+            "{problems:?}"
+        );
+        assert!(problems.iter().all(|p| p.kind == ProblemKind::BrokenLink));
     }
 }

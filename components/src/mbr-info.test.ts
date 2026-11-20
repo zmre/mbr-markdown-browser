@@ -754,3 +754,36 @@ describe('MbrInfoElement file location (GUI only)', () => {
     expect(button?.getAttribute('aria-label')).toBe('Copy full path')
   })
 })
+
+describe('MbrInfoElement frontmatter links', () => {
+  afterEach(() => {
+    document.querySelectorAll('mbr-info').forEach((el) => el.remove())
+    siteNavStateRef.current = { isLoading: true, data: null, error: null }
+    window.__MBR_CONFIG__ = undefined
+  })
+
+  it('renders a value that is a resolved frontmatter link as a link', async () => {
+    window.__MBR_CONFIG__ = { serverMode: true, guiMode: false }
+    window.frontmatter = { title: 'Invoice', customer: '[[Customer X]]', reference: 'PO 1' }
+    const el = document.createElement('mbr-info') as any
+    document.body.appendChild(el)
+    emitSiteNav({
+      markdown_files: [
+        {
+          url_path: window.location.pathname,
+          frontmatter: { title: 'Invoice' },
+          frontmatter_links: {
+            customer: { url: '/customers/x/', title: 'Customer X', text: 'Customer X', raw: '[[Customer X]]', resolved: true },
+          },
+        },
+      ],
+    })
+    el._isOpen = true
+    el.requestUpdate()
+    await el.updateComplete
+    const link = el.shadowRoot.querySelector('.metadata-table a.frontmatter-link') as HTMLAnchorElement
+    expect(link?.textContent).toBe('Customer X')
+    expect(link?.getAttribute('href')).toBe(resolveUrl('/customers/x/'))
+    expect(el.shadowRoot.querySelector('.metadata-table')?.textContent).toContain('PO 1')
+  })
+})

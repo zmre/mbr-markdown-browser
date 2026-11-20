@@ -12221,3 +12221,213 @@ async fn test_page_template_escaping_the_repository_is_refused() {
     assert_eq!(response.status(), 500);
     assert_html_contains(&response.text().await.unwrap(), "outside the repository");
 }
+
+// ============================================================================
+// Frontmatter links (`customer: "[[Customer X]]"`, `contracts: [/x.pdf]`)
+// ============================================================================
+
+/// A customer note, an invoice linking it from frontmatter (a wikilink, a
+/// list mixing a wikilink and paths to PDFs, one of them missing), a page
+/// template rendering the links, and a decoy that only mentions the customer.
+fn frontmatter_links_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "customers/Customer X.md",
+        "---\ntitle: Customer X\ntype: organization\ntags: [customer]\n---\nThe customer.\n",
+    );
+    repo.create_markdown(
+        "customers/Customer X MSA 2026.md",
+        "# Customer X MSA 2026\n",
+    );
+    let contracts = repo.create_dir("customers/contracts");
+    std::fs::write(
+        contracts.join("Customer X SOW 3 renewal (signed).pdf"),
+        b"%PDF-1.4\n%%EOF\n",
+    )
+    .unwrap();
+    repo.create_markdown(
+        "invoices/2026-11-17 Customer X Invoice 105.md",
+        concat!(
+            "---\n",
+            "title: 2026-11-17 Customer X Invoice 105\n",
+            "type: invoice\n",
+            "template: /invoices/tpl/inv.html\n",
+            "customer: \"[[Customer X]]\"\n",
+            "contracts:\n",
+            "  - \"[[Customer X MSA 2026|MSA]]\"\n",
+            "  - \"/customers/contracts/Customer X SOW 3 renewal (signed).pdf\"\n",
+            "  - /customers/contracts/gone.pdf\n",
+            "reference: \"PO #PY75334\"\n",
+            "---\n",
+            "Line items.\n"
+        ),
+    );
+    repo.create_markdown(
+        "invoices/tpl/inv.html",
+        concat!(
+            "<html><body>",
+            "<a id=\"customer\" href=\"{{ frontmatter_links.customer.url }}\">{{ frontmatter_links.customer.title }}</a>",
+            "{% for c in frontmatter_links.contracts %}",
+            "<a class=\"contract\" data-resolved=\"{{ c.resolved }}\" href=\"{{ c.url }}\">{{ c.text }}</a>",
+            "{% endfor %}",
+            "</body></html>"
+        ),
+    );
+    repo.create_markdown(
+        "notes/decoy.md",
+        "---\nnote: \"call [[Customer X]] tomorrow\"\n---\nNothing.\n",
+    );
+    repo
+}
+
+const INVOICE_URL: &str = "/invoices/2026-11-17 Customer X Invoice 105/";
+
+/// Polls `links.json` until `pred` holds (the backlink index builds in the
+/// background after the scan), failing after a few seconds.
+async fn links_json_when(
+    server: &TestServer,
+    path: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let json = get_json(server, path).await;
+        if pred(&json) || tokio::time::Instant::now() > deadline {
+            return json;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_frontmatter_wikilink_is_a_backlink_on_the_customer() {
+    let repo = frontmatter_links_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    let from_invoice = |l: &serde_json::Value| l["from"] == INVOICE_URL;
+    let customer = links_json_when(&server, "/customers/Customer%20X/links.json", |json| {
+        json["inbound"]
+            .as_array()
+            .is_some_and(|inbound| inbound.iter().any(from_invoice))
+    })
+    .await;
+    let inbound = customer["inbound"].as_array().expect("inbound");
+    let link = inbound
+        .iter()
+        .find(|l| from_invoice(l))
+        .unwrap_or_else(|| panic!("the invoice must be a backlink of its customer: {inbound:?}"));
+    assert_eq!(link["kind"], "frontmatter", "{link}");
+    assert_eq!(link["key"], "customer", "{link}");
+    // A value that only mentions the customer is text, not a link.
+    assert!(
+        !inbound.iter().any(|l| l["from"] == "/notes/decoy/"),
+        "{inbound:?}"
+    );
+
+    // The invoice's outbound list carries every frontmatter link, origin and all.
+    let invoice = get_json(
+        &server,
+        "/invoices/2026-11-17%20Customer%20X%20Invoice%20105/links.json",
+    )
+    .await;
+    let outbound: Vec<(&str, &str)> = invoice["outbound"]
+        .as_array()
+        .expect("outbound")
+        .iter()
+        .filter(|l| l["kind"] == "frontmatter")
+        .map(|l| (l["key"].as_str().unwrap(), l["to"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        outbound,
+        vec![
+            ("customer", "/customers/Customer X/"),
+            ("contracts", "/customers/Customer X MSA 2026/"),
+            (
+                "contracts",
+                "/customers/contracts/Customer X SOW 3 renewal (signed).pdf"
+            ),
+            ("contracts", "/customers/contracts/gone.pdf"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_frontmatter_links_in_site_json_page_template_and_errors_json() {
+    let repo = frontmatter_links_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+
+    // site.json: the resolved form, next to the raw value.
+    let site = get_json(&server, "/.mbr/site.json").await;
+    let invoice = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == INVOICE_URL)
+        .expect("invoice in site.json");
+    assert_eq!(invoice["frontmatter"]["customer"], "[[Customer X]]");
+    let links = &invoice["frontmatter_links"];
+    assert_eq!(links["customer"]["url"], "/customers/Customer X/");
+    assert_eq!(links["customer"]["title"], "Customer X");
+    assert_eq!(links["customer"]["raw"], "[[Customer X]]");
+    assert_eq!(links["customer"]["resolved"], true);
+    let contracts = links["contracts"].as_array().expect("a list for a list");
+    assert_eq!(contracts.len(), 3);
+    assert_eq!(contracts[0]["text"], "MSA");
+    assert_eq!(contracts[0]["title"], "Customer X MSA 2026");
+    assert_eq!(
+        contracts[1]["title"],
+        "Customer X SOW 3 renewal (signed).pdf"
+    );
+    assert_eq!(contracts[1]["resolved"], true);
+    assert_eq!(contracts[2]["resolved"], false);
+    // Notes without frontmatter links get no key; `template` is not a link.
+    let decoy = site["markdown_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["url_path"] == "/notes/decoy/")
+        .unwrap();
+    assert!(decoy.get("frontmatter_links").is_none(), "{decoy}");
+    assert!(links.get("template").is_none(), "{links}");
+
+    // The page template sees `frontmatter_links`.
+    // Tera escapes `/` in attribute values (`&#x2F;`), which a browser reads
+    // back as `/`.
+    let page = server
+        .get_text("/invoices/2026-11-17%20Customer%20X%20Invoice%20105/")
+        .await
+        .replace("&#x2F;", "/");
+    assert!(
+        page.contains(r#"<a id="customer" href="/customers/Customer X/">Customer X</a>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<a class="contract" data-resolved="true" href="/customers/contracts/Customer X SOW 3 renewal (signed).pdf">Customer X SOW 3 renewal (signed).pdf</a>"#),
+        "{page}"
+    );
+    assert!(page.contains(r#"data-resolved="false""#), "{page}");
+
+    // The linked PDF is served where the link points.
+    let pdf = server
+        .get("/customers/contracts/Customer%20X%20SOW%203%20renewal%20(signed).pdf")
+        .await;
+    assert_eq!(pdf.status(), 200);
+
+    // A missing path is reported like a broken body link; the others are not.
+    let errors = get_json(
+        &server,
+        "/invoices/2026-11-17%20Customer%20X%20Invoice%20105/errors.json",
+    )
+    .await;
+    let broken: Vec<&serde_json::Value> = errors["errors"]
+        .as_array()
+        .expect("errors")
+        .iter()
+        .filter(|e| e["type"] == "broken_internal_link")
+        .collect();
+    assert_eq!(broken.len(), 1, "{errors}");
+    assert_eq!(broken[0]["target"], "/customers/contracts/gone.pdf");
+    assert_eq!(broken[0]["text"], "contracts: gone.pdf");
+}

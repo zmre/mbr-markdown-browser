@@ -60,6 +60,7 @@ pub mod embedded_pico;
 pub mod errors;
 pub mod flashcards;
 pub mod frontmatter;
+pub mod frontmatter_links;
 pub mod html;
 pub mod icons;
 pub mod link_check;

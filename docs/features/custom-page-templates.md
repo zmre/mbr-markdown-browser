@@ -149,12 +149,42 @@ plus:
 | Variable | What it is |
 |----------|------------|
 | `frontmatter` | The note's whole frontmatter as written: nested maps stay maps, lists of maps stay lists, numbers stay numbers (`{{ item.qty * item.rate }}` works), `null` stays `null` |
+| `frontmatter_links` | The frontmatter values that are links, resolved; see [Links in frontmatter](#links-in-frontmatter) |
 | `markdown` | The rendered body (write it with `| safe`) |
 | `title`, `date`, … | Each frontmatter field as its own variable, as on every page. Nested maps appear flattened (`client.name`) and floats as text here; use `frontmatter.…` for the real values |
 
 `frontmatter` is on every markdown page, so a customized `.mbr/index.html` can
 use it too. A frontmatter field that is itself called `frontmatter` does not
 replace it; it is `frontmatter.frontmatter`.
+
+### Links in frontmatter
+
+A frontmatter value that is a wikilink or a path to a file
+([Links in frontmatter](../markdown/frontmatter/#links-in-frontmatter)) is in
+`frontmatter_links` under its key: one entry for a single value, a list of
+entries for a list (only its elements that are links, in order). Each entry
+has:
+
+| Field | What it is |
+|-------|------------|
+| `url` | Where the link goes: the target's URL on the server, relative to the page in a static build, ready for `href` |
+| `title` | The target's title (a note's `title`, a file's name); the value's own name when the target is missing |
+| `text` | The wikilink's `|Label` if it has one, else `title` |
+| `raw` | The value as written (`[[Customer X]]`) |
+| `resolved` | Whether the target exists |
+| `label`, `anchor` | The wikilink's label and `#fragment`, when there are any |
+
+```html
+<p>Bill to:
+  <a href="{{ frontmatter_links.customer.url }}">{{ frontmatter_links.customer.title }}</a>
+</p>
+{% for c in frontmatter_links.contracts | default(value=[]) %}
+  {% if c.resolved %}<a href="{{ c.url }}">{{ c.text }}</a>{% else %}{{ c.raw }}{% endif %}
+{% endfor %}
+```
+
+`frontmatter_links` is on every markdown page (an empty map when there are
+none). The raw values stay in `frontmatter` as written.
 
 ### Including mbr's templates and your own
 

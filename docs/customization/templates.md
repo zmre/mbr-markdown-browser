@@ -74,6 +74,7 @@ These variables are available in all templates:
 | `current_path` | string | Current URL path |
 | `frontmatter_json` | string | All frontmatter as JSON (the simplified form: nested maps flattened, floats as strings) |
 | `frontmatter` | object | The note's whole frontmatter as written: nested maps, lists of maps and numbers intact, so `{% for i in frontmatter.items %}{{ i.qty * i.rate }}{% endfor %}` works. A frontmatter key named `frontmatter` cannot replace it |
+| `frontmatter_links` | object | The frontmatter values that are links (`customer: "[[Customer X]]"`), resolved: `{key: {url, title, text, raw, resolved}}`, a list for a list value, an empty map when there are none; see [Links in frontmatter](../features/custom-page-templates/#links-in-frontmatter) |
 | `calendar_enabled` | bool | `[calendar] enabled`; gates `<mbr-calendar>` in `_footer.html` and the pre-paint script in `_head.html` |
 | `calendar_nav` | object | Only on a [periodic note](../features/calendar/#periodic-notes): `period` (canonical key, e.g. `2026-10-31`, `2026-W44`), `kind` (`day`/`week`/`month`/`quarter`/`year`), `label` (English, e.g. `Saturday, October 31, 2026`), `datetime` (for `<time datetime>`; absent for a quarter), `prev` / `next` (the nearest notes of the same kind, or absent) and `up` (the containing week / month / quarter / year notes that exist). Each link has `kind`, `period`, `url` (page-relative in static builds), `label`, `title` and `datetime`. Drawn by `_calendar_nav.html` |
 
