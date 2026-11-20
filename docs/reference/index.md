@@ -18,6 +18,7 @@ and how to work on it.
 | [Keyboard Shortcuts](keyboard-shortcuts/) | Every keyboard shortcut, by panel |
 | [HTTP API](http-api/) | The server's endpoints: pages, `site.json`, search, tasks |
 | [Integration](integration/) | Using mbr with Obsidian, VS Code, Git, CI/CD, and other tools |
+| [Library API](library-api/) | Using mbr's note index from Rust: `mbr_core::Site` |
 
 ## Working on mbr
 

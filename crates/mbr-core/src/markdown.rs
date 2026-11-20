@@ -82,10 +82,43 @@ fn load_first_yaml_doc(text: &str) -> Option<Yaml> {
         .and_then(|docs| docs.into_iter().next())
 }
 
+/// A note's leading metadata block, parsed: see [`parse_frontmatter_block`].
+#[derive(Debug, Clone, Default)]
+pub struct FrontmatterBlock {
+    /// The block's YAML document; `None` without a block, or when it does not
+    /// parse (or holds only comments).
+    pub yaml: Option<Yaml>,
+    /// Byte range of the whole block in the source (empty at 0 without one;
+    /// after a leading BOM otherwise).
+    pub block: std::ops::Range<usize>,
+    /// First byte of the body: after the block, else after a BOM, else 0.
+    pub body_start: usize,
+}
+
 /// A note's frontmatter, found in its source text exactly as the renderer
-/// finds it (BOM stripped, [`crate::frontmatter::leading_metadata`]): the
-/// unresolved frontmatter links and the byte range of the whole metadata block
-/// in `source` (empty at 0 when there is none).
+/// finds it (BOM skipped, [`crate::frontmatter::leading_metadata`]), and
+/// parsed.
+pub fn parse_frontmatter_block(source: &str) -> FrontmatterBlock {
+    let bom = source.len() - strip_bom(source).len();
+    let Some(leading) = crate::frontmatter::leading_metadata(
+        &source[bom..],
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
+    ) else {
+        return FrontmatterBlock {
+            yaml: None,
+            block: 0..0,
+            body_start: bom,
+        };
+    };
+    FrontmatterBlock {
+        yaml: load_first_yaml_doc(&source[bom..][leading.content.clone()]),
+        block: bom..bom + leading.body_start,
+        body_start: bom + leading.body_start,
+    }
+}
+
+/// The unresolved frontmatter links of a note's source text and the byte
+/// range of its metadata block (see [`parse_frontmatter_block`]).
 ///
 /// For text-level link tools (the server's grep-based backlink fallback) that
 /// must treat frontmatter links the way the index does without rendering.
@@ -95,17 +128,13 @@ pub fn frontmatter_link_sources_in(
     Vec<crate::frontmatter_links::FrontmatterLinkSource>,
     std::ops::Range<usize>,
 ) {
-    let bom = source.len() - strip_bom(source).len();
-    let Some(leading) = crate::frontmatter::leading_metadata(
-        &source[bom..],
-        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
-    ) else {
-        return (Vec::new(), 0..0);
-    };
-    let links = load_first_yaml_doc(&source[bom..][leading.content.clone()])
-        .map(|yaml| crate::frontmatter_links::find_frontmatter_links(&yaml))
+    let block = parse_frontmatter_block(source);
+    let links = block
+        .yaml
+        .as_ref()
+        .map(crate::frontmatter_links::find_frontmatter_links)
         .unwrap_or_default();
-    (links, bom..bom + leading.body_start)
+    (links, block.block)
 }
 
 /// Result of parsing a markdown file without rendering to HTML.
@@ -3485,9 +3514,11 @@ fn yaml_frontmatter_simplified(y: &Option<Yaml>) -> SimpleMetadata {
     }
 }
 
+pub use crate::relationships::yaml_to_json;
+
 /// The whole frontmatter as JSON, structure and types kept (see
 /// [`MarkdownRenderResult::frontmatter_value`]): an empty object when there is
-/// no frontmatter or it is not a map.
+/// no frontmatter or it is not a map. Per value it is [`yaml_to_json`].
 pub fn lossless_frontmatter(y: &Option<Yaml>) -> serde_json::Value {
     match y {
         Some(yaml @ Yaml::Hash(_)) => crate::relationships::yaml_to_json(yaml),
@@ -3599,6 +3630,25 @@ pub fn extract_metadata_from_vault(
             source: e.into(),
         })?;
     Ok(extract_metadata_from_bytes(&key, &buffer))
+}
+
+/// The **lossless** frontmatter ([`lossless_frontmatter`]) of the note at
+/// index key `file`, from the first [`FRONTMATTER_MAX_BYTES`] of it, read
+/// through `vault`. An empty object without frontmatter.
+pub fn lossless_frontmatter_from_vault(
+    vault: &dyn crate::vault::Vault,
+    file: &Path,
+) -> Result<serde_json::Value, MarkdownError> {
+    let read_failed = |source: std::io::Error| MarkdownError::ReadFailed {
+        path: file.to_path_buf(),
+        source,
+    };
+    let path = vault.vault_path(file).map_err(|e| read_failed(e.into()))?;
+    let buffer = vault
+        .read_prefix(&path, FRONTMATTER_MAX_BYTES)
+        .map_err(|e| read_failed(e.into()))?;
+    let text = String::from_utf8_lossy(&buffer);
+    Ok(lossless_frontmatter(&parse_frontmatter_block(&text).yaml))
 }
 
 /// Frontmatter (and the first-H1 title fallback) from the **first bytes** of a

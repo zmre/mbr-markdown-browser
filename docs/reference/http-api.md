@@ -20,6 +20,8 @@ server-only.
 | `/{path}` | GET | `301` to the canonical `/{path}/` when it names a markdown page |
 | `/.mbr/site.json` | GET | Full site metadata as JSON; see [Frontmatter links in site.json](#frontmatter-links-in-site-json) |
 | `/{path}/links.json` | GET | A page's links: `outbound`, `inbound` (backlinks) and `relationships`. A [frontmatter link](../features/links/#frontmatter-links) carries `"kind": "frontmatter"` and its `"key"` in both lists |
+| `/.mbr/notes?type=…&fields=…` | GET | The notes of a type with some of their frontmatter; see [Note index](#note-index) |
+| `/.mbr/fields/{key}/values` | GET | A frontmatter field's distinct values with counts; see [Note index](#note-index) |
 | `/.mbr/media.json` | GET | Every non-markdown file with its metadata; see [Media catalog](#media-catalog) |
 | `/.mbr/search` | POST | Search endpoint |
 | `/.mbr/tasks` | POST | Task query for the task browser and the calendar's task marks (`404` with `--no-tasks`) |
@@ -52,6 +54,45 @@ elements only). URLs are site-absolute, like every `url_path`:
 `resolved` is `false` when nothing is served at `url` (the page-problems panel
 reports it). Notes without frontmatter links have no `frontmatter_links` key.
 Static builds write the same.
+
+## Note index
+
+The note index the [library API](library-api/) gives a Rust caller, for a
+browser front end. Server and GUI only.
+
+**`GET /.mbr/notes`** lists notes in path order. `type` keeps the notes of
+that `type` (case-insensitive); `fields` (comma-separated) adds those
+frontmatter fields to each, exactly as written: lists of maps, nested maps and
+numbers intact, and a dotted name (`billing_portal.url`) reads into a nested
+map. A note without a field leaves it out.
+
+```json
+GET /.mbr/notes?type=organization&fields=terms,billing_portal.name
+{ "notes": [
+  { "path": "customers/acme.md", "url": "/customers/acme/", "title": "Acme",
+    "type": "organization", "tags": ["customer"],
+    "fields": { "terms": 30, "billing_portal.name": "Coupa" } }
+] }
+```
+
+**`GET /.mbr/fields/{key}/values`** lists a field's distinct values with how
+many notes use each, most used first, for autocomplete. A list value counts
+each element. A nested field is `parent.child`. A list of maps (a contact's
+`emails`) has no values here; read it with `/.mbr/notes?fields=`.
+
+```json
+GET /.mbr/fields/terms/values
+{ "key": "terms", "values": [ { "value": 30, "count": 12 }, { "value": 45, "count": 3 } ] }
+```
+
+**Private contact fields** (`emails`, `phones`, `urls`, `social`, `im`,
+`addresses`), which `site.json` never includes, are only answered to a
+request that passes the [editing checks](../features/editing/): editing on
+(the GUI's default, or `--edit`), an `X-MBR-Edit: 1` header, same origin, the
+`Host` check, and `Authorization: Bearer <token>` whenever a token is
+configured or the caller is not on loopback. Otherwise the request is refused
+(`403`, or `401` for a missing token) with a JSON `error`. Public fields need
+nothing.
 
 ## Media catalog
 

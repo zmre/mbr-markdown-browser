@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use crate::errors::ServerError;
 use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
+use mbr_core::backlinks::{BacklinkIndexConfig as LinkIndexConfig, populate_inbound_index};
 use mbr_core::config::{RelationType, SortField, TagSource};
 use mbr_core::embedded_katex;
 use mbr_core::embedded_pico;
@@ -264,116 +265,6 @@ fn owned_resolver_config(config: &ServerState) -> mbr_core::path_resolver::Owned
         &config.index_file,
         mbr_core::config::tag_sources_to_url_sources(&config.tag_sources),
     )
-}
-
-/// Everything [`index_page_links`] needs to reproduce the renderer's link
-/// resolution outside a request.
-///
-/// Cloned once at startup rather than read from `ServerState`, because the
-/// index is built and maintained from background tasks that outlive any
-/// individual request.
-#[derive(Clone)]
-struct LinkIndexConfig {
-    base_dir: PathBuf,
-    index_file: String,
-    markdown_extensions: Vec<String>,
-    valid_tag_sources: HashSet<String>,
-    /// The page render's own probe (built from the same resolver
-    /// configuration, [`owned_resolver_config`]'s inputs), so an extension-less
-    /// or root-relative link is canonicalized here exactly as on the page.
-    directory_url_probe: mbr_core::link_transform::DirectoryUrlProbe,
-    /// The page render's outside-link context ([`ServerState::outside_links`]),
-    /// so the index records a mounted target's in-vault URL as the page does.
-    outside_links: mbr_core::outside_link::OutsideLinkContext,
-}
-
-/// Parse one markdown file and record its contribution to the backlink index.
-///
-/// Link resolution must match what a real render would produce, or the info
-/// panel would show backlinks the page does not actually contain. That is why
-/// this goes through the same `extract_outbound_links_from_vault` →
-/// `resolve_outbound_links` pair the request path uses, with the same
-/// `LinkTransformConfig`, rather than re-deriving URLs.
-fn index_page_links(
-    repo: &Repo,
-    index: &InboundIndex,
-    cfg: &LinkIndexConfig,
-    path: &Path,
-    url_path: &str,
-) {
-    let is_index_file = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .is_some_and(|f| f == cfg.index_file);
-
-    let link_transform_config = LinkTransformConfig {
-        markdown_extensions: cfg.markdown_extensions.clone(),
-        index_file: cfg.index_file.clone(),
-        is_index_file,
-        url_depth: None,
-        current_page_url: url_path.to_string(),
-        directory_url_probe: Some(cfg.directory_url_probe.clone()),
-        outside_links: Some(cfg.outside_links.clone()),
-    };
-
-    match markdown::extract_outbound_links_from_vault(
-        repo.vault().as_ref(),
-        path,
-        &cfg.base_dir,
-        link_transform_config.clone(),
-        true, // server_mode
-        cfg.valid_tag_sources.clone(),
-        Some(repo.wikilink_index.clone()),
-    ) {
-        Ok(links) => {
-            // The same resolution `links.json` publishes, so a backlink is
-            // recorded exactly where the page's outbound list says it points.
-            let resolved = resolve_outbound_links(links, &link_transform_config);
-            index.set_page_links(url_path, &resolved);
-        }
-        Err(e) => {
-            // A file that cannot be parsed contributes no backlinks. Withdraw
-            // whatever it contributed before so a file that became unreadable
-            // does not leave stale backlinks behind.
-            // A not-downloaded note (a cloud provider evicted it) is an
-            // expected state on mobile, not something to warn about.
-            if is_not_downloaded_markdown(&e) {
-                tracing::debug!("Backlink index: {} not downloaded yet: {e}", path.display());
-            } else {
-                tracing::warn!("Backlink index: failed to read {}: {e}", path.display());
-            }
-            index.remove_page(url_path);
-        }
-    }
-}
-
-/// Build the whole backlink index from the current repository contents.
-///
-/// Blocking and rayon-parallel; call from `spawn_blocking`.
-fn populate_inbound_index(repo: &Repo, index: &InboundIndex, cfg: &LinkIndexConfig) {
-    use rayon::prelude::*;
-
-    let pages: Vec<(PathBuf, String)> = repo
-        .markdown_files
-        .pin()
-        .iter()
-        .map(|(path, info)| (path.clone(), info.url_path.clone()))
-        .collect();
-
-    let page_count = pages.len();
-    let started = Instant::now();
-
-    pages.par_iter().for_each(|(path, url_path)| {
-        index_page_links(repo, index, cfg, path, url_path);
-    });
-
-    index.mark_ready();
-    tracing::info!(
-        "Backlink index built in {:?}: {} pages parsed, {} pages have backlinks",
-        started.elapsed(),
-        page_count,
-        index.target_count(),
-    );
 }
 
 /// The three caches that hold pre-rendered *listings* of the repository: the
@@ -1150,16 +1041,7 @@ fn is_not_downloaded(error: &MbrError) -> bool {
 
 /// [`is_not_downloaded`] for the markdown layer's own error type.
 fn is_not_downloaded_markdown(error: &mbr_core::errors::MarkdownError) -> bool {
-    match error {
-        mbr_core::errors::MarkdownError::ReadFailed { source, .. } => {
-            source.kind() == std::io::ErrorKind::WouldBlock
-                || source
-                    .get_ref()
-                    .and_then(|inner| inner.downcast_ref::<VaultError>())
-                    .is_some_and(|e| matches!(e, VaultError::NotDownloaded { .. }))
-        }
-        _ => false,
-    }
+    error.is_not_downloaded()
 }
 
 /// Logs a failed render under `context`.
@@ -1499,112 +1381,20 @@ impl ChangeApplier {
                 "Surgical invalidation for {} file(s)",
                 relevant_events.len()
             );
-            let has_tag_changes = relevant_events.iter().any(|e| {
-                matches!(
-                    e.event,
-                    mbr_core::change_event::ChangeEventType::Deleted
-                        | mbr_core::change_event::ChangeEventType::Modified
-                )
-            });
-
-            // Serialized against the initial index build; see the
-            // `is_ready()` comment below.
+            // Serialized against the initial index build, which an edit
+            // interleaving with it could be undone by (see
+            // `backlinks::apply_file_changes`).
             let _index_guard = index_lock.lock().await;
             tokio::task::spawn_blocking(move || {
-                let mut index_targets: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
-                for event in &relevant_events {
-                    let abs_path = if event.path.is_empty() {
-                        continue;
-                    } else {
-                        PathBuf::from(&event.path)
-                    };
-                    index_targets.push((
-                        abs_path.clone(),
-                        // Take the URL from the repository's own map
-                        // rather than recomputing it. `base_dir` is the
-                        // path as configured, while the scanner keys
-                        // everything by the *canonical* root, and on
-                        // macOS a temp dir differs (`/var` vs
-                        // `/private/var`). A recomputed URL would not
-                        // match the key the initial build inserted
-                        // under, so the edit would write a second entry
-                        // and never withdraw the stale one. Captured
-                        // before `invalidate_file` because a deletion
-                        // removes the entry it is read from.
-                        repo.markdown_files
-                            .pin()
-                            .get(&abs_path)
-                            .map(|info| info.url_path.clone()),
-                        matches!(
-                            event.event,
-                            mbr_core::change_event::ChangeEventType::Deleted
-                        ),
-                    ));
-                    repo.invalidate_file(&abs_path, &event.event);
-                    // After `repo.invalidate_file`, never before: a
-                    // created or modified file's url/title are read
-                    // back out of the repository's own map, which the
-                    // call above is what populates. A no-op until the
-                    // task index has actually been built.
-                    task_index.invalidate_file(&abs_path, &event.event, &repo);
-                }
-                // Rebuild tag index if any files were deleted or modified
-                // (created files add tags inline in invalidate_file)
-                if has_tag_changes {
-                    repo.rebuild_tag_index();
-                }
-                // Relationships may have changed on any create/modify/delete;
-                // rebuild the index so endpoint resolution stays consistent.
-                repo.build_relationship_index();
-                // The global wikilink index must track the same changes.
-                repo.build_wikilink_index();
-
-                // Re-index only the pages that changed. This runs after
-                // build_wikilink_index() on purpose: `[[Name]]` links
-                // resolve through that index, so re-extracting first
-                // would record links against the pre-edit name table.
-                //
-                // `is_ready()` gates it because the initial build is
-                // still filling the index otherwise. That is safe only
-                // because the caller holds `index_lock` across this
-                // whole task: without it, an edit arriving mid-build
-                // would be skipped here and then overwritten by the
-                // build's pre-edit contents, leaving links.json stale
-                // until the next full rescan.
-                if inbound_index.is_ready() {
-                    for (abs_path, known_url, is_delete) in &index_targets {
-                        if !link_index_cfg.markdown_extensions.iter().any(|ext| {
-                            abs_path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-                        }) {
-                            continue;
-                        }
-                        let url_path = match known_url {
-                            Some(url) => url.clone(),
-                            // Only reachable for a file the scan never
-                            // saw (created inside this batch, or
-                            // deleted before it was ever indexed).
-                            None => mbr_core::repo::build_markdown_url_path(
-                                abs_path,
-                                &link_index_cfg.base_dir,
-                                &link_index_cfg.index_file,
-                            ),
-                        };
-                        if *is_delete {
-                            inbound_index.remove_page(&url_path);
-                        } else {
-                            index_page_links(
-                                &repo,
-                                &inbound_index,
-                                &link_index_cfg,
-                                abs_path,
-                                &url_path,
-                            );
-                        }
-                    }
-                }
+                // The task index is patched per file, after the repository
+                // (a no-op until it has actually been built).
+                mbr_core::backlinks::apply_file_changes(
+                    &repo,
+                    &inbound_index,
+                    &link_index_cfg,
+                    &relevant_events,
+                    |abs_path, event| task_index.invalidate_file(abs_path, event, &repo),
+                );
             })
             .await
             .ok();
@@ -2531,6 +2321,16 @@ fn dedupe_name(dir: &Path, stem: &str, ext: &str, exists: impl Fn(&Path) -> bool
         .expect("candidate sequence is infinite, so a free path always exists")
 }
 
+/// Query of `GET /.mbr/notes` ([`Server::notes_handler`]).
+#[derive(Debug, serde::Deserialize)]
+pub struct NotesParams {
+    /// Only notes of this `type` (case-insensitive).
+    #[serde(rename = "type")]
+    pub note_type: Option<String>,
+    /// Comma-separated frontmatter fields to include.
+    pub fields: Option<String>,
+}
+
 /// Serializable view of the repository for `/.mbr/site.json`.
 ///
 /// Deliberately *not* `serde_json::to_value(&*repo)`: that materializes the
@@ -3251,6 +3051,8 @@ impl Server {
             .route("/", get(Self::home_page))
             .route("/.mbr/site.json", get(Self::get_site_info))
             .route("/.mbr/media.json", get(Self::get_media_info))
+            .route("/.mbr/notes", get(Self::notes_handler))
+            .route("/.mbr/fields/{key}/values", get(Self::field_values_handler))
             .route("/.mbr/search", post(Self::search_handler))
             // Task browser query endpoint (gated by tasks_enabled; 404 when off)
             .route("/.mbr/tasks", post(Self::tasks_handler))
@@ -3338,6 +3140,19 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn is_retired(&self) -> bool {
         *self.retired.borrow()
+    }
+
+    /// The note index this server serves, as the library façade
+    /// ([`mbr_core::site::Site`]): the same scan and backlink index, not a
+    /// second one, for an application that embeds the server and also reads
+    /// notes in-process. The server's watcher keeps them current, so do not
+    /// also call `Site::refresh` on it while a watcher runs; an embedder
+    /// without one uses [`Self::refresh`].
+    pub fn site(&self) -> mbr_core::site::Site {
+        mbr_core::site::Site::from_repo(
+            Arc::clone(&self.repo),
+            Arc::clone(&self.changes.inbound_index),
+        )
     }
 
     /// The change channel: what the watcher and the server's own writes
@@ -4141,6 +3956,112 @@ impl Server {
 
     /// GET /.mbr/raw/{*path} — returns the raw markdown source of an existing
     /// file plus an `X-MBR-Content-Hash` header for optimistic concurrency.
+    /// Whether a request may see the frontmatter fields `fields`: any public
+    /// field, always; a private contact field (`emails`, `phones`,
+    /// `addresses`, …; [`mbr_core::contact::is_public_frontmatter_key`]) only
+    /// when the request passes [`Self::check_edit_access`] — editing on (GUI,
+    /// or `--edit`), same-origin with `X-MBR-Edit: 1`, and the edit token
+    /// whenever one is configured or the caller is not on loopback. The same
+    /// fields `site.json` leaves out.
+    ///
+    /// `Some` is the refusal to send.
+    fn field_access_refusal<'f>(
+        config: &ServerState,
+        headers: &HeaderMap,
+        peer_ip: std::net::IpAddr,
+        mut fields: impl Iterator<Item = &'f str>,
+    ) -> Option<Response> {
+        if fields.all(mbr_core::contact::is_public_frontmatter_key) {
+            return None;
+        }
+        Self::check_edit_access(config, headers, peer_ip)
+            .err()
+            .map(|(status, message)| {
+                (
+                    status,
+                    Json(serde_json::json!({
+                        "error": format!("private contact fields need edit access: {message}")
+                    })),
+                )
+                    .into_response()
+            })
+    }
+
+    /// `GET /.mbr/notes?type=person&fields=title,emails`: the notes of a
+    /// type (every note without `type`; case-insensitive), each
+    /// `{path, url, title, type, tags, fields}` with the named frontmatter
+    /// fields lossless ([`mbr_core::site::notes_with_fields`]). Private
+    /// contact fields need edit access ([`Self::field_access_refusal`]).
+    pub async fn notes_handler(
+        extract::Query(params): extract::Query<NotesParams>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+    ) -> Response {
+        let fields: Vec<String> = params
+            .fields
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .fold(Vec::new(), |mut fields, field| {
+                if !fields.iter().any(|f| f == field) {
+                    fields.push(field.to_string());
+                }
+                fields
+            });
+        if let Some(refusal) = Self::field_access_refusal(
+            &config,
+            &headers,
+            peer.ip(),
+            fields.iter().map(String::as_str),
+        ) {
+            return refusal;
+        }
+        if !config.repo.is_scan_complete() {
+            config.repo.wait_for_scan().await;
+        }
+        let repo = Arc::clone(&config.repo);
+        let note_type = params.note_type.filter(|t| !t.trim().is_empty());
+        match tokio::task::spawn_blocking(move || {
+            mbr_core::site::notes_with_fields(&repo, note_type.as_deref(), &fields)
+        })
+        .await
+        {
+            Ok(notes) => Json(serde_json::json!({ "notes": notes })).into_response(),
+            Err(e) => {
+                tracing::error!("notes: task failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+
+    /// `GET /.mbr/fields/{key}/values`: the distinct values of a frontmatter
+    /// field with how many notes use each, most used first
+    /// (`{key, values: [{value, count}]}`; [`mbr_core::site::field_values`]),
+    /// for autocomplete. A private contact field needs edit access.
+    pub async fn field_values_handler(
+        extract::Path(key): extract::Path<String>,
+        State(config): State<ServerState>,
+        ConnectInfo(peer): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Some(refusal) =
+            Self::field_access_refusal(&config, &headers, peer.ip(), std::iter::once(key.as_str()))
+        {
+            return refusal;
+        }
+        if !config.repo.is_scan_complete() {
+            config.repo.wait_for_scan().await;
+        }
+        let values: Vec<serde_json::Value> = mbr_core::site::field_values(&config.repo, &key)
+            .into_iter()
+            .map(|(value, count)| serde_json::json!({ "value": value, "count": count }))
+            .collect();
+        Json(serde_json::json!({ "key": key, "values": values })).into_response()
+    }
+
     pub async fn raw_markdown_handler(
         extract::Path(path): extract::Path<String>,
         State(config): State<ServerState>,
