@@ -766,6 +766,7 @@ mod tests {
             text: String::new(),
             anchor: None,
             internal: true,
+            origin: None,
         };
         let resolved = resolve_outbound_links(
             vec![link("~/src/a.md"), link("~/elsewhere/b.md"), link("c.md")],

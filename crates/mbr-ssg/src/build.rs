@@ -952,6 +952,7 @@ impl Builder {
                     from: source_url.clone(),
                     text: link.text.clone(),
                     anchor: link.anchor.clone(),
+                    origin: link.origin.clone(),
                 };
 
                 inbound_index
@@ -1200,6 +1201,15 @@ impl Builder {
         let contact = render_result.contact;
         let slides = render_result.slides;
         let frontmatter_value = render_result.frontmatter_value;
+        // Re-checked against the repository (the render assumed the targets
+        // exist); none to check for most notes.
+        let mut frontmatter_links = render_result.frontmatter_links;
+        if !frontmatter_links.is_empty() {
+            mbr_core::frontmatter_links::check_targets(
+                &mut frontmatter_links,
+                &self.repo.link_lookup(),
+            );
+        }
         let readability_counts = mbr_core::readability::ReadabilityCounts {
             words: render_result.word_count,
             sentences: render_result.sentence_count,
@@ -1303,6 +1313,7 @@ impl Builder {
                 slides: slides.as_ref().map(|s| &s.settings),
                 calendar_nav: calendar_nav.as_ref(),
                 frontmatter: Some(&frontmatter_value),
+                frontmatter_links: Some(&frontmatter_links),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &self.config.tag_sources,
@@ -2384,6 +2395,9 @@ impl Builder {
                 .relationship_index
                 .inject_into_site_json(&mut response);
         }
+        // Per-note resolved frontmatter links, as the server publishes them.
+        self.repo
+            .inject_frontmatter_links_into_site_json(&mut response);
 
         let site_json = serde_json::to_string(&response).map_err(|e| {
             BuildError::RepoScan(mbr_core::errors::RepoError::JsonSerializeFailed(e))
@@ -2982,6 +2996,7 @@ impl Builder {
                 text: page.title,
                 anchor: None,
                 internal: true,
+                origin: None,
             });
         }
 
@@ -2999,6 +3014,7 @@ impl Builder {
             text: label,
             anchor: None,
             internal: true,
+            origin: None,
         });
 
         outbound
@@ -3015,6 +3031,7 @@ impl Builder {
                 text: tag.display,
                 anchor: None,
                 internal: true,
+                origin: None,
             })
             .collect()
     }
@@ -3065,6 +3082,7 @@ mod tests {
             modified: 0,
             calendar: None,
             relationships: Vec::new(),
+            frontmatter_links: Vec::new(),
         }
     }
 
@@ -3320,12 +3338,14 @@ mod tests {
                         text: "Top".to_string(),
                         anchor: Some("#top".to_string()),
                         internal: true,
+                        origin: None,
                     },
                     OutboundLink {
                         to: "/docs/".to_string(),
                         text: "Docs".to_string(),
                         anchor: None,
                         internal: true,
+                        origin: None,
                     },
                 ],
             ),

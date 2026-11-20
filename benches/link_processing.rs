@@ -87,6 +87,7 @@ fn bench_resolve_outbound_links(c: &mut Criterion) {
                 None
             },
             internal: true,
+            origin: None,
         })
         .collect();
 

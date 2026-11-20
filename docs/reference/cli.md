@@ -213,8 +213,10 @@ Each note is rendered exactly as the server renders it, and judged by the same
 checks as the [page-problems panel](../features/links.md#broken-links), so the
 report and the panel agree. It lists:
 
-- **broken links** — a markdown link, wikilink or raw HTML `href` whose target
-  is not served (`missing`), that climbs above the repository root
+- **broken links** — a markdown link, wikilink, raw HTML `href` or
+  [frontmatter link](../features/links.md#frontmatter-links) (its `text` is
+  `key: …`) whose target is not served (`missing`), that climbs above the
+  repository root
   (`escapes_root`), or that names a markdown page without its trailing slash
   (`missing_trailing_slash`, in practice only an unquoted raw HTML `href`);
 - **broken media** — `![]()`, `<img>`, `<video>`, `<audio>` and `<source>`

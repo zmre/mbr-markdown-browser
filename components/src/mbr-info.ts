@@ -24,6 +24,7 @@ import { loadGraphChunk } from './graph-chunk.js';
 import { safeHref } from './safe-href.js';
 import { isOutsideLinkTarget } from './link-kinds.ts';
 import { isCardKey } from './contact-meta.js';
+import { frontmatterLinksOf, linkedValueParts, type FrontmatterLinks } from './frontmatter-links.ts';
 import { isInputTarget, isMacPlatform, isPresentationPlaying } from './mbr-keys.js';
 import type { MbrOverlay } from './overlay.js';
 import { panelScrollAmount } from './panel-scroll.js';
@@ -198,6 +199,13 @@ export class MbrInfoElement extends LitElement implements MbrOverlay {
   @state()
   private _noteMeta = new Map<string, NoteMeta>();
 
+  /**
+   * This page's frontmatter links (`site.json` entry `frontmatter_links`):
+   * a Metadata value that is a link renders as one.
+   */
+  @state()
+  private _frontmatterLinks: FrontmatterLinks = {};
+
   private _unsubscribeSiteNav?: () => void;
 
   /** Injected into <mbr-mini-graph>: whether a path is a known note. */
@@ -241,6 +249,12 @@ export class MbrInfoElement extends LitElement implements MbrOverlay {
       const files = state.data?.markdown_files;
       if (Array.isArray(files)) {
         const map = new Map<string, NoteMeta>();
+        const here = canonicalizeNotePath(getCanonicalPath());
+        this._frontmatterLinks = frontmatterLinksOf(
+          (files as SiteNote[]).find(
+            (file) => typeof file?.url_path === 'string' && canonicalizeNotePath(file.url_path) === here,
+          ),
+        );
         for (const file of files as SiteNote[]) {
           if (!file || typeof file.url_path !== 'string') continue;
           const fm = file.frontmatter ?? {};
@@ -531,6 +545,14 @@ export class MbrInfoElement extends LitElement implements MbrOverlay {
    * Render a metadata value, using links for tag fields.
    */
   private _renderValue(key: string, value: unknown): TemplateResult | string {
+    // A value that is a frontmatter link (`customer: "[[Customer X]]"`).
+    const parts = linkedValueParts(value, this._frontmatterLinks, key);
+    if (parts) {
+      return html`${parts.map((part, i) => html`${i > 0 ? ', ' : ''}${part.url
+        ? html`<a href="${safeHref(resolveUrl(part.url))}" class="frontmatter-link" @click=${() => this._close()}>${part.text}</a>`
+        : part.text}`)}`;
+    }
+
     const tagSource = this._getTagSourceForField(key);
 
     // If not a tag field, use simple formatting

@@ -120,6 +120,31 @@ graph section, and `Ctrl+Shift+G` says so instead.
 
 *The link graph, expanded from the info panel.*
 
+## Frontmatter links
+
+A frontmatter value that is a wikilink or a path to a file
+(`customer: "[[Customer X]]"`, `contracts: [/customers/msa.pdf]`; the syntax
+is in [Links in frontmatter](../markdown/frontmatter/#links-in-frontmatter))
+is a link like any in the body:
+
+- **Backlinks.** The target lists the note among its links in, so a customer's
+  "Linked from N notes" chip and info panel list every invoice whose
+  `customer:` names it. A person's `company: "[[Acme]]"` therefore also shows
+  the person among Acme's backlinks.
+- **The info panel** shows the value as a link in its Metadata table. A value
+  whose target does not exist stays text.
+- **Broken links.** A target that does not exist is reported in the
+  page-problems panel, and by `mbr --check-links-only`, like a broken body
+  link, its text prefixed with the key (`contracts: gone.pdf`).
+- **`links.json`** lists them among `outbound`, and the target's `inbound`
+  carries them, each with `"kind": "frontmatter"` and the `"key"` it sits
+  under. Body links have neither field.
+- **`site.json`** gives each note with frontmatter links a resolved
+  `frontmatter_links` object next to its raw `frontmatter`; see
+  [site.json](../reference/http-api/#frontmatter-links-in-site-json).
+- **Templates** get the same object as `frontmatter_links`; see
+  [Custom Page Templates](custom-page-templates/#links-in-frontmatter).
+
 ## Broken links
 
 Links whose target does not exist are listed in the page-problems panel

@@ -698,6 +698,8 @@ impl QuickLookTarget {
                 slides: rendered.slides.as_ref().map(|s| &s.settings),
                 calendar_nav: None,
                 frontmatter: Some(&rendered.frontmatter_value),
+                // No repository: the render's links, targets assumed to exist.
+                frontmatter_links: Some(&rendered.frontmatter_links),
             },
             &page_context::MarkdownContextOptions {
                 tag_sources: &config.tag_sources,

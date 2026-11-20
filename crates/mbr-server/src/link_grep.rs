@@ -22,6 +22,11 @@
 //! filename stem. Those names are therefore added to the pattern set as well
 //! (gate + wiki regex only — never the inline/reference regexes, where a name
 //! is not a URL).
+//!
+//! Frontmatter links (`customer: "[[Customer X]]"`, `contract: ./msa.pdf`;
+//! see [`mbr_core::frontmatter_links`]) count as they do in the index: each
+//! file's metadata block is read with the core's own rules and then blanked,
+//! so a frontmatter value is never mistaken for a body link.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use papaya::HashMap as ConcurrentHashMap;
@@ -532,6 +537,11 @@ pub fn find_inbound_links(
         .map(|path| wikilink_names_for_target(vault, path))
         .unwrap_or_default();
 
+    let target = GrepTarget {
+        url: target_normalized,
+        names: &target_names,
+    };
+
     // Build Aho-Corasick automatons for each folder (case-insensitive for wiki links)
     let mut folder_automatons: HashMap<String, Option<AhoCorasick>> = HashMap::new();
 
@@ -595,6 +605,30 @@ pub fn find_inbound_links(
                 Err(_) => continue,
             };
 
+            // Frontmatter links (`customer: "[[Customer X]]"`), judged the way
+            // the index judges them, then the frontmatter is blanked so the
+            // body regexes below never read a frontmatter value as a body link.
+            // A file that does not open with a metadata block pays one byte
+            // comparison.
+            let content = match frontmatter_inbound_links(
+                &content,
+                path,
+                source_url_path,
+                &target,
+                markdown_extensions,
+                index_file,
+            ) {
+                Some((links, body)) => {
+                    for link in links {
+                        if !inbound_links.contains(&link) {
+                            inbound_links.push(link);
+                        }
+                    }
+                    body
+                }
+                None => content,
+            };
+
             // Fast check with Aho-Corasick
             if !ac.is_match(&content) {
                 continue;
@@ -618,6 +652,7 @@ pub fn find_inbound_links(
                         from: source_url_path.clone(),
                         text: text.to_string(),
                         anchor,
+                        origin: None,
                     });
                     found_link = true;
                 }
@@ -652,6 +687,7 @@ pub fn find_inbound_links(
                         from: source_url_path.clone(),
                         text,
                         anchor,
+                        origin: None,
                     };
 
                     if !inbound_links.contains(&link) {
@@ -676,6 +712,7 @@ pub fn find_inbound_links(
                                 from: source_url_path.clone(),
                                 text: text.to_string(),
                                 anchor: None,
+                                origin: None,
                             };
                             if !inbound_links.contains(&link) {
                                 inbound_links.push(link);
@@ -713,6 +750,91 @@ pub fn find_inbound_links(
     );
 
     deduplicated_links
+}
+
+/// The page [`find_inbound_links`] looks for: its URL without the trailing
+/// slash, and the bare `[[Name]]` forms that reach it
+/// ([`wikilink_names_for_target`]).
+struct GrepTarget<'a> {
+    url: &'a str,
+    names: &'a [String],
+}
+
+/// The frontmatter links in `content` (a markdown file at `path`, served at
+/// `source_url`) that reach `target`, plus the content with its metadata
+/// block blanked (line structure kept); `None` when the file has no metadata
+/// block.
+///
+/// Agrees with the index ([`mbr_core::frontmatter_links`]), which takes the
+/// same values as links, with one approximation shared with body wikilinks
+/// here: a bare `[[Name]]` matches any of the target's names, where the index
+/// tries the current folder first. A path, or a wikilink naming a path, is
+/// resolved exactly as the index resolves it.
+fn frontmatter_inbound_links(
+    content: &str,
+    path: &VaultPath,
+    source_url: &str,
+    target: &GrepTarget<'_>,
+    markdown_extensions: &[String],
+    index_file: &str,
+) -> Option<(Vec<InboundLink>, String)> {
+    if !content.starts_with("---") && !content.starts_with('\u{feff}') {
+        return None;
+    }
+    let (sources, block) = mbr_core::markdown::frontmatter_link_sources_in(content);
+    if block.is_empty() {
+        return None;
+    }
+    let page = mbr_core::link_transform::LinkTransformConfig {
+        markdown_extensions: markdown_extensions.to_vec(),
+        index_file: index_file.to_string(),
+        is_index_file: path.file_name() == Some(index_file),
+        url_depth: None,
+        current_page_url: source_url.to_string(),
+        directory_url_probe: None,
+        outside_links: None,
+    };
+    let links = mbr_core::frontmatter_links::resolve_frontmatter_links(
+        &sources,
+        &page,
+        &HashSet::new(),
+        None,
+        &mbr_core::frontmatter_links::AssumeTargetsExist,
+    );
+    let inbound = sources
+        .iter()
+        .zip(&links)
+        .filter(|(source, link)| {
+            if source.form == mbr_core::frontmatter_links::FrontmatterLinkForm::Wikilink
+                && !source.destination.contains('/')
+            {
+                let name = source.name().to_lowercase();
+                target.names.iter().any(|n| n.to_lowercase() == name)
+            } else {
+                link.internal && link.target.trim_end_matches('/') == target.url
+            }
+        })
+        .map(|(source, link)| InboundLink {
+            from: source_url.to_string(),
+            text: source.display_text(),
+            anchor: link.anchor.clone(),
+            origin: Some(mbr_core::link_index::LinkOrigin::Frontmatter {
+                key: source.key.clone(),
+            }),
+        })
+        .collect();
+    // Newlines kept so line-anchored regexes see the body where it was.
+    let blanked: String = content[block.clone()]
+        .chars()
+        .map(|c| if c == '\n' { '\n' } else { ' ' })
+        .collect();
+    let body = format!(
+        "{}{}{}",
+        &content[..block.start],
+        blanked,
+        &content[block.end..]
+    );
+    Some((inbound, body))
 }
 
 /// One markdown file of a repository-wide link pass.
@@ -1218,6 +1340,7 @@ mod tests {
             from: "/other/".to_string(),
             text: "Link text".to_string(),
             anchor: None,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links.clone());
@@ -1236,6 +1359,7 @@ mod tests {
             from: "/other/".to_string(),
             text: "Link text".to_string(),
             anchor: None,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links.clone());
@@ -1258,17 +1382,20 @@ mod tests {
             from: "/a/".to_string(),
             text: "A".to_string(),
             anchor: None,
+            origin: None,
         }];
         let two = vec![
             InboundLink {
                 from: "/a/".to_string(),
                 text: "A".to_string(),
                 anchor: None,
+                origin: None,
             },
             InboundLink {
                 from: "/b/".to_string(),
                 text: "B".to_string(),
                 anchor: None,
+                origin: None,
             },
         ];
 
@@ -1290,6 +1417,7 @@ mod tests {
             from: "/other/".to_string(),
             text: "Link".to_string(),
             anchor: None,
+            origin: None,
         }];
 
         cache.insert("/docs/".to_string(), links);
@@ -2080,6 +2208,84 @@ mod tests {
         assert!(
             !grep.iter().any(|(from, _)| from == "/notes/decoy/"),
             "code-fenced link must not be a backlink: {grep:?}"
+        );
+    }
+
+    #[test]
+    fn find_inbound_links_includes_frontmatter_links_like_the_index() {
+        // Frontmatter values that are links count, with their origin; values
+        // that merely contain a link, nested values and reserved keys do not,
+        // and a frontmatter wikilink is not also counted as a body link.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("customers")).unwrap();
+        fs::create_dir_all(root.join("invoices")).unwrap();
+        fs::write(
+            root.join("customers/customer-x.md"),
+            "---\ntitle: Customer X\n---\n# Customer X\n",
+        )
+        .unwrap();
+        // Cross-folder wikilink, by title.
+        fs::write(
+            root.join("invoices/inv-1.md"),
+            "---\ntype: invoice\ncustomer: \"[[Customer X]]\"\n---\nBody.\n",
+        )
+        .unwrap();
+        // A `/`-rooted path in a list, with a label-less wikilink beside it.
+        fs::write(
+            root.join("invoices/inv-2.md"),
+            "---\nrefs:\n  - \"[[Other]]\"\n  - /customers/customer-x.md\n---\n",
+        )
+        .unwrap();
+        // A `../` path, and the same note linked in the body as well.
+        fs::write(
+            root.join("invoices/inv-3.md"),
+            "---\nbill_to: ../customers/customer-x.md\n---\nSee [the customer](../customers/customer-x.md).\n",
+        )
+        .unwrap();
+        // Not links: text around it, nested, reserved key.
+        fs::write(
+            root.join("invoices/decoy.md"),
+            concat!(
+                "---\n",
+                "note: \"see [[Customer X]] later\"\n",
+                "portal:\n  who: \"[[Customer X]]\"\n",
+                "template: /customers/customer-x.md\n",
+                "---\nNo links.\n"
+            ),
+        )
+        .unwrap();
+
+        let links = find_inbound_links(
+            "/customers/customer-x/",
+            &LocalVault::new(root),
+            &["md".to_string()],
+            &[],
+            &[],
+            "index.md",
+        );
+        let got: Vec<(&str, &str, Option<&str>)> = links
+            .iter()
+            .map(|l| {
+                (
+                    l.from.as_str(),
+                    l.text.as_str(),
+                    l.origin.as_ref().map(|o| match o {
+                        mbr_core::link_index::LinkOrigin::Frontmatter { key } => key.as_str(),
+                    }),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/invoices/inv-1/", "Customer X", Some("customer")),
+                ("/invoices/inv-2/", "customer-x.md", Some("refs")),
+                // One per source (the lowest-sorting link survives, as for
+                // body links): here the frontmatter one.
+                ("/invoices/inv-3/", "customer-x.md", Some("bill_to")),
+            ],
+            "{links:?}"
         );
     }
 }
