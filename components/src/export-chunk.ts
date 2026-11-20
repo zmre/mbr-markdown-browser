@@ -6,12 +6,9 @@
  * `window.__MBR_EXPORT__`, so no reader's page ever fetches it.
  */
 import { getMbrAssetBase } from './dynamic-loader.ts'
-import type { ExportDeps } from './export/index.ts'
+import type { ExportChunk } from './export-run.ts'
 
-/** What the chunk exports (`export/index.ts`). */
-export interface ExportChunk {
-  prepareForExport(raw: unknown, deps: ExportDeps): Promise<{ warnings: string[] }>
-}
+export type { ExportChunk } from './export-run.ts'
 
 const defaultImporter = (): Promise<unknown> => {
   const url = new URL(getMbrAssetBase() + 'components/mbr-export.min.js', document.baseURI).href

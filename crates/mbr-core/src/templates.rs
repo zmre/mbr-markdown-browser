@@ -940,6 +940,11 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../templates/_footer_custom.html"),
     ),
     ("_scripts.html", include_str!("../templates/_scripts.html")),
+    // PDF export readiness for templates without `_head.html` (M5).
+    (
+        "_export_ready.html",
+        include_str!("../templates/_export_ready.html"),
+    ),
     // Empty link slots a repository overrides instead of copying the partial
     // around them (docs/customization/templates.md).
     (

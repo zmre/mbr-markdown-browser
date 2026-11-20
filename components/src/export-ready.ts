@@ -7,8 +7,10 @@
  * paper, and posts exactly one `mbr:export-ready:{"warnings":[…]}` or
  * `mbr:export-failed:<message>` through wry's `window.ipc` when it is done —
  * or when the chunk could not be loaded. `window.mbrExportReady()` returns the
- * same promise. Kept to the flag check and the hand-over because every page
- * pays for the main bundle and almost none is ever exported.
+ * same promise. The run itself is `export-run.ts`, shared with the standalone
+ * `mbr-export-ready.min.js` that templates without the main bundle include.
+ * Kept to the flag check and the hand-over because every page pays for the
+ * main bundle and almost none is ever exported.
  *
  * Everything page-scoped the chunk needs (the loaders' settle promises, the
  * asset base, the stylesheet loader) is injected from here: the chunk imports
@@ -20,39 +22,15 @@
  */
 import { getMbrAssetBase, loadCss, waitForDom } from './dynamic-loader.ts'
 import { loadExportChunk } from './export-chunk.ts'
-import {
-  EXPORT_READY_GLOBAL,
-  IPC_EDITOR_STATE_PREFIX,
-  IPC_EXPORT_FAILED_PREFIX,
-  IPC_EXPORT_READY_PREFIX,
-} from './export/contract.ts'
-import type { ExportDeps } from './export/index.ts'
+import { IPC_EDITOR_STATE_PREFIX } from './export/contract.ts'
+import type { ExportDeps, ExportResult } from './export/index.ts'
 import { isExportMode } from './export-mode.ts'
+import { postToHost, resetExportRunForTests, startExportRun } from './export-run.ts'
 import { hljsSettled } from './mbr-hljs.ts'
 import { mathSettled } from './mbr-katex.ts'
 import { mermaidSettled } from './mbr-mermaid.ts'
 import { EDITOR_STATE_EVENT } from './mbr-editor.ts'
 import { isGuiMode } from './shared.ts'
-
-/** Longest failure message sent to Rust, which treats it as text. */
-const MAX_MESSAGE_LENGTH = 300
-
-declare global {
-  interface Window {
-    /** Defined only in export mode; resolves when the page may be printed. */
-    mbrExportReady?: () => Promise<{ warnings: string[] }>
-  }
-}
-
-/** Posts `message` to Rust; a plain browser (no wry) has nothing listening. */
-function postToHost(message: string): void {
-  const ipc = window.ipc
-  if (ipc && typeof ipc.postMessage === 'function') ipc.postMessage(message)
-}
-
-function errorMessage(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).slice(0, MAX_MESSAGE_LENGTH)
-}
 
 /** This page's services, for the chunk. */
 export function exportDeps(): ExportDeps {
@@ -66,29 +44,18 @@ export function exportDeps(): ExportDeps {
   }
 }
 
-/** The run, once per page. */
-let exportRun: Promise<{ warnings: string[] }> | null = null
-
 /**
- * Starts the export run (once): installs `window.mbrExportReady`, loads the
- * chunk, and posts exactly one ready/failed message when it ends.
+ * Starts the export run (once per page): installs `window.mbrExportReady`,
+ * loads the chunk, and posts exactly one ready/failed message when it ends.
+ * `null` when the flag asks for `ready = "load"` (Rust's script signals).
  */
-export function startExportReady(raw: unknown, deps: ExportDeps = exportDeps()): Promise<{ warnings: string[] }> {
-  if (exportRun) return exportRun
-  const run = loadExportChunk().then((chunk) => chunk.prepareForExport(raw, deps))
-  exportRun = run
-  ;(window as unknown as Record<string, unknown>)[EXPORT_READY_GLOBAL] = () => run
-  run.then(
-    (result) => postToHost(IPC_EXPORT_READY_PREFIX + JSON.stringify(result)),
-    (err: unknown) => postToHost(IPC_EXPORT_FAILED_PREFIX + errorMessage(err))
-  )
-  return run
+export function startExportReady(raw: unknown, deps: ExportDeps = exportDeps()): Promise<ExportResult> | null {
+  return startExportRun(raw, deps, loadExportChunk)
 }
 
 /** Test hook: forget the run, so another can start. */
 export function resetExportReadyForTests(): void {
-  exportRun = null
-  delete (window as unknown as Record<string, unknown>)[EXPORT_READY_GLOBAL]
+  resetExportRunForTests()
 }
 
 /**
@@ -106,4 +73,4 @@ export function installEditorStateRelay(): () => void {
 }
 
 installEditorStateRelay()
-if (isExportMode()) void startExportReady(window.__MBR_EXPORT__).catch(() => {})
+if (isExportMode()) void startExportReady(window.__MBR_EXPORT__)?.catch(() => {})

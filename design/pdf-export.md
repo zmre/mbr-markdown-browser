@@ -38,17 +38,26 @@ them with a test.
 
 - **Export flag**, injected by Rust with `with_initialization_script` before
   any page script:
-  `window.__MBR_EXPORT__ = {"links": "strip" | {"base": "<url ending in />"}, "paperWidthIn": <f64>, "paperHeightIn": <f64>, "margin": "<CSS margin shorthand>"}`
-  (`paperWidthIn`/`paperHeightIn` already account for orientation).
+  `window.__MBR_EXPORT__ = {"links": "strip" | {"base": "<url ending in />"}, "paperWidthIn": <f64>, "paperHeightIn": <f64>, "margin": "<CSS margin shorthand>", "ready": "page" | "load"}`
+  (`paperWidthIn`/`paperHeightIn` already account for orientation; `ready`
+  absent = `page`). With `"load"` the init script itself posts an empty
+  ready message on `load` + `document.fonts.ready`, and the page's scripts
+  do not start a run (added 2026-11-19, for templates without mbr's scripts).
 - **Export stylesheet** `/.mbr/export.css` (compiled-in default, overridable
   in `.mbr/`): loaded by the page only in export mode; plus a generated
-  `<style id="mbr-export-page">@page { size: Win Hin; margin: M }</style>`.
-- **Ready**: `window.mbrExportReady(): Promise<{warnings: string[]}>`; the
-  page starts it itself when the flag is set and posts exactly one of
-  `window.ipc.postMessage("mbr:export-ready:" + JSON.stringify({warnings}))` or
+  `<style id="mbr-export-page">@page { size: Win Hin; margin: M }</style>`
+  holding only what the page's own `@page` rules leave out (2026-11-19: a
+  template's `@page` wins).
+- **Ready**: `window.mbrExportReady(): Promise<{warnings: string[], page?: {widthIn, heightIn}}>`; the
+  page starts it itself when the flag is set (main bundle, or
+  `/.mbr/components/mbr-export-ready.min.js` on a template without it) and
+  posts exactly one of
+  `window.ipc.postMessage("mbr:export-ready:" + JSON.stringify({warnings, page?}))` or
   `window.ipc.postMessage("mbr:export-failed:" + message)`. Caps: 10 s for
   images, 15 s for mermaid/math/hljs settle — a cap that fires becomes a
   warning, not a failure. No `requestAnimationFrame` anywhere on this path.
+  `page` is the sheet the page's own `@page { size }` declares; Rust prints on
+  it (WebKit ignores `@page { size }`, so the native paper must match).
 - **Editor state** (GUI windows only, `isGuiMode()`): on every
   `EDITOR_STATE_EVENT` the page posts `mbr:editor-state:open` or
   `mbr:editor-state:closed`. Rust enables Save as PDF… on each new page load

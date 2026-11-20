@@ -146,7 +146,31 @@ describe('the export chunk (export/index.ts)', () => {
   it('stays out of the main bundle: the trigger reaches it only through the loader', () => {
     const modules = chunkModules('export-ready.ts')
     expect(modules.has('export-chunk.ts')).toBe(true)
+    expect(modules.has('export-run.ts')).toBe(true)
     expect(modules.has('export/prepare.ts')).toBe(false)
     expect(modules.has('export/index.ts')).toBe(false)
+  })
+})
+
+describe('the standalone export readiness script (mbr-export-ready.min.js)', () => {
+  it('shares the trigger, imports the chunk at run time, and bundles nothing stateful', () => {
+    const modules = chunkModules('export-ready-standalone-entry.ts')
+    expect(modules.has('export-ready-standalone.ts')).toBe(true)
+    expect(modules.has('export-run.ts')).toBe(true)
+    for (const forbidden of [
+      'export/prepare.ts',
+      'export/index.ts',
+      'shared.ts',
+      'dynamic-loader.ts',
+      'export-ready.ts',
+      'export-chunk.ts',
+      'export-mode.ts',
+      'mbr-mermaid.ts',
+      'mbr-katex.ts',
+      'mbr-hljs.ts',
+      'mbr-editor.ts',
+    ]) {
+      expect(modules.has(forbidden), forbidden).toBe(false)
+    }
   })
 })

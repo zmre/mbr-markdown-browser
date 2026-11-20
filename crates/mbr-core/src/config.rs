@@ -3695,11 +3695,12 @@ mod tests {
 
     #[test]
     fn test_config_read_pdf_table() {
-        use crate::pdf_config::{Orientation, Paper};
+        use crate::pdf_config::{Orientation, Paper, ReadySignal};
         let _guard = env_lock();
         let repo = repo_with_mbr_dir(Some(
             "[pdf]\npaper = \"a4\"\norientation = \"landscape\"\nmargin = \"1cm\"\n\
-             page_numbers = true\nlink_base = \"https://notes.example.com\"\ntimeout_ms = 5000\n",
+             page_numbers = true\nlink_base = \"https://notes.example.com\"\ntimeout_ms = 5000\n\
+             ready = \"load\"\n",
         ));
 
         let config = Config::read(repo.path()).expect("a [pdf] table must load");
@@ -3713,6 +3714,7 @@ mod tests {
             Some("https://notes.example.com/")
         );
         assert_eq!(config.pdf.timeout_ms, 5000);
+        assert_eq!(config.pdf.ready, ReadySignal::Load);
     }
 
     #[test]
@@ -3733,6 +3735,7 @@ mod tests {
             "[pdf]\nmargin = \"1in; color: red\"\n",
             "[pdf]\nlink_base = \"ftp://example.com/\"\n",
             "[pdf]\ntimeout_ms = 0\n",
+            "[pdf]\nready = \"idle\"\n",
         ] {
             let repo = repo_with_mbr_dir(Some(toml));
             assert!(

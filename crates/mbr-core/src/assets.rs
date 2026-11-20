@@ -94,6 +94,13 @@ pub const NOT_FOUND_JS: &[u8] = include_bytes!("../templates/components-js/mbr-n
 /// `window.__MBR_EXPORT__`. Copied by static builds like every always-shipped
 /// chunk, though only the exporter's own server loads it.
 pub const EXPORT_JS: &[u8] = include_bytes!("../templates/components-js/mbr-export.min.js");
+/// PDF export readiness for a page template that does not load the main
+/// bundle (`{% include "/.mbr/_export_ready.html" %}`): in export mode it runs
+/// the same export as `export-ready.ts`, loading [`EXPORT_JS`]; otherwise it
+/// does nothing. A small IIFE, so a `<script defer>` finds the asset base from
+/// its own URL. Ships in static builds.
+pub const EXPORT_READY_JS: &[u8] =
+    include_bytes!("../templates/components-js/mbr-export-ready.min.js");
 
 /// QuickLook's day calendar (design/calendar.md §4.7): a self-contained IIFE
 /// that mbr-ffi's `quicklook.rs` inlines into a preview of a dated note with
@@ -149,6 +156,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ("/components/mbr-calendar.min.js", CALENDAR_JS, JS),
     ("/components/mbr-not-found.min.js", NOT_FOUND_JS, JS),
     ("/components/mbr-export.min.js", EXPORT_JS, JS),
+    ("/components/mbr-export-ready.min.js", EXPORT_READY_JS, JS),
     ("/hljs.dark.css", hljs::HLJS_DARK_CSS, CSS),
     ("/hljs.atom-one-dark.css", hljs::HLJS_ATOM_ONE_DARK_CSS, CSS),
     ("/hljs.js", hljs::HLJS_JS, JS),

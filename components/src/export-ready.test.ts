@@ -35,6 +35,9 @@ import { setExportChunkImporter } from './export-chunk.ts'
 import { EXPORT_FLAG_GLOBAL } from './export-mode.ts'
 import { exportDeps, installEditorStateRelay, resetExportReadyForTests, startExportReady } from './export-ready.ts'
 
+/** A run in `page` mode, which always starts. */
+const start = (raw: unknown) => startExportReady(raw)!
+
 declare const __MBR_PDF_EXPORT_RS__: string | null
 
 const FLAG = { links: 'strip', paperWidthIn: 8.5, paperHeightIn: 11, margin: '0.6in 0.5in' }
@@ -73,7 +76,7 @@ afterEach(() => {
 describe('UNIT startExportReady', () => {
   it('loads the chunk with this page`s services and posts ready exactly once', async () => {
     const posted = stubIpc()
-    await expect(startExportReady(FLAG)).resolves.toEqual({ warnings: [] })
+    await expect(start(FLAG)).resolves.toEqual({ warnings: [] })
     await flush()
 
     expect(importer).toHaveBeenCalledTimes(1)
@@ -82,7 +85,7 @@ describe('UNIT startExportReady', () => {
     for (const settled of [mocks.mermaid, mocks.math, mocks.hljs]) expect(settled).toHaveBeenCalled()
 
     // A second start, or the global, hands back the same run; nothing more is posted.
-    const again = startExportReady(FLAG)
+    const again = start(FLAG)
     const global = (window as unknown as Record<string, () => Promise<unknown>>)[EXPORT_READY_GLOBAL]
     expect(again).toBe(global())
     await again
@@ -95,7 +98,7 @@ describe('UNIT startExportReady', () => {
     const posted = stubIpc()
     vi.useFakeTimers()
     mocks.math.mockReturnValueOnce(new Promise(() => {}))
-    const run = startExportReady(FLAG)
+    const run = start(FLAG)
     await vi.advanceTimersByTimeAsync(15_000)
     const { warnings } = await run
     await vi.advanceTimersByTimeAsync(1)
@@ -106,7 +109,7 @@ describe('UNIT startExportReady', () => {
 
   it('posts failed for a malformed flag, and mbrExportReady rejects', async () => {
     const posted = stubIpc()
-    const run = startExportReady({ ...FLAG, margin: '}' })
+    const run = start({ ...FLAG, margin: '}' })
     await expect(window.mbrExportReady!()).rejects.toThrow(/margin/)
     await expect(run).rejects.toThrow(/margin/)
     await flush()
@@ -118,7 +121,7 @@ describe('UNIT startExportReady', () => {
   it('posts failed when the chunk cannot be loaded', async () => {
     const posted = stubIpc()
     setExportChunkImporter(() => Promise.reject(new Error('Failed to fetch mbr-export.min.js')))
-    await expect(startExportReady(FLAG)).rejects.toThrow()
+    await expect(start(FLAG)).rejects.toThrow()
     await flush()
     expect(posted).toEqual([`${IPC_EXPORT_FAILED_PREFIX}Failed to fetch mbr-export.min.js`])
   })
@@ -126,7 +129,7 @@ describe('UNIT startExportReady', () => {
   it('caps the failure message', async () => {
     const posted = stubIpc()
     setExportChunkImporter(() => Promise.reject(new Error('x'.repeat(5000))))
-    await startExportReady(FLAG).catch(() => {})
+    await start(FLAG).catch(() => {})
     await flush()
     expect(posted[0].length).toBe(IPC_EXPORT_FAILED_PREFIX.length + 300)
   })
@@ -135,13 +138,31 @@ describe('UNIT startExportReady', () => {
     const raf = vi.fn()
     vi.stubGlobal('requestAnimationFrame', raf)
     stubIpc()
-    await startExportReady(FLAG)
+    await start(FLAG)
     await flush()
     expect(raf).not.toHaveBeenCalled()
   })
 
+  it('stays out of a `ready = "load"` export: Rust`s own script signals', async () => {
+    const posted = stubIpc()
+    expect(startExportReady({ ...FLAG, ready: 'load' })).toBeNull()
+    await flush()
+    expect(importer).not.toHaveBeenCalled()
+    expect(posted).toEqual([])
+    expect(window.mbrExportReady).toBeUndefined()
+  })
+
+  it('posts the page`s own @page size with the ready message', async () => {
+    const posted = stubIpc()
+    const page = { widthIn: 5.8268, heightIn: 8.2677 }
+    const deps = { ...exportDeps(), pageBox: () => ({ size: page, margins: new Set<never>() }) }
+    await expect(startExportReady(FLAG, deps)).resolves.toEqual({ warnings: [], page })
+    await flush()
+    expect(posted).toEqual([`${IPC_EXPORT_READY_PREFIX}{"warnings":[],"page":{"widthIn":5.8268,"heightIn":8.2677}}`])
+  })
+
   it('without wry, still resolves (a plain browser posts nowhere)', async () => {
-    await expect(startExportReady(FLAG)).resolves.toEqual({ warnings: [] })
+    await expect(start(FLAG)).resolves.toEqual({ warnings: [] })
   })
 
   it('hands the chunk the main bundle`s loaders', () => {

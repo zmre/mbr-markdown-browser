@@ -115,6 +115,14 @@ pub struct Args {
     #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
     pub pdf_timeout_ms: Option<u64>,
 
+    /// What --pdf waits for before printing: `page` (the page says it is
+    /// ready) or `load` (the load event plus fonts, for a custom page
+    /// template that runs none of mbr's scripts) (default: `[pdf] ready`,
+    /// else page)
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "page|load")]
+    pub pdf_ready: Option<crate::pdf_config::ReadySignal>,
+
     /// Report format for --check-links-only (default: markdown)
     // Checked in `Args::parse_checked`, not with `requires`: a `bool` flag
     // has a default value (`false`), which satisfies clap's `requires`.
@@ -346,6 +354,7 @@ impl Args {
             },
             link_base: self.pdf_link_base.clone(),
             timeout_ms: self.pdf_timeout_ms,
+            ready: self.pdf_ready,
         }
     }
 
@@ -561,6 +570,8 @@ mod tests {
             pdf_link_base: None,
             #[cfg(feature = "gui")]
             pdf_timeout_ms: None,
+            #[cfg(feature = "gui")]
+            pdf_ready: None,
             check_links_only: false,
             format: None,
             output: None,
@@ -1325,6 +1336,8 @@ mod tests {
                 "https://notes.example.com",
                 "--pdf-timeout-ms",
                 "5000",
+                "--pdf-ready",
+                "load",
                 "--output",
                 "-",
                 "note.md",
@@ -1342,6 +1355,7 @@ mod tests {
                 Some("https://notes.example.com/")
             );
             assert_eq!(flags.timeout_ms, Some(5000));
+            assert_eq!(flags.ready, Some(crate::pdf_config::ReadySignal::Load));
             assert_eq!(args.output, Some(PathBuf::from("-")));
         }
 
@@ -1405,6 +1419,7 @@ mod tests {
                 ["mbr", "--pdf", "--pdf-margin", "1in;x"],
                 ["mbr", "--pdf", "--pdf-link-base", "ftp://x/"],
                 ["mbr", "--pdf", "--pdf-timeout-ms", "0"],
+                ["mbr", "--pdf", "--pdf-ready", "idle"],
             ] {
                 assert!(Args::try_parse_from(argv).is_err(), "{argv:?}");
             }
@@ -1419,6 +1434,7 @@ mod tests {
                 &["--no-pdf-page-numbers"],
                 &["--pdf-paper", "a4"],
                 &["--pdf-timeout-ms", "10"],
+                &["--pdf-ready", "load"],
             ] {
                 let argv: Vec<&str> = ["mbr", "-s"].iter().chain(flag).copied().collect();
                 let args = Args::try_parse_from(argv).expect("parses");

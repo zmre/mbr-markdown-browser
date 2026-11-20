@@ -10,6 +10,7 @@ import {
   type ExportDeps,
   type LinkPolicy,
 } from './prepare.ts'
+import { MARGIN_SIDES } from './page-box.ts'
 
 /** The services the main-bundle trigger injects, as spies. */
 const mocks = {
@@ -66,7 +67,10 @@ describe('UNIT parseExportOptions', () => {
       paperWidthIn: 8.5,
       paperHeightIn: 11,
       margin: '0.6in 0.5in',
+      ready: 'page',
     })
+    expect(parseExportOptions({ ...FLAG, ready: 'load' }).ready).toBe('load')
+    expect(parseExportOptions({ ...FLAG, ready: 'page' }).ready).toBe('page')
     const based = parseExportOptions({ ...FLAG, links: { base: 'https://notes.example.com/' } })
     expect(based.links).toEqual({ kind: 'base', base: new URL('https://notes.example.com/') })
   })
@@ -80,6 +84,7 @@ describe('UNIT parseExportOptions', () => {
     ['string height', { ...FLAG, paperHeightIn: '11' }],
     ['margin escaping its rule', { ...FLAG, margin: '0 } body { display: none' }],
     ['margin closing the style', { ...FLAG, margin: '</style>' }],
+    ['unknown ready signal', { ...FLAG, ready: 'idle' }],
   ])('refuses %s', (_name, raw) => {
     expect(() => parseExportOptions(raw)).toThrow()
   })
@@ -87,6 +92,18 @@ describe('UNIT parseExportOptions', () => {
   it('writes the @page rule from the options', () => {
     expect(pageRule(parseExportOptions({ ...FLAG, paperWidthIn: 11.69, paperHeightIn: 8.27 }))).toBe(
       '@page { size: 11.69in 8.27in; margin: 0.6in 0.5in }'
+    )
+  })
+
+  it('leaves out what the page declares itself', () => {
+    const options = parseExportOptions(FLAG)
+    const size = { widthIn: 5.83, heightIn: 8.27 }
+    expect(pageRule(options, { size, margins: new Set() })).toBe('@page { margin: 0.6in 0.5in }')
+    expect(pageRule(options, { size: null, margins: new Set(MARGIN_SIDES) })).toBe('@page { size: 8.5in 11in }')
+    expect(pageRule(options, { size, margins: new Set(MARGIN_SIDES) })).toBe('')
+    // One side declared: the other three still come from the configuration.
+    expect(pageRule(options, { size, margins: new Set(['margin-top'] as const) })).toBe(
+      '@page { margin-right: 0.5in; margin-bottom: 0.6in; margin-left: 0.5in }'
     )
   })
 })
@@ -176,6 +193,25 @@ describe('UNIT prepareForExport', () => {
     expect(img.getAttribute('loading')).toBe('eager')
     expect(document.querySelector('a')!.hasAttribute('href')).toBe(false)
     for (const settled of [mocks.mermaid, mocks.math, mocks.hljs]) expect(settled).toHaveBeenCalled()
+  })
+
+  it('lets the page`s own @page win: reports its size, leaves its margins alone', async () => {
+    const pageBox = vi.fn(() => ({ size: { widthIn: 5.826771, heightIn: 8.267716 }, margins: new Set(MARGIN_SIDES) }))
+    await expect(prepareForExport(FLAG, deps({ pageBox }))).resolves.toEqual({
+      warnings: [],
+      page: { widthIn: 5.8268, heightIn: 8.2677 },
+    })
+    expect(pageBox).toHaveBeenCalledTimes(1)
+    // Nothing left to generate.
+    expect(document.getElementById(EXPORT_PAGE_STYLE_ID)).toBeNull()
+  })
+
+  it('reads the page box from the document by default (no @page in happy-dom: nothing declared)', async () => {
+    document.head.innerHTML = '<style>body { color: black }</style>'
+    await expect(prepareForExport(FLAG, deps())).resolves.toEqual({ warnings: [] })
+    expect(document.getElementById(EXPORT_PAGE_STYLE_ID)?.textContent).toBe(
+      '@page { size: 8.5in 11in; margin: 0.6in 0.5in }'
+    )
   })
 
   it('rejects a malformed flag before touching the page', async () => {

@@ -1152,6 +1152,35 @@
               '';
             });
 
+          # Lint the library the way a host application links it:
+          # `mbr-markdown-browser = { default-features = false, features = ["gui"] }`
+          # (`gui` implies `server`), for an app that merges mbr's router into
+          # its own server and exports PDFs through `pdf_export::ExportSession`
+          # on its own tao event loop. That build must never need ffmpeg or
+          # pdfium, so the dependency tree is checked for them first.
+          #
+          # Shares `cargoArtifactsMinimal`: this feature set is a subset of
+          # `minimalFeatures` (no cli, ssg, watcher), so most of the
+          # dependency tree is already compiled there.
+          clippy-gui-lib = craneLib.cargoClippy (commonArgs
+            // {
+              cargoArtifacts = cargoArtifactsMinimal;
+              pname = "mbr-gui-lib";
+              cargoExtraArgs = "--locked -p mbr-markdown-browser --no-default-features --features gui";
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+
+              preBuild = ''
+                tree=$(cargo tree --locked --offline -p mbr-markdown-browser \
+                  --no-default-features --features gui -e normal,build --prefix none)
+                if printf '%s\n' "$tree" | grep -E '^(ffmpeg|pdfium)'; then
+                  echo "FATAL: the gui-only library (a host application's build) depends on ffmpeg or pdfium" >&2
+                  exit 1
+                fi
+                mkdir -p crates/mbr-core/templates/components-js
+                cp -r ${packages.mbr-components}/* crates/mbr-core/templates/components-js/
+              '';
+            });
+
           # Format check
           fmt = craneLib.cargoFmt {
             inherit src;
@@ -1427,7 +1456,7 @@
       # Checks run by `nix flake check`
       checks =
         {
-          inherit (packages) mbr-cli clippy fmt cargo-sort tests clippy-minimal tests-minimal;
+          inherit (packages) mbr-cli clippy fmt cargo-sort tests clippy-minimal tests-minimal clippy-gui-lib;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           inherit (packages) swiftfmt swiftlint-check mbr;

@@ -79,6 +79,7 @@ Supported media types are detected by file extension:
 | `--no-pdf-page-numbers` | No header or footer with `--pdf`, overriding `page_numbers = true` in `[pdf]`. Conflicts with `--pdf-page-numbers` | `[pdf] page_numbers` (off) |
 | `--pdf-link-base <URL>` | Rewrite links to other notes onto this published site (`http(s)`, no query or fragment; a trailing `/` is added) instead of removing them | `[pdf] link_base`, else links removed |
 | `--pdf-timeout-ms <MS>` | How long `--pdf` waits for the page to finish rendering before exporting it anyway (≥ 1) | `[pdf] timeout_ms`, else `30000` |
+| `--pdf-ready <page\|load>` | What `--pdf` waits for: `page`, the page's own ready signal (images, diagrams, math, fonts); `load`, the `load` event plus fonts, for a custom page template that runs none of mbr's scripts | `[pdf] ready`, else `page` |
 | `--skip-link-checks` | Skip internal link validation during build | `false` |
 | `--fail-on-broken-links` | Exit with a non-zero status if the static build (`-b`) finds broken internal links. For CI. No effect with `--skip-link-checks` (the build warns on stderr when both are set, since the combination disables the gate). | `false` |
 | `--no-link-tracking` | Disable bidirectional link tracking | `false` |
@@ -330,7 +331,7 @@ an incompatible change):
 mbr --pdf [--output <FILE|FOLDER|->] [--pdf-paper <PAPER>]
           [--pdf-landscape | --pdf-portrait] [--pdf-margin <MARGIN>]
           [--pdf-page-numbers | --no-pdf-page-numbers] [--pdf-link-base <URL>]
-          [--pdf-timeout-ms <MS>] <NOTE>
+          [--pdf-timeout-ms <MS>] [--pdf-ready <page|load>] <NOTE>
 ```
 
 Writes a paginated PDF of `NOTE` as mbr renders it (diagrams, math, code

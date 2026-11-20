@@ -151,6 +151,14 @@ objc2-web-kit = { version = "0.3.2", default-features = false }
 # (`STATUS_ENTRYPOINT_NOT_FOUND`), for every invocation, not just the ones
 # that show the dialog. See `open_picker.rs`'s module doc comment.
 rfd = "0.17"
+# EMBEDDING CONTRACT: wry and tao (`wry` below) are part of this library's
+# public API. A host application exports PDFs with
+# `pdf_export::ExportSession::start(&EventLoopWindowTarget<T>, …)`, passing a
+# window target from its own tao event loop, so the host must depend on the
+# same tao (and the wry it implies) as this crate: today tao 0.37 and wry 0.57.
+# Bump them together, and treat a bump as a breaking change for hosts
+# (Ledgeline Invoicer moves with mbr). See docs/features/pdf-export.md,
+# "Exporting PDFs from a host application".
 tao = "0.37.0"
 # `pdf_export`'s Linux backend: `webkit2gtk::PrintOperation`. Already in the
 # tree at exactly this version via wry, so naming it adds no crate.
@@ -161,6 +169,7 @@ webkit2gtk = "2.0.2"
 webview2-com = "0.39.1"
 windows = { version = "0.62.2", default-features = false }
 windows-sys = "0.61.2"
+# Embedding contract: moves with tao above (a host's event loop is passed in).
 wry = { version = "0.57", features = ["devtools"] }
 
 # Dev/bench only.

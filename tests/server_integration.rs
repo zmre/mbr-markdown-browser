@@ -12107,6 +12107,44 @@ async fn test_page_template_renders_the_note() {
     assert_html_not_contains(&html, "<mbr-browse");
 }
 
+/// A chrome-free template (no `_head.html`) includes mbr's PDF export
+/// readiness partial; the script it names is served from `/.mbr/`, as
+/// JavaScript, and is the standalone one (it loads the export chunk and posts
+/// the same ready message).
+#[tokio::test]
+async fn test_page_template_export_ready_partial_and_script_are_served() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "invoices/a.md",
+        "---\ntitle: A\ntemplate: bare.html\n---\n\nBody\n",
+    );
+    repo.create_static_file(
+        "invoices/bare.html",
+        b"<!doctype html><html><head>{% include \"/.mbr/_export_ready.html\" %}</head><body>{{ markdown | safe }}</body></html>",
+    );
+    let server = TestServer::start(&repo).await;
+
+    let html = server.get_text("/invoices/a/").await;
+    assert_html_contains(
+        &html,
+        "<script defer src=\"&#x2F;.mbr&#x2F;components/mbr-export-ready.min.js\"></script>",
+    );
+    assert_html_not_contains(&html, "pico.min.css");
+
+    let response = server.get("/.mbr/components/mbr-export-ready.min.js").await;
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(content_type.contains("javascript"), "{content_type}");
+    let script = response.text().await.unwrap();
+    assert!(script.contains("mbr-export.min.js"), "{script}");
+    assert!(script.contains("mbr:export-ready:"), "{script}");
+}
+
 #[tokio::test]
 async fn test_page_template_file_is_not_served_or_listed() {
     let repo = page_template_repo();
