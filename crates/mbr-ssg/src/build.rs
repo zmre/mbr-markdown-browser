@@ -2260,6 +2260,13 @@ impl Builder {
                 continue;
             }
 
+            // Skip `<mbr-markdown-field>`: no mbr page loads it. It is for a
+            // host app serving mbr's router, and a static site has neither a
+            // host to embed it nor anywhere to save what it edits.
+            if *route == mbr_core::assets::MARKDOWN_FIELD_ROUTE {
+                continue;
+            }
+
             // Strip leading / from route to get filename
             let filename = route.trim_start_matches('/');
             let output_path = mbr_output.join(filename);

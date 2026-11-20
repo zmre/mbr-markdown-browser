@@ -3933,6 +3933,35 @@ async fn test_graph_chunks_served() {
 }
 
 #[tokio::test]
+async fn test_markdown_field_bundle_served() {
+    // `<mbr-markdown-field>` is loaded by host apps, not by mbr's pages, at
+    // this exact URL (docs/customization/markdown-field.md): a self-defining
+    // ES module served as JavaScript.
+    let repo = TestRepo::new();
+    let server = TestServer::start(&repo).await;
+
+    let path = "/.mbr/components/mbr-markdown-field.min.js";
+    let response = server.get(path).await;
+    assert_eq!(response.status(), 200, "{path} should be served");
+    let content_type = response.headers().get("content-type").unwrap();
+    assert!(
+        content_type.to_str().unwrap().contains("javascript"),
+        "{path} should have javascript content type"
+    );
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("mbr-markdown-field"),
+        "{path} should define <mbr-markdown-field>"
+    );
+
+    // No mbr page loads it: the main bundle never names it.
+    let main = server
+        .get_text("/.mbr/components/mbr-components.min.js")
+        .await;
+    assert!(!main.contains("mbr-markdown-field"));
+}
+
+#[tokio::test]
 async fn test_components_js_bundle_no_missing_imports() {
     // This test verifies that the JS bundle doesn't try to dynamically import
     // files that aren't served, which would cause 404 errors in the browser.

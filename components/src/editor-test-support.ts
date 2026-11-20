@@ -4,11 +4,11 @@
  *
  * Not a test file itself (no `.test.ts`), and nothing in a bundle imports it.
  */
-import { Crepe } from '@milkdown/crepe';
+import type { Crepe } from '@milkdown/crepe';
 import { editorViewCtx, remarkCtx } from '@milkdown/kit/core';
 import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
-import { CREPE_FEATURE_CONFIGS, CREPE_FEATURES, serializeBody, useMarkdownExtensions } from './editor-crepe.js';
+import { createMarkdownCrepe, serializeBody } from './editor-core.js';
 import { documentToSave, openDocument } from './editor-frontmatter.js';
 import { openFrontmatter } from './frontmatter/model.js';
 import { mdastOutline, type MdastNode, type OutlineNode } from './editor-outline.js';
@@ -33,8 +33,7 @@ const open: Crepe[] = [];
 export async function openCrepe(body: string): Promise<Crepe> {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  const crepe = new Crepe({ root, defaultValue: body, features: CREPE_FEATURES, featureConfigs: CREPE_FEATURE_CONFIGS });
-  useMarkdownExtensions(crepe);
+  const crepe = createMarkdownCrepe({ root, body });
   await crepe.create();
   open.push(crepe);
   return crepe;

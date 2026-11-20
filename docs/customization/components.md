@@ -19,6 +19,12 @@ mbr uses [Lit](https://lit.dev/) web components for interactive features. You ca
 | `mbr-live-reload` | Development hot reload | `<mbr-live-reload>` |
 | `mbr-video-extras` | Video player enhancements | `<mbr-video-extras>` |
 
+## Embedding the editor in another app
+
+`<mbr-markdown-field>` is the in-browser editor as a standalone form field,
+for apps that edit markdown in their own UI and save it themselves. See
+[Embedding the Markdown Field](markdown-field.md).
+
 ## Component Architecture
 
 ```mermaid
@@ -59,6 +65,7 @@ At the moment, we're bundling all the always-on components together in `mbr-comp
 | `mbr-flashcards-reading.min.js` | Collapsed review-history summaries and the progress borders/pies on flashcard pages | At idle, on a `type: flashcard` page |
 | `mbr-calendar.min.js` | The daily-note companion (mini month, day agenda, notes from this day) and the agenda time chips | At idle, on a periodic note or a note with time-prefixed bullets; else on `C` or the calendar button |
 | `mbr-not-found.min.js` | Where a missing page probably went: the 404 page's suggestions and the page-problems panel's "Did you mean" links | On a 404 page; when the page-problems panel first opens with broken links |
+| `mbr-markdown-field.min.js` | `<mbr-markdown-field>`, the editor as a form field for other apps (server/GUI only; not written to static builds) | Never by mbr's own pages: a host app loads it. See [Embedding the Markdown Field](markdown-field.md) |
 
 Start with the source components and make your own `mbr-components.min.js` for now. At some point we'll come back and make this easier to selectively override and maybe dynamically bundle and combine (or at static build time) for efficiency.
 

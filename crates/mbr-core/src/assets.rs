@@ -36,6 +36,15 @@ pub const REVIEW_CHUNK_ROUTE: &str = "/components/mbr-review.min.js";
 /// because static search is Pagefind, which has neither facets nor folders.
 pub const SEARCH_EXTRAS_CHUNK_ROUTE: &str = "/components/mbr-search-extras.min.js";
 
+/// [`DEFAULT_FILES`] route of `<mbr-markdown-field>`, the editor as an
+/// embeddable form field (`docs/customization/markdown-field.md`).
+///
+/// Not loaded by any mbr page: it is for a host app that serves mbr's router
+/// and edits markdown in its own UI, so it is served under `/.mbr/` and
+/// skipped by `build.rs` — a static site has no host to embed it and no way to
+/// save what it edits.
+pub const MARKDOWN_FIELD_ROUTE: &str = "/components/mbr-markdown-field.min.js";
+
 const JS: &str = "application/javascript";
 const CSS: &str = "text/css";
 
@@ -50,6 +59,10 @@ pub const EXPORT_CSS: &[u8] = include_bytes!("../templates/export.css");
 pub const COMPONENTS_JS: &[u8] = include_bytes!("../templates/components-js/mbr-components.min.js");
 /// Heavy Milkdown/Crepe editor chunk, lazy-loaded by `<mbr-editor>`.
 pub const EDITOR_JS: &[u8] = include_bytes!("../templates/components-js/mbr-editor.min.js");
+/// `<mbr-markdown-field>`: the editor core of [`EDITOR_JS`] as a standalone
+/// form-field element for host apps. See [`MARKDOWN_FIELD_ROUTE`].
+pub const MARKDOWN_FIELD_JS: &[u8] =
+    include_bytes!("../templates/components-js/mbr-markdown-field.min.js");
 /// Sidebar mini force-graph chunk (d3-force), lazy-loaded by `<mbr-info>` when
 /// the info panel first opens.
 pub const GRAPH_JS: &[u8] = include_bytes!("../templates/components-js/mbr-graph.min.js");
@@ -135,6 +148,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ("/pico.min.css", embedded_pico::PICO_DEFAULT, CSS),
     ("/components/mbr-components.min.js", COMPONENTS_JS, JS),
     ("/components/mbr-editor.min.js", EDITOR_JS, JS),
+    (MARKDOWN_FIELD_ROUTE, MARKDOWN_FIELD_JS, JS),
     ("/components/mbr-graph.min.js", GRAPH_JS, JS),
     ("/components/mbr-genealogy.min.js", GENEALOGY_JS, JS),
     (TASKS_CHUNK_ROUTE, TASKS_JS, JS),
@@ -219,6 +233,7 @@ mod tests {
             TASKS_CHUNK_ROUTE,
             REVIEW_CHUNK_ROUTE,
             SEARCH_EXTRAS_CHUNK_ROUTE,
+            MARKDOWN_FIELD_ROUTE,
         ] {
             assert!(default_file(route).is_some(), "{route} missing");
         }
@@ -253,6 +268,22 @@ mod tests {
             default_file("/components/mbr-export.min.js"),
             Some((EXPORT_JS, JS))
         );
+    }
+
+    /// A host app loads the field by this URL (`docs/customization/markdown-field.md`),
+    /// as an ES module that defines the element itself.
+    #[test]
+    fn markdown_field_is_served_as_a_self_defining_module() {
+        assert_eq!(
+            MARKDOWN_FIELD_ROUTE,
+            "/components/mbr-markdown-field.min.js"
+        );
+        let (bytes, mime) = default_file(MARKDOWN_FIELD_ROUTE).expect("in the table");
+        assert_eq!((bytes, mime), (MARKDOWN_FIELD_JS, JS));
+        let text = std::str::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains("mbr-markdown-field"));
+        assert!(text.contains("customElements"));
+        assert!(!text.contains("sourceMappingURL"));
     }
 
     #[test]
