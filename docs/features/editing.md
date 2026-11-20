@@ -19,6 +19,10 @@ opens a [Milkdown/Crepe](https://milkdown.dev/) editor for the current file.
 
 *The editor (`e`) edits the note in place; Save writes the markdown back to disk.*
 
+Building another app that edits markdown? The same editor is available as a
+standalone form field, `<mbr-markdown-field>`, which leaves saving to your app.
+See [Embedding the Markdown Field](../customization/markdown-field.md).
+
 > [!WARNING]
 > Editing writes to your files. Only enable it on repositories you intend to
 > modify, and read the [security model](#security-model) before exposing it

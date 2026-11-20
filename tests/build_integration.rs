@@ -2597,6 +2597,28 @@ async fn test_build_omits_the_search_extras_chunk() {
 }
 
 #[tokio::test]
+async fn test_build_omits_the_markdown_field_bundle() {
+    // `<mbr-markdown-field>` is for host apps serving mbr's router; no built
+    // page loads it, and a static site has nowhere to save what it edits.
+    let repo = TestRepo::new();
+    repo.create_markdown("test.md", "# Test\n\nBody.\n");
+
+    let output = build_site(&repo).await;
+
+    let components = output.join(".mbr").join("components");
+    assert!(
+        components.join("mbr-components.min.js").exists(),
+        "the main bundle is still written"
+    );
+    let bundle = components.join("mbr-markdown-field.min.js");
+    assert!(
+        !bundle.exists(),
+        "the markdown-field bundle must not be written to a static build: {}",
+        bundle.display()
+    );
+}
+
+#[tokio::test]
 async fn test_build_body_wikilink_resolves_globally() {
     let repo = TestRepo::new();
     // Target file in one folder; referencing page in a *different* folder.
