@@ -18,6 +18,8 @@ import { resolve } from 'node:path'
 //     imports) and only uses it for its CodeMirror feature, which we disable in
 //     editor-crepe.ts. Stubbing it removes that whole graph — the bulk of the
 //     bundle size and the inlined dynamic-import init-order breakage.
+//   - `resolve.alias` of `katex` → a throwing stub: Crepe imports it only for
+//     its LaTeX feature, also disabled (see src/editor-stubs/katex.ts).
 //   - `define` of `process.env.NODE_ENV`: Crepe depends on Vue's esm-bundler
 //     build, which references it and misbehaves if a bundler leaves it
 //     unreplaced (library mode does not inject it automatically).
@@ -34,6 +36,7 @@ export default {
         import.meta.dirname,
         'src/editor-stubs/codemirror-language-data.ts',
       ),
+      katex: resolve(import.meta.dirname, 'src/editor-stubs/katex.ts'),
     },
   },
   build: {
