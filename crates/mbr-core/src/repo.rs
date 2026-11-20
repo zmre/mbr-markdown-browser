@@ -2096,6 +2096,11 @@ impl Repo {
     /// Call this after surgical file invalidation when tags may have changed
     /// (e.g., after deleting or modifying markdown files).
     /// Returns the configured tag sources.
+    /// The configured markdown file extensions.
+    pub fn markdown_extensions(&self) -> &[String] {
+        &self.markdown_extensions
+    }
+
     pub fn tag_sources(&self) -> &[TagSource] {
         &self.tag_sources
     }
@@ -2557,6 +2562,27 @@ impl Repo {
         let probe = self.directory_url_probe();
         let outside_links = crate::outside_link::OutsideLinkContext::for_repo(self);
         self.resolve_note_frontmatter_links(info, &probe, &outside_links, &self.link_lookup())
+    }
+
+    /// Resolves link `sources` as if written in the frontmatter of the note
+    /// `info`: the machinery [`Self::frontmatter_links_of`] uses, for sources
+    /// that are not (or not only) the note's own (`mbr_core::site::Site::resolve_wikilink`).
+    pub fn resolve_link_sources(
+        &self,
+        info: &MarkdownInfo,
+        sources: &[crate::frontmatter_links::FrontmatterLinkSource],
+    ) -> Vec<crate::frontmatter_links::FrontmatterLink> {
+        crate::frontmatter_links::resolve_frontmatter_links(
+            sources,
+            &self.note_link_config(
+                info,
+                &self.directory_url_probe(),
+                &crate::outside_link::OutsideLinkContext::for_repo(self),
+            ),
+            &crate::config::tag_sources_to_set(&self.tag_sources),
+            Some(&self.wikilink_index),
+            &self.link_lookup(),
+        )
     }
 
     fn resolve_note_frontmatter_links(

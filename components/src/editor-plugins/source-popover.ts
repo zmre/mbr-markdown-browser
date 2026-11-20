@@ -9,6 +9,8 @@
  * document-level `Escape` (which closes the whole editor) never sees it.
  */
 
+import { popoverHostFor } from './popover-host.js';
+
 const STYLE_ID = 'mbr-source-popover-style';
 
 const POPOVER_CSS = `
@@ -79,7 +81,7 @@ export function openSourcePopover(options: SourcePopoverOptions): () => void {
   hint.textContent = options.hint;
   label.appendChild(input);
   root.append(label, hint);
-  document.body.appendChild(root);
+  popoverHostFor(options.anchor).appendChild(root);
 
   const rect = options.anchor.getBoundingClientRect();
   const width = root.offsetWidth || 256;

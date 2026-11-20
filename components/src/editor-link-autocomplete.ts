@@ -26,6 +26,7 @@ import { fuzzyFilter } from './fuzzy.js';
 import { relativeUrlPath, encodeLinkDestination } from './editor-picker-shared.js';
 import { buildLinkTargets, type LinkTarget } from './link-targets.js';
 import { wikilinkNode } from './editor-plugins/wikilinks.js';
+import { popoverHostFor } from './editor-plugins/popover-host.js';
 
 /** Minimal markdown-file shape read from site.json. */
 export interface LinkAutocompleteSite {
@@ -126,7 +127,7 @@ export function createLinkAutocompletePlugin(services: LinkAutocompleteServices)
             popup = document.createElement('div');
             popup.className = 'mbr-autocomplete';
             popup.setAttribute('role', 'listbox');
-            document.body.appendChild(popup);
+            popoverHostFor(view.dom).appendChild(popup);
           }
           popup.textContent = '';
 
