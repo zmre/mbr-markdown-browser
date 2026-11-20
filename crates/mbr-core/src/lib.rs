@@ -41,6 +41,7 @@ pub mod agenda;
 pub mod assets;
 pub mod attrs;
 pub mod audio;
+pub mod backlinks;
 pub mod cache;
 pub mod calendar;
 pub mod change_event;
@@ -83,6 +84,7 @@ pub mod readability;
 pub mod relationships;
 pub mod repo;
 pub mod search;
+pub mod site;
 pub mod slides;
 pub mod sorting;
 pub mod tag_index;
@@ -120,6 +122,7 @@ pub use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd,
 };
 pub use search::{SearchEngine, SearchQuery, SearchResponse, SearchResult, SearchScope};
+pub use site::{NoteData, NoteSummary, Site};
 pub use sorting::sort_files;
 pub use task_index::{FileTasks, TaskIndex};
 pub use task_query::{

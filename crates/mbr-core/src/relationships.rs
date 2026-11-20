@@ -954,8 +954,13 @@ fn parse_relationship_map(map: &yaml_rust2::yaml::Hash) -> Vec<RawRelationship> 
 }
 
 /// Converts a `yaml_rust2::Yaml` value to a `serde_json::Value`, preserving
-/// structure (used for free-form edge attributes and the contact model).
-pub(crate) fn yaml_to_json(y: &Yaml) -> serde_json::Value {
+/// structure: the lossless converter behind every page's `frontmatter`
+/// template variable ([`crate::markdown::lossless_frontmatter`]), free-form
+/// edge attributes and the contact model. Maps stay maps (keys as strings,
+/// an integer key as its digits), lists stay lists, integers and floats stay
+/// numbers (a float that is not finite becomes its text), and `null`, a bad
+/// value and an alias become `null`. Also `mbr_core::markdown::yaml_to_json`.
+pub fn yaml_to_json(y: &Yaml) -> serde_json::Value {
     use serde_json::Value;
     match y {
         Yaml::String(s) => Value::String(s.clone()),

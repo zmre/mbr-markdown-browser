@@ -12422,3 +12422,207 @@ async fn test_frontmatter_links_in_site_json_page_template_and_errors_json() {
     assert_eq!(broken[0]["target"], "/customers/contracts/gone.pdf");
     assert_eq!(broken[0]["text"], "contracts: gone.pdf");
 }
+
+// ============================================================================
+// Note index API (`/.mbr/notes`, `/.mbr/fields/{key}/values`)
+// ============================================================================
+
+fn customers_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "customers/acme.md",
+        concat!(
+            "---\n",
+            "title: Acme\n",
+            "type: organization\n",
+            "tags: [customer]\n",
+            "terms: 30\n",
+            "emails:\n  - billing: ar@acme.example\n",
+            "billing_portal:\n  name: Coupa\n",
+            "---\n"
+        ),
+    );
+    repo.create_markdown(
+        "customers/globex.md",
+        "---\ntitle: Globex\ntype: Organization\ntags: [customer, prospect]\nterms: 45\n---\n",
+    );
+    repo.create_markdown("notes/plain.md", "---\ntype: note\nterms: 30\n---\n");
+    repo
+}
+
+#[tokio::test]
+async fn test_notes_endpoint_lists_a_type_with_lossless_fields() {
+    let repo = customers_repo();
+    let server = TestServer::start(&repo).await;
+
+    let json = get_json(
+        &server,
+        "/.mbr/notes?type=organization&fields=terms,billing_portal.name,missing",
+    )
+    .await;
+    let notes = json["notes"].as_array().expect("notes");
+    let summary: Vec<(&str, &str, &serde_json::Value)> = notes
+        .iter()
+        .map(|n| {
+            (
+                n["path"].as_str().unwrap(),
+                n["title"].as_str().unwrap(),
+                &n["fields"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "customers/acme.md",
+                "Acme",
+                &serde_json::json!({"terms": 30, "billing_portal.name": "Coupa"})
+            ),
+            (
+                "customers/globex.md",
+                "Globex",
+                &serde_json::json!({"terms": 45})
+            ),
+        ]
+    );
+    assert_eq!(notes[0]["url"], "/customers/acme/");
+    assert_eq!(notes[0]["type"], "organization");
+    assert_eq!(
+        notes[1]["tags"],
+        serde_json::json!(["customer", "prospect"])
+    );
+
+    // No type: every note; no fields: an empty object each.
+    let all = get_json(&server, "/.mbr/notes").await;
+    assert_eq!(all["notes"].as_array().unwrap().len(), 3);
+    assert_eq!(all["notes"][0]["fields"], serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn test_field_values_endpoint_counts_values_most_used_first() {
+    let repo = customers_repo();
+    let server = TestServer::start(&repo).await;
+
+    let json = get_json(&server, "/.mbr/fields/terms/values").await;
+    assert_eq!(json["key"], "terms");
+    assert_eq!(
+        json["values"],
+        serde_json::json!([{"value": 30, "count": 2}, {"value": 45, "count": 1}])
+    );
+    let tags = get_json(&server, "/.mbr/fields/tags/values").await;
+    assert_eq!(
+        tags["values"],
+        serde_json::json!([{"value": "customer", "count": 2}, {"value": "prospect", "count": 1}])
+    );
+    let nested = get_json(&server, "/.mbr/fields/billing_portal.name/values").await;
+    assert_eq!(
+        nested["values"],
+        serde_json::json!([{"value": "Coupa", "count": 1}])
+    );
+}
+
+/// Private contact fields (`emails`, …) are left out of site.json, so the
+/// note API shows them only to a request that may edit: editing on, the
+/// `X-MBR-Edit` header, same origin, and the token when one is configured.
+#[tokio::test]
+async fn test_note_api_private_contact_fields_need_edit_access() {
+    // Editing off (the server default): never.
+    let repo = customers_repo();
+    let server = TestServer::start(&repo).await;
+    let refused = server
+        .client
+        .get(server.url("/.mbr/notes?type=organization&fields=emails"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+    let values = server
+        .client
+        .get(server.url("/.mbr/fields/emails/values"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(values.status(), 403);
+    // Public fields stay open.
+    assert_eq!(server.get("/.mbr/notes?fields=terms").await.status(), 200);
+
+    // Editing on, loopback, no token configured (the GUI): with the header.
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.edit_enabled = true;
+    })
+    .await;
+    let without_header = server.get("/.mbr/notes?fields=emails").await;
+    assert_eq!(without_header.status(), 403, "X-MBR-Edit is required");
+    let ok = server
+        .client
+        .get(server.url("/.mbr/notes?type=organization&fields=emails"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let json: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(
+        json["notes"][0]["fields"]["emails"],
+        serde_json::json!([{"billing": "ar@acme.example"}])
+    );
+    let cross_origin = server
+        .client
+        .get(server.url("/.mbr/notes?fields=emails"))
+        .header("X-MBR-Edit", "1")
+        .header("Origin", "http://evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_origin.status(), 403);
+
+    // A configured token is always required.
+    let hash = mbr::edit_auth::hash_token("s3cret-token").unwrap();
+    let server = TestServer::start_with_config_fn(&repo, move |config| {
+        config.edit_enabled = true;
+        config.edit_token_hash = Some(hash.clone());
+    })
+    .await;
+    let no_token = server
+        .client
+        .get(server.url("/.mbr/fields/emails/values"))
+        .header("X-MBR-Edit", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_token.status(), 401);
+    let with_token = server
+        .client
+        .get(server.url("/.mbr/fields/emails/values"))
+        .header("X-MBR-Edit", "1")
+        .header("Authorization", "Bearer s3cret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_token.status(), 200);
+}
+
+#[tokio::test]
+async fn test_server_site_shares_the_servers_index() {
+    let repo = frontmatter_links_repo();
+    let port = common::find_available_port();
+    let config = test_server_config(port, repo.path().to_path_buf());
+    let server = mbr::server::Server::init(config).expect("init");
+    let site = server.site();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !site.repo().is_scan_complete() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let backlinks = tokio::task::spawn_blocking(move || {
+        site.backlinks(std::path::Path::new("customers/Customer X.md"))
+    })
+    .await
+    .unwrap();
+    assert!(
+        backlinks.iter().any(|l| l.from == INVOICE_URL),
+        "{backlinks:?}"
+    );
+}

@@ -182,6 +182,26 @@ pub enum MarkdownError {
     HttpFailed(#[from] reqwest::Error),
 }
 
+impl MarkdownError {
+    /// Whether the note could not be read because its vault has not
+    /// downloaded it yet (an evicted iCloud file on iOS): an expected state,
+    /// not a failure to warn about.
+    pub fn is_not_downloaded(&self) -> bool {
+        match self {
+            MarkdownError::ReadFailed { source, .. } => {
+                source.kind() == std::io::ErrorKind::WouldBlock
+                    || source
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<crate::vault::VaultError>())
+                        .is_some_and(|e| {
+                            matches!(e, crate::vault::VaultError::NotDownloaded { .. })
+                        })
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Errors related to template rendering.
 #[derive(Debug, Error)]
 pub enum TemplateError {
