@@ -33,7 +33,6 @@ pub mod open_picker;
 pub mod pdf_cli;
 #[cfg(feature = "gui")]
 pub mod pdf_export;
-pub mod standalone;
 
 #[cfg(feature = "watcher")]
 pub use mbr_server::watcher;

@@ -64,6 +64,8 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         transcode_enabled: false,
         embedded: None,
         config_problem: None,
+        extra_head_html: None,
+        theme_vars: std::collections::BTreeMap::new(),
     }
 }
 
@@ -12624,5 +12626,71 @@ async fn test_server_site_shares_the_servers_index() {
     assert!(
         backlinks.iter().any(|l| l.from == INVOICE_URL),
         "{backlinks:?}"
+    );
+}
+
+// ---------------------- host head (theme injection) ----------------------
+
+const HOST_THEME_STYLE: &str = "<style id=\"mbr-host-theme\">:root { --pico-primary: light-dark(#7c3aed, #a78bfa) !important; }</style>";
+
+fn with_host_theme(config: &mut mbr::server::ServerConfig) {
+    config.theme_vars.insert(
+        "--pico-primary".to_string(),
+        "light-dark(#7c3aed, #a78bfa)".to_string(),
+    );
+    config.extra_head_html = Some("<meta name=\"mbr-host\" content=\"invoicer\">".to_string());
+}
+
+#[tokio::test]
+async fn test_host_head_is_in_every_page() {
+    let repo = page_template_repo();
+    repo.create_markdown("notes/plain.md", "# Plain\n");
+    let server = TestServer::start_with_config_fn(&repo, with_host_theme).await;
+    server.wait_for_scan().await;
+
+    for (path, status) in [
+        ("/notes/plain/", 200),
+        ("/", 200),
+        ("/notes/", 200),
+        // A per-note template that includes mbr's head partial.
+        ("/invoices/2026-001/", 200),
+        ("/no/such/page/", 404),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status(), status, "{path}");
+        let html = response.text().await.unwrap();
+        let head = &html[..html.find("</head>").expect("a head")];
+        assert!(head.contains(HOST_THEME_STYLE), "{path}: {head}");
+        assert!(
+            head.contains("<meta name=\"mbr-host\" content=\"invoicer\">"),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_no_host_head_by_default() {
+    let repo = TestRepo::new();
+    repo.create_markdown("plain.md", "# Plain\n");
+    let server = TestServer::start(&repo).await;
+    let html = server.get_text("/plain/").await;
+    assert_html_not_contains(&html, "mbr-host-theme");
+}
+
+#[test]
+fn test_a_theme_var_that_could_break_out_refuses_to_start() {
+    let repo = TestRepo::new();
+    let mut config = test_server_config(find_available_port(), repo.path().to_path_buf());
+    config.theme_vars.insert(
+        "--pico-primary".to_string(),
+        "red</style><script>alert(1)</script>".to_string(),
+    );
+    let error = match mbr::server::Server::init(config) {
+        Ok(_) => panic!("an unsafe theme value must be refused"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(
+        error,
+        "Host theme refused: theme variable `--pico-primary`: `<` and `>` are not allowed"
     );
 }

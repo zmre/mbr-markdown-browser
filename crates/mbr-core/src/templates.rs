@@ -6,6 +6,7 @@ use std::{
 
 use crate::contact::humanize_date;
 use crate::errors::TemplateError;
+use crate::host_head::HostHead;
 use crate::markdown::SimpleMetadata;
 use crate::page_template::{PageTemplate, PageTemplateError};
 use itertools::Itertools;
@@ -17,6 +18,9 @@ pub struct Templates {
     tera: Arc<RwLock<Tera>>,
     /// Path used for template loading (for hot reload)
     template_path: PathBuf,
+    /// What `host_head()` renders on every page ([`Self::with_host_head`]),
+    /// kept so a [`Self::reload`] registers it again.
+    host_head: Option<HostHead>,
 }
 
 /// Returns true if `dir` contains at least one `.html` file at any depth.
@@ -176,16 +180,30 @@ impl Templates {
             root_path.join(".mbr")
         };
 
-        let tera = Self::load_tera(&template_path)?;
+        let tera = Self::load_tera(&template_path, None)?;
 
         Ok(Templates {
             tera: Arc::new(RwLock::new(tera)),
             template_path,
+            host_head: None,
         })
     }
 
+    /// Makes `host_head()` render `host_head` on every page these templates
+    /// render (see [`crate::host_head`]); `None` renders nothing, as without
+    /// this call. Survives [`Self::reload`].
+    #[must_use]
+    pub fn with_host_head(mut self, host_head: Option<HostHead>) -> Self {
+        register_host_head(&mut self.tera.write(), host_head.as_ref());
+        self.host_head = host_head;
+        self
+    }
+
     /// Load Tera templates from the given path, with fallback to compiled defaults.
-    fn load_tera(template_path: &Path) -> Result<Tera, TemplateError> {
+    fn load_tera(
+        template_path: &Path,
+        host_head: Option<&HostHead>,
+    ) -> Result<Tera, TemplateError> {
         let source_desc = format!("{}", template_path.display());
         let template_path_str = template_path
             .to_str()
@@ -237,6 +255,7 @@ impl Templates {
         // Registered here so they survive `reload()` and the `Tera::default()`
         // fallback above.
         register_template_helpers(&mut tera);
+        register_host_head(&mut tera, host_head);
 
         let mut defaults_added: Vec<&'static str> = Vec::new();
         for (name, tpl) in DEFAULT_TEMPLATES.iter() {
@@ -259,7 +278,7 @@ impl Templates {
     /// Reload all templates from disk. Call this when template files change.
     pub fn reload(&self) -> Result<(), TemplateError> {
         tracing::info!("Reloading templates from {:?}", self.template_path);
-        let new_tera = Self::load_tera(&self.template_path)?;
+        let new_tera = Self::load_tera(&self.template_path, self.host_head.as_ref())?;
         *self.tera.write() = new_tera;
         tracing::debug!("Templates reloaded successfully");
         Ok(())
@@ -747,6 +766,32 @@ pub fn register_template_helpers(tera: &mut Tera) {
     tera.register_filter("humandate", humandate_filter);
     tera.register_function("icon", crate::icons::icon_function);
     tera.register_function("url", UrlFunction);
+    register_host_head(tera, None);
+}
+
+/// Registers `host_head()`, rendering `host_head`'s markup, or nothing for
+/// `None` — so every engine has the function and `_head.html` renders the
+/// same in a static build, QuickLook or `mbr -o`, which have no host.
+fn register_host_head(tera: &mut Tera, host_head: Option<&HostHead>) {
+    let markup: Arc<str> = host_head.map_or_else(|| Arc::from(""), |head| Arc::from(head.html()));
+    tera.register_function(HOST_HEAD_FUNCTION, HostHeadFunction(markup));
+}
+
+/// The Tera function `_head.html` calls for the host's markup.
+pub const HOST_HEAD_FUNCTION: &str = "host_head";
+
+/// Tera `host_head()`: the embedding host's head markup ([`HostHead`]),
+/// already validated and marked safe.
+struct HostHeadFunction(Arc<str>);
+
+impl tera::Function for HostHeadFunction {
+    fn call(&self, _args: &HashMap<String, serde_json::Value>) -> tera::Result<serde_json::Value> {
+        Ok(serde_json::Value::String(self.0.to_string()))
+    }
+
+    fn is_safe(&self) -> bool {
+        true
+    }
 }
 
 /// The template variable holding a note's lossless frontmatter.
@@ -2660,5 +2705,133 @@ mod tests {
                 && tera.render("u", &Context::new()).is_err(),
             "url() without a path is a render error"
         );
+    }
+
+    // ---------------------- host head ----------------------
+
+    /// The context keys every page template reads.
+    fn chrome() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("sidebar_style".to_string(), json!("auto"))])
+    }
+
+    fn host_head(theme: &[(&str, &str)], extra: Option<&str>) -> Option<HostHead> {
+        let vars = theme
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        HostHead::new(extra, &vars).unwrap()
+    }
+
+    const THEME_STYLE: &str =
+        "<style id=\"mbr-host-theme\">:root { --pico-primary: #7c3aed !important; }</style>";
+
+    #[test]
+    fn host_head_is_emitted_in_the_head_of_markdown_and_other_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_host_head(host_head(
+                &[("--pico-primary", "#7c3aed")],
+                Some("<meta name=\"host\" content=\"invoicer\">"),
+            ));
+        let page = templates
+            .render_markdown("<p>x</p>", SimpleMetadata::new(), chrome())
+            .unwrap();
+        let head_end = page.find("</head>").expect("a head");
+        let style_at = page.find(THEME_STYLE).expect("the theme style");
+        let meta_at = page
+            .find("<meta name=\"host\" content=\"invoicer\">")
+            .expect("the extra html");
+        assert!(style_at < meta_at && meta_at < head_end, "{page}");
+        // After mbr's own stylesheets, so it overrides them.
+        assert!(page.find("user.css").unwrap() < style_at);
+        // Every other page template includes `_head.html` as well; the
+        // server tests render them (error page, listing).
+        let outside = templates.render_outside_link(chrome()).unwrap();
+        assert!(outside.contains(THEME_STYLE), "{outside}");
+    }
+
+    #[test]
+    fn without_a_host_head_the_page_is_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = Templates::new(tmp.path(), None).unwrap();
+        let with_none = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_host_head(None);
+        let render = |templates: &Templates| {
+            templates
+                .render_markdown("<p>x</p>", SimpleMetadata::new(), chrome())
+                .unwrap()
+        };
+        let page = render(&plain);
+        assert_eq!(page, render(&with_none));
+        assert!(!page.contains("mbr-host-theme"));
+        // The partial ends exactly as before the call was added.
+        assert!(page.contains("</script>\n"), "{page}");
+    }
+
+    #[test]
+    fn host_head_survives_a_template_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_host_head(host_head(&[("--pico-primary", "#7c3aed")], None));
+        templates.reload().unwrap();
+        let page = templates
+            .render_markdown("<p>x</p>", SimpleMetadata::new(), chrome())
+            .unwrap();
+        assert!(page.contains(THEME_STYLE));
+    }
+
+    #[test]
+    fn a_note_cannot_shadow_or_inject_the_host_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_host_head(host_head(&[("--pico-primary", "#7c3aed")], None));
+        let frontmatter: SimpleMetadata =
+            [("host_head".to_string(), json!("<script>alert(1)</script>"))]
+                .into_iter()
+                .collect();
+        let page = templates
+            .render_markdown("<p>x</p>", frontmatter, chrome())
+            .unwrap();
+        assert!(page.contains(THEME_STYLE));
+        assert!(!page.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn a_page_template_gets_the_host_head_through_mbrs_head_or_by_calling_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_host_head(host_head(&[("--pico-primary", "#7c3aed")], None));
+        let render = |source: &str| {
+            templates
+                .render_page_template(
+                    &page_template("inv/invoice.html", source, &[]),
+                    "<p>body</p>",
+                    SimpleMetadata::new(),
+                    chrome(),
+                )
+                .unwrap()
+        };
+        let with_partial = render("<head>{% include \"/.mbr/_head.html\" %}</head>");
+        assert!(with_partial.contains(THEME_STYLE), "{with_partial}");
+        // A template with its own head calls the function itself...
+        assert_eq!(
+            render("<head>{{ host_head() }}</head>"),
+            format!("<head>{THEME_STYLE}</head>")
+        );
+        // ...and one that does neither gets nothing.
+        assert_eq!(render("<head></head>"), "<head></head>");
+    }
+
+    #[test]
+    fn host_head_renders_nothing_in_a_bare_engine() {
+        let mut tera = Tera::default();
+        register_template_helpers(&mut tera);
+        tera.add_raw_template("t", "[{{ host_head() }}]").unwrap();
+        assert_eq!(tera.render("t", &Context::new()).unwrap(), "[]");
     }
 }
