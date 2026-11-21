@@ -1,0 +1,7 @@
+{#- PDF export readiness for a custom page template that does not include
+    /.mbr/_head.html (docs/features/custom-page-templates.md): without it,
+    `mbr --pdf` and Save as PDF… wait out their whole timeout on the page.
+    Include it in the template's <head>: {% include "/.mbr/_export_ready.html" %}
+    It does nothing outside a PDF export. -#}
+{%- set mbr_export_asset_base = relative_base | default(value="/.mbr/") -%}
+<script defer src="{{ mbr_export_asset_base }}components/mbr-export-ready.min.js"></script>

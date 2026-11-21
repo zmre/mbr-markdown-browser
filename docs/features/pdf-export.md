@@ -6,7 +6,7 @@ order: 17
 
 # PDF Export
 
-**Works in:** GUI · CLI (`mbr --pdf`) — on macOS, Windows and Linux desktops. Not in server mode, static builds, QuickLook or the iOS app.
+**Works in:** GUI · CLI (`mbr --pdf`) · [host applications](#exporting-pdfs-from-a-host-application) that link mbr as a library — on macOS, Windows and Linux desktops. Not in server mode, static builds, QuickLook or the iOS app.
 
 mbr can save a note as a PDF that looks like the page on screen: mermaid
 diagrams drawn, math typeset, code highlighted, images loaded, tables and
@@ -126,7 +126,9 @@ shown, wide tables not cut at a scroll edge, kanban boards in one column. See
 
 Before it prints, mbr waits for the page to finish: every image (lazy images
 are loaded too), mermaid diagrams (drawn in their light colours), KaTeX math,
-code highlighting and web fonts.
+code highlighting and web fonts. A page rendered with a
+[custom page template](custom-page-templates/) that leaves out mbr's scripts
+has to [include one line](#pages-with-a-custom-template) for this to work.
 
 On macOS the export view is switched to the light appearance. On Windows and
 Linux it is not (the appearance setting there is shared with mbr's own window,
@@ -190,6 +192,36 @@ The margin is a CSS `margin` shorthand — one to four lengths in `in`, `cm`,
 The default, `0.6in 0.5in`, is 0.6 inch top and bottom and 0.5 inch at the
 sides.
 
+#### Paper and margins set by the page
+
+The paper and margin settings are defaults. A page that sets its own sheet in
+CSS, typically a [custom page template](custom-page-templates/) for an invoice
+or a letter, gets exactly that:
+
+```css
+@page { size: A5; margin: 20mm; }
+```
+
+- **`size`** replaces the paper and orientation: `A5`, `A4 landscape`,
+  `letter`, `legal`, `ledger`, `A3`, `B4`, `B5`, `JIS-B4`, `JIS-B5`, or one or two lengths
+  (`148mm 210mm`, `6in` for a square). `auto`, and a side outside 1–200 inches,
+  leave the configured paper.
+- **`margin`** (or any of `margin-top` … `margin-left`) replaces the configured
+  margin on the sides it names; the others keep the configured margin.
+
+It is read from the page's own stylesheets: `<style>` in the template, any
+sheet it links, and your `user.css`. mbr's own `theme.css` (whose print rule
+is `@page { margin: 0 }`, for the browser's print panel), `pico.min.css` and
+`export.css` do not count, so an ordinary note keeps the configured margin.
+Only plain `@page` rules count, at the top level or inside `@media print`,
+`@supports` or `@layer`; `@page :first` and named pages still apply to their
+pages but do not change the sheet.
+
+The page size is honoured on every platform by setting the print system's
+paper to it (WebKit's printing ignores `@page { size }` on its own), so it
+needs the page's ready signal: with [`ready = "load"`](#pages-with-a-custom-template)
+the configured paper is used and only the page's margins apply.
+
 ## Customizing the PDF
 
 Exported pages load one extra stylesheet, `export.css` (served at
@@ -221,9 +253,159 @@ smaller font and keep code blocks off page breaks:
 
 The sheet size and margin are not in this file: mbr writes them as an `@page`
 rule into the page (`<style id="mbr-export-page">`) from the paper and margin
-settings. Set the margin with `margin` in `[pdf]` or `--pdf-margin`, not with
-`@page` here. Your `theme.css` and `user.css` apply to the export as they do to
-printing.
+settings, leaving out whatever the page's own `@page` rule sets
+([above](#paper-and-margins-set-by-the-page)). Set the margin with `margin` in `[pdf]`
+or `--pdf-margin`, or with `@page` in `user.css` or a template, but not with
+`@page` here: rules in `export.css` are not read as the page's. Your
+`theme.css` and `user.css` apply to the export as they do to printing.
+
+## Pages with a custom template
+
+mbr knows a page is ready for paper because the page tells it: the script
+that does so is part of mbr's components, which a page loads through
+`/.mbr/_scripts.html`. A [custom page template](custom-page-templates/) that
+leaves mbr's scripts out (a bare invoice, say) never says so, and the export
+waits out its whole timeout (30 seconds by default) before printing it anyway,
+with a warning.
+
+Include the export readiness partial in the template's `<head>`:
+
+```html
+<head>
+  {% include "/.mbr/_export_ready.html" %}
+  <style>@page { size: A4; margin: 18mm; }</style>
+</head>
+```
+
+It adds one small deferred script (`/.mbr/components/mbr-export-ready.min.js`,
+about 2 kB) that does nothing at all unless the page is being exported. During
+an export it does what mbr's own pages do: loads `export.css`, loads lazy
+images, applies the [link policy](#links), writes the `@page` rule (keeping the
+template's own), and waits for images, fonts and, when the template loads
+mermaid itself, its diagrams. Then it signals ready. A template that includes
+`/.mbr/_scripts.html` does not need it (including both is harmless). In a
+[static build](../modes/build/) the partial points at the build's own copy of
+the script, so it works at any depth.
+
+**`ready = "load"`.** As a fallback for a page that can run none of mbr's
+scripts, set `ready = "load"` in [`[pdf]`](../reference/configuration/#pdf-export-settings)
+(or `--pdf-ready load`): the export then prints once the page's `load` event
+has fired and its fonts are ready, signalled by mbr itself. The page is printed
+exactly as written: no `export.css`, no generated `@page` rule (so the margins
+are the template's own `@page` margins, or none), links left as they are, the
+configured paper rather than the template's `@page { size }`, and nothing waits
+for diagrams drawn after `load`. mbr's own scripts, if the page has them, stay
+out of the way in this mode. Prefer the partial.
+
+## Exporting PDFs from a host application
+
+A Rust application can export PDFs with the same machinery, linking mbr as a
+library:
+
+```toml
+[dependencies]
+mbr-markdown-browser = { version = "…", default-features = false, features = ["gui"] }
+# The same tao and wry mbr uses: the host passes its own event loop in.
+tao = "0.37"
+wry = "0.57"
+```
+
+`gui` brings the exporter and, through `server`, mbr's HTTP server, and
+nothing that needs ffmpeg or pdfium (CI checks that this feature set builds
+and lints on its own). The library's name is `mbr`. The host:
+
+1. **Serves the page** from mbr's server, so the page and `/.mbr/` (the export
+   chunk, `export.css`, the readiness script) come from the same origin: run
+   [`mbr_server`'s `Server`](../reference/architecture/) or merge its router
+   into the host's own.
+2. **Makes the page signal ready**: pages from mbr's templates do; a custom
+   template includes `/.mbr/_export_ready.html` ([above](#pages-with-a-custom-template)).
+3. **Owns a tao event loop** (on the main thread, as tao requires on macOS)
+   whose user event can carry an `ExportEvent`, and runs one
+   `ExportSession` at a time from it:
+
+```rust
+use std::sync::{Arc, Mutex};
+
+use mbr::pdf_config::PdfConfig;
+use mbr::pdf_export::{
+    self, ExportEvent, ExportSession, ExportSink, OutputTarget, PdfFlags, PdfOptions,
+    PendingOutput,
+};
+use tao::event::{Event, StartCause};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+
+enum AppEvent {
+    Pdf(ExportEvent),
+    // … the host's own events
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A backend exists on this platform, and (Linux) there is a display.
+    pdf_export::preflight()?;
+
+    let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
+    let proxy = Mutex::new(event_loop.create_proxy());
+    // Called from the page's IPC handler, the timeout thread and the print
+    // callback: hand every event back to the loop.
+    let sink: ExportSink = Arc::new(move |event| {
+        let _ = proxy.lock().unwrap().send_event(AppEvent::Pdf(event));
+    });
+
+    // `[pdf]` defaults (or a repository's `config.pdf`); the paper and margin
+    // are only defaults — the template's own `@page` rule wins.
+    let options = PdfOptions::resolve(
+        &PdfConfig::default(),
+        &PdfFlags::default(),
+        pdf_export::default_paper,
+    );
+    let url = "http://127.0.0.1:8080/invoices/2026-001/";
+    let mut session: Option<ExportSession> = None;
+
+    event_loop.run(move |event, target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            // Whenever the user asks for a PDF; here, at start-up.
+            Event::NewEvents(StartCause::Init) => {
+                // Checks the folder is writable before anything renders.
+                let output =
+                    PendingOutput::prepare(OutputTarget::File("/tmp/2026-001.pdf".into()))
+                        .expect("a writable folder");
+                session = Some(
+                    ExportSession::start(target, url, options.clone(), output, Arc::clone(&sink))
+                        .expect("the export window"),
+                );
+            }
+            Event::UserEvent(AppEvent::Pdf(event)) => {
+                // `stdout` is only written for `OutputTarget::Stdout`.
+                let finished = session
+                    .as_mut()
+                    .and_then(|s| s.handle(event, &mut std::io::sink()));
+                if let Some(result) = finished {
+                    session = None; // closes the hidden window
+                    match result {
+                        Ok(pdf) => println!("wrote {} ({} bytes), {:?}", pdf.target, pdf.bytes, pdf.warnings),
+                        Err(e) => eprintln!("PDF export failed: {e}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+}
+```
+
+`ExportSession::start` opens a hidden window on the host's loop, loads the URL
+and starts the readiness timer; `handle` advances it (print, then verify and
+rename into place) and returns `Some` once, when it is over. Events from an
+earlier session are ignored by a later one. Everything else on this page
+applies unchanged: the hidden view, the page's readiness, the `@page`
+precedence, the link policy, warnings that never fail an export.
+
+**Keep tao and wry in step.** `ExportSession::start` takes tao's
+`EventLoopWindowTarget`, so the host must use the same tao (and the wry it
+pairs with) as mbr: currently tao 0.37 and wry 0.57. mbr's `Cargo.toml` marks
+them as an embedding contract, and they move together.
 
 ## Linux without a display
 
@@ -248,7 +430,10 @@ for WebKitGTK) is needed here too.
 ## Troubleshooting
 
 **"the page did not finish rendering within 30.0 s; exported it as it was".**
-mbr waits up to the timeout (`--pdf-timeout-ms`, `timeout_ms` in `[pdf]`,
+If the page uses a [custom page template](custom-page-templates/), the template
+probably leaves out mbr's scripts and so never says it is ready: include
+`/.mbr/_export_ready.html` ([see above](#pages-with-a-custom-template)).
+Otherwise, mbr waits up to the timeout (`--pdf-timeout-ms`, `timeout_ms` in `[pdf]`,
 default 30 seconds) for the page to say it is ready, then exports what it has,
 with this warning. A huge note, or an image on a slow server, can need longer:
 raise the timeout. From the command line, the repository scan (for wikilinks,

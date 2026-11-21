@@ -10,9 +10,18 @@
 //!    theme, eager images, the `@page` size and margin, the link policy);
 //! 2. the page posts `mbr:export-ready:` (or `mbr:export-failed:`) over IPC
 //!    once everything that matters on paper has rendered — a load event is not
-//!    enough, and a hidden view never runs `requestAnimationFrame`;
+//!    enough, and a hidden view never runs `requestAnimationFrame`. Pages
+//!    rendered with mbr's templates do this from the main bundle; a custom
+//!    page template without it includes `/.mbr/_export_ready.html`;
+//!    [`ReadySignal::Load`] signals on `load` plus fonts instead.
 //!    [`PdfOptions::timeout`] exports anyway, with a warning;
-//! 3. the platform backend prints to a **temporary file in the target
+//! 3. a page whose own stylesheets declare `@page { size }` reports that size
+//!    in its ready message, and the sheet is printed on it
+//!    ([`PdfOptions::with_page_size`]); its own `@page` margins likewise win
+//!    over [`PdfOptions::margin`] (the page leaves them out of the generated
+//!    rule). WebKit's print system ignores `@page { size }`, so the paper
+//!    has to be set natively.
+//! 4. the platform backend prints to a **temporary file in the target
 //!    folder** ([`PendingOutput`]), which is then verified (exists, non-empty,
 //!    starts `%PDF-`) and renamed into place — the print systems' success flags
 //!    are not trustworthy (macOS reports success for a folder that is gone).
@@ -43,6 +52,18 @@
 //!   start the silent print and call `done` exactly once, on the event-loop
 //!   thread, when the print system is finished. `PrintInFlight` keeps whatever
 //!   must live until then (macOS: the operation and its delegate).
+//!
+//! # From a host application
+//!
+//! A program that embeds mbr's server (its router merged into the host's own)
+//! and owns a tao event loop exports with the same [`ExportSession`]: build
+//! [`PdfOptions`], [`PendingOutput::prepare`] the target, call
+//! [`ExportSession::start`] with the loop's window target and an
+//! [`ExportSink`] that sends each [`ExportEvent`] back through an
+//! `EventLoopProxy`, and pass every one it receives to
+//! [`ExportSession::handle`] until it returns `Some`. The host's tao and wry
+//! must be the versions this crate links (see the root `Cargo.toml`). See
+//! docs/features/pdf-export.md, "Exporting PDFs from a host application".
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,7 +77,8 @@ use tao::window::{Window, WindowBuilder};
 use wry::{NewWindowResponse, WebView, WebViewBuilder};
 
 use crate::errors::PdfError;
-use crate::pdf_config::{LinkBase, Margin, Orientation, Paper, PdfConfig};
+pub use crate::pdf_config::ReadySignal;
+use crate::pdf_config::{LinkBase, Margin, Orientation, Paper, PdfConfig, paper_edge_in_range};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -120,6 +142,7 @@ pub struct PdfFlags {
     pub page_numbers: Option<bool>,
     pub link_base: Option<LinkBase>,
     pub timeout_ms: Option<u64>,
+    pub ready: Option<ReadySignal>,
 }
 
 /// What internal (same-origin) links become in the PDF.
@@ -133,6 +156,10 @@ pub enum LinkPolicy {
 }
 
 /// Everything one export needs to know about paper and the page.
+///
+/// `paper`, `orientation` and `margin` are defaults: a page whose own
+/// stylesheets declare `@page { size }` or `@page { margin }` wins
+/// (docs/features/pdf-export.md, "Paper and margins set by the page").
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfOptions {
     pub paper: Paper,
@@ -143,6 +170,8 @@ pub struct PdfOptions {
     pub links: LinkPolicy,
     /// How long to wait for the page's ready message before exporting anyway.
     pub timeout: Duration,
+    /// What counts as ready: the page's own message, or `load` plus fonts.
+    pub ready: ReadySignal,
 }
 
 impl PdfOptions {
@@ -173,7 +202,28 @@ impl PdfOptions {
             page_numbers: flags.page_numbers.unwrap_or(config.page_numbers),
             links,
             timeout: Duration::from_millis(flags.timeout_ms.unwrap_or(config.timeout_ms)),
+            ready: flags.ready.unwrap_or(config.ready),
         }
+    }
+
+    /// These options with the sheet a page declared in its own
+    /// `@page { size }` (orientation already applied, as written), which wins
+    /// over [`PdfOptions::paper`] and [`PdfOptions::orientation`]. `None`
+    /// leaves them as they are.
+    pub fn with_page_size(&self, page: Option<PageSize>) -> PdfOptions {
+        let mut options = self.clone();
+        if let Some(page) = page {
+            options.paper = Paper::from_dimensions_in(page.width_in, page.height_in);
+            // `from_dimensions_in` names a turned standard sheet by its
+            // portrait name; landscape puts the sides back as declared.
+            let (width, height) = options.paper.dimensions_in();
+            options.orientation = if (width > height) == (page.width_in > page.height_in) {
+                Orientation::Portrait
+            } else {
+                Orientation::Landscape
+            };
+        }
+        options
     }
 
     /// The page's width and height in inches, orientation applied: landscape
@@ -222,6 +272,7 @@ impl PdfOptions {
             "paperWidthIn": round(width),
             "paperHeightIn": round(height),
             "margin": self.margin.as_css(),
+            "ready": self.ready.as_str(),
         })
         .to_string()
     }
@@ -229,9 +280,49 @@ impl PdfOptions {
     /// The initialization script that sets the export flag before any page
     /// script runs. JSON is valid JavaScript, and every string in it was
     /// validated by [`crate::pdf_config`] — serde_json escapes the rest.
+    ///
+    /// With [`ReadySignal::Load`] it also posts the ready message itself, on
+    /// `load` and then `document.fonts.ready`; the page's own scripts see
+    /// `ready: "load"` and stay out of it.
     pub fn init_script(&self) -> String {
-        format!("window.{EXPORT_FLAG_GLOBAL} = {};", self.export_flag_json())
+        let flag = format!("window.{EXPORT_FLAG_GLOBAL} = {};", self.export_flag_json());
+        match self.ready {
+            ReadySignal::Page => flag,
+            ReadySignal::Load => format!("{flag}\n{}", load_ready_script()),
+        }
     }
+}
+
+/// The `ready = "load"` signal: once the page has loaded and its fonts are
+/// ready, post an empty ready message. No `requestAnimationFrame` (a hidden
+/// view never runs one). Posted at most once.
+fn load_ready_script() -> String {
+    let message = serde_json::Value::from(format!("{IPC_EXPORT_READY_PREFIX}{{\"warnings\":[]}}"));
+    LOAD_READY_SCRIPT.replace("READY_MESSAGE", &message.to_string())
+}
+
+/// [`load_ready_script`]'s source; `READY_MESSAGE` becomes the message as a
+/// JSON string literal.
+const LOAD_READY_SCRIPT: &str = r#"(function () {
+  var sent = false;
+  function post() {
+    if (sent) return;
+    sent = true;
+    var ipc = window.ipc;
+    if (ipc && typeof ipc.postMessage === 'function') ipc.postMessage(READY_MESSAGE);
+  }
+  window.addEventListener('load', function () {
+    var fonts = document.fonts;
+    (fonts && fonts.ready ? fonts.ready : Promise.resolve()).then(post, post);
+  }, { once: true });
+})();"#;
+
+/// A sheet size a page declared in its own `@page { size }`, in inches, as
+/// laid out (orientation applied).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageSize {
+    pub width_in: f64,
+    pub height_in: f64,
 }
 
 /// A sheet of paper for a print system that turns it itself
@@ -244,10 +335,14 @@ pub struct Sheet {
 }
 
 /// A message the export page posted over IPC.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExportMessage {
-    /// Ready for paper, with anything that did not finish in time.
-    Ready { warnings: Vec<String> },
+    /// Ready for paper, with anything that did not finish in time, and the
+    /// sheet the page's own `@page { size }` declares, if it does.
+    Ready {
+        warnings: Vec<String>,
+        page: Option<PageSize>,
+    },
     /// The page could not prepare itself.
     Failed { message: String },
 }
@@ -263,21 +358,38 @@ pub fn parse_export_message(body: &str) -> Option<ExportMessage> {
         return None;
     }
     if let Some(json) = body.strip_prefix(IPC_EXPORT_READY_PREFIX) {
-        let warnings = match serde_json::from_str::<serde_json::Value>(json) {
-            Ok(serde_json::Value::Object(map)) => match map.get("warnings") {
-                Some(serde_json::Value::Array(items)) => items
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(|w| page_text(w, MAX_WARNING_CHARS))
-                    .filter(|w| !w.is_empty())
-                    .take(MAX_WARNINGS)
-                    .collect(),
-                None => Vec::new(),
-                Some(_) => vec!["the page sent malformed export warnings".to_owned()],
-            },
-            _ => vec!["the page sent a malformed export-ready message".to_owned()],
+        let (mut warnings, page) = match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(serde_json::Value::Object(map)) => {
+                let warnings = match map.get("warnings") {
+                    Some(serde_json::Value::Array(items)) => items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|w| page_text(w, MAX_WARNING_CHARS))
+                        .filter(|w| !w.is_empty())
+                        .take(MAX_WARNINGS)
+                        .collect(),
+                    None => Vec::new(),
+                    Some(_) => vec!["the page sent malformed export warnings".to_owned()],
+                };
+                (warnings, map.get("page").map(parse_page_size))
+            }
+            _ => (
+                vec!["the page sent a malformed export-ready message".to_owned()],
+                None,
+            ),
         };
-        return Some(ExportMessage::Ready { warnings });
+        let page = match page {
+            Some(Some(size)) => Some(size),
+            Some(None) => {
+                warnings.push(
+                    "the page declared an @page size mbr cannot print on; used the configured paper"
+                        .to_owned(),
+                );
+                None
+            }
+            None => None,
+        };
+        return Some(ExportMessage::Ready { warnings, page });
     }
     if let Some(message) = body.strip_prefix(IPC_EXPORT_FAILED_PREFIX) {
         let message = page_text(message, MAX_FAILURE_CHARS);
@@ -290,6 +402,21 @@ pub fn parse_export_message(body: &str) -> Option<ExportMessage> {
         });
     }
     None
+}
+
+/// A ready message's `page`: `{"widthIn": w, "heightIn": h}`, each side a
+/// paper edge mbr accepts (1–200 in). `None` for anything else.
+fn parse_page_size(value: &serde_json::Value) -> Option<PageSize> {
+    let side = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|inches| inches.is_finite() && paper_edge_in_range(*inches))
+    };
+    Some(PageSize {
+        width_in: side("widthIn")?,
+        height_in: side("heightIn")?,
+    })
 }
 
 /// Whether the in-browser editor is open (GUI windows' IPC).
@@ -503,7 +630,7 @@ pub fn verify_pdf(path: &Path) -> Result<u64, PdfError> {
 
 /// What happened to an export job, from the page, the timer or the print
 /// system.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JobEvent {
     Message(ExportMessage),
     /// The readiness timeout elapsed.
@@ -540,6 +667,7 @@ enum Phase {
 pub struct PdfJob {
     phase: Phase,
     warnings: Vec<String>,
+    page: Option<PageSize>,
     timeout: Duration,
 }
 
@@ -548,6 +676,7 @@ impl PdfJob {
         PdfJob {
             phase: Phase::WaitingForPage,
             warnings: Vec::new(),
+            page: None,
             timeout,
         }
     }
@@ -557,10 +686,16 @@ impl PdfJob {
         &self.warnings
     }
 
+    /// The sheet the page's ready message declared, if any.
+    pub fn page_size(&self) -> Option<PageSize> {
+        self.page
+    }
+
     pub fn on_event(&mut self, event: JobEvent) -> JobStep {
         match (self.phase, event) {
-            (Phase::WaitingForPage, JobEvent::Message(ExportMessage::Ready { warnings })) => {
+            (Phase::WaitingForPage, JobEvent::Message(ExportMessage::Ready { warnings, page })) => {
                 self.warnings.extend(warnings);
+                self.page = page;
                 self.phase = Phase::Printing;
                 JobStep::Print
             }
@@ -603,7 +738,7 @@ impl JobId {
 
 /// A [`JobEvent`] addressed to one export. The application wraps it in its
 /// own event-loop event and hands it back to [`ExportSession::handle`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportEvent {
     pub job: JobId,
     pub event: JobEvent,
@@ -765,8 +900,16 @@ impl ExportSession {
                 event: JobEvent::Printed(result),
             });
         });
-        let in_flight =
-            platform::print_to_pdf(&self.webview, &self.options, output.temp_path(), done)?;
+        let page = self.job.page_size();
+        if let Some(page) = page {
+            tracing::info!(
+                "The page sets its own @page size ({:.2} x {:.2} in); printing on it",
+                page.width_in,
+                page.height_in
+            );
+        }
+        let options = self.options.with_page_size(page);
+        let in_flight = platform::print_to_pdf(&self.webview, &options, output.temp_path(), done)?;
         self.print = Some(in_flight);
         Ok(())
     }

@@ -917,12 +917,13 @@ the GUI uses the table as the open repository has it now (a saved
 
 | Option | Values | Default | Meaning |
 |--------|--------|---------|---------|
-| `paper` | `letter`, `a4`, `legal`, or `<W>x<H>mm` / `<W>x<H>in` | the system's | Sheet size. Case and spaces are ignored. A custom side must be 1–200 inches (25.4 mm–5080 mm). Unset: on macOS the default printer's paper; on Windows and Linux Letter in US and Canadian locales (`LC_ALL`, `LC_PAPER`, `LANG`), else A4 |
+| `paper` | `letter`, `a4`, `legal`, or `<W>x<H>mm` / `<W>x<H>in` | the system's | Sheet size. Case and spaces are ignored. A custom side must be 1–200 inches (25.4 mm–5080 mm). Unset: on macOS the default printer's paper; on Windows and Linux Letter in US and Canadian locales (`LC_ALL`, `LC_PAPER`, `LANG`), else A4. A page whose own stylesheet sets `@page { size }` is printed on that size instead ([details](../features/pdf-export.md#paper-and-margins-set-by-the-page)) |
 | `orientation` | `portrait`, `landscape` | `portrait` | `landscape` swaps the sheet's sides |
-| `margin` | CSS `margin` shorthand | `"0.6in 0.5in"` | One to four lengths (top, right, bottom, left as in CSS), each a number with a unit `in`, `cm`, `mm`, `pt`, `pc` or `px`, or `0`. Applied to every page as an `@page` margin |
+| `margin` | CSS `margin` shorthand | `"0.6in 0.5in"` | One to four lengths (top, right, bottom, left as in CSS), each a number with a unit `in`, `cm`, `mm`, `pt`, `pc` or `px`, or `0`. Applied to every page as an `@page` margin, except the sides a page's own `@page` rule sets |
 | `page_numbers` | bool | `false` | Print the platform's header and footer: title, date, page numbers. macOS and Windows; ignored on Linux |
 | `link_base` | `http(s)` URL | none | Rewrite links to other notes onto this published site (`/guide/` → `<link_base>guide/`). Unset, those links are removed and their text kept. A trailing `/` is added |
 | `timeout_ms` | integer ≥ 1 | `30000` | How long to wait for the page to finish rendering (images, diagrams, math, highlighting, fonts) before exporting it anyway, with a warning. `mbr --pdf` also gives the repository scan this budget |
+| `ready` | `page`, `load` | `page` | What the export waits for. `page`: the page says it is ready, once images, diagrams, math, highlighting and fonts are done (every page mbr renders, and a [custom page template](../features/custom-page-templates.md#printing-and-pdf-export) that includes `/.mbr/_export_ready.html`). `load`: the page's `load` event and then its fonts, for a template that runs none of mbr's scripts; the page is printed as written (no `export.css`, no generated `@page` rule, links left as they are) |
 
 ```toml
 # .mbr/config.toml
@@ -938,7 +939,7 @@ into the page: an unknown key (`papr`), an unknown paper (`"tabloid"`), an
 orientation other than the two, a margin that is not lengths
 (`"1in; color: red"`, or a bare number other than `0`), a `link_base` that is
 not an `http(s)` URL with a host or has a `?query` or `#fragment`, and
-`timeout_ms = 0` all stop mbr with a configuration error, like any other
+`timeout_ms = 0` and a `ready` other than `page` or `load` all stop mbr with a configuration error, like any other
 option.
 
 **Environment variables:** one key at a time with a double underscore,

@@ -413,6 +413,14 @@ jobs:
       - name: Run tests
         run: nix build -L .#tests-minimal
 
+      # The library as a host application links it (`default-features = false,
+      # features = ["gui"]`, e.g. Ledgeline Invoicer exporting PDFs through
+      # `pdf_export::ExportSession`): lints it and fails if ffmpeg or pdfium
+      # ever creep into that dependency tree. Shares this job's
+      # `cargoArtifactsMinimal`.
+      - name: Clippy lint (library, gui only)
+        run: nix build -L .#clippy-gui-lib
+
   # Windows build + lint + test.
   #
   # Nix does not run on Windows, so this job is the one place in CI that uses the

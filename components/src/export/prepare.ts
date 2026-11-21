@@ -3,14 +3,19 @@
  * finish the page for paper and wait until it may be printed
  * (design/pdf-export.md, "Page ⇄ Rust contract").
  *
- * 1. adds `<style id="mbr-export-page">@page { size: Win Hin; margin: M }</style>`
- *    and loads `/.mbr/export.css` (overridable in `.mbr/`);
+ * 1. loads `/.mbr/export.css` (overridable in `.mbr/`);
  * 2. forces every `img[loading=lazy]` to load — a hidden view never lays out
  *    the viewport a lazy image waits for;
  * 3. applies the link policy (internal links would point at the exporter's
  *    ephemeral loopback server, dead once the export ends);
- * 4. waits for images (10 s cap), mermaid, KaTeX and hljs (15 s cap each),
- *    then the fonts — a cap that runs out is a warning, never a failure.
+ * 4. waits for images (10 s cap), mermaid, KaTeX and hljs (15 s cap each);
+ * 5. adds `<style id="mbr-export-page">@page { size: Win Hin; margin: M }</style>`
+ *    with only what the page's own `@page` rules leave out (`page-box.ts`:
+ *    a template's `@page` wins), once every stylesheet has loaded;
+ * 6. waits for the fonts. A cap that runs out is a warning, never a failure.
+ *
+ * The result carries the page's declared sheet size (`page`), which Rust
+ * prints on: WebKit's print system ignores `@page { size }`.
  *
  * Posting the result to Rust and `window.mbrExportReady` are the main-bundle
  * trigger's (`export-ready.ts`), so a chunk that fails to load is still
@@ -23,6 +28,15 @@
  * page-scoped arrives in {@link ExportDeps}.
  */
 import { EXPORT_CSS_FILE, EXPORT_PAGE_STYLE_ID, UNLINKED_CLASS } from './contract.ts'
+import {
+  type DeclaredPageBox,
+  MARGIN_SIDES,
+  type PageSize,
+  type SheetLike,
+  declaredPageBox,
+  marginLonghands,
+  mbrSheetMatcher,
+} from './page-box.ts'
 
 /** How long all of the page's images together may take. */
 export const IMAGE_CAP_MS = 10_000
@@ -42,12 +56,27 @@ const MAX_NAMED_IMAGES = 5
 /** What happens to links into the site (see design/pdf-export.md, "Links"). */
 export type LinkPolicy = { kind: 'strip' } | { kind: 'base'; base: URL }
 
+/**
+ * What the export waits for: `page` (default), this run's message; `load`,
+ * the `load` event and the fonts, posted by the script Rust injects — the
+ * page's own scripts then stay out of it (`export-run.ts`).
+ */
+export type ReadySignal = 'page' | 'load'
+
 /** `window.__MBR_EXPORT__`, validated. */
 export interface ExportOptions {
   links: LinkPolicy
   paperWidthIn: number
   paperHeightIn: number
   margin: string
+  ready: ReadySignal
+}
+
+/** What a run resolves with, and the ready message's JSON. */
+export interface ExportResult {
+  warnings: string[]
+  /** The sheet the page's own `@page { size }` declares, when it does. */
+  page?: PageSize
 }
 
 /** Thrown for a malformed flag; its message is what Rust reports. */
@@ -91,6 +120,12 @@ function linkPolicy(value: unknown): LinkPolicy {
   throw new ExportOptionsError(`links must be "strip" or {"base": url}, got ${JSON.stringify(value)}`)
 }
 
+function readySignal(value: unknown): ReadySignal {
+  if (value === undefined || value === 'page') return 'page'
+  if (value === 'load') return 'load'
+  throw new ExportOptionsError(`ready must be "page" or "load", got ${JSON.stringify(value)}`)
+}
+
 /** Validates the flag Rust injected. Throws {@link ExportOptionsError}. */
 export function parseExportOptions(raw: unknown): ExportOptions {
   if (!isRecord(raw)) throw new ExportOptionsError('__MBR_EXPORT__ is not an object')
@@ -103,25 +138,54 @@ export function parseExportOptions(raw: unknown): ExportOptions {
     paperWidthIn: paperLength(raw['paperWidthIn'], 'paperWidthIn'),
     paperHeightIn: paperLength(raw['paperHeightIn'], 'paperHeightIn'),
     margin: margin.trim(),
+    ready: readySignal(raw['ready']),
   }
 }
 
-/** The generated `@page` rule. Orientation is already in the width and height. */
-export function pageRule(options: ExportOptions): string {
-  return `@page { size: ${options.paperWidthIn}in ${options.paperHeightIn}in; margin: ${options.margin} }`
+/** A page that declares nothing in `@page` itself. */
+const NOTHING_DECLARED: DeclaredPageBox = { size: null, margins: new Set() }
+
+/**
+ * The generated `@page` rule: the configured size and margin, minus whatever
+ * the page's own `@page` rules declare (those win). Orientation is already in
+ * the width and height. Empty when the page declares everything.
+ */
+export function pageRule(options: ExportOptions, declared: DeclaredPageBox = NOTHING_DECLARED): string {
+  const descriptors: string[] = []
+  if (!declared.size) descriptors.push(`size: ${options.paperWidthIn}in ${options.paperHeightIn}in`)
+  if (declared.margins.size === 0) {
+    descriptors.push(`margin: ${options.margin}`)
+  } else {
+    const longhands = marginLonghands(options.margin)
+    for (const side of MARGIN_SIDES) {
+      if (!declared.margins.has(side)) descriptors.push(`${side}: ${longhands[side]}`)
+    }
+  }
+  return descriptors.length === 0 ? '' : `@page { ${descriptors.join('; ')} }`
 }
 
 // ---------------------------------------------------------------------------
 // Page preparation
 // ---------------------------------------------------------------------------
 
-/** Adds (or replaces) the `@page` rule, last in `<head>` so it beats theme.css's. */
-export function installPageStyle(doc: Document, options: ExportOptions): void {
+/**
+ * Adds (or replaces) the `@page` rule, last in `<head>` so it beats theme.css's;
+ * none at all when the page declares every descriptor itself.
+ */
+export function installPageStyle(doc: Document, options: ExportOptions, declared: DeclaredPageBox = NOTHING_DECLARED): void {
   doc.getElementById(EXPORT_PAGE_STYLE_ID)?.remove()
+  const rule = pageRule(options, declared)
+  if (rule === '') return
   const style = doc.createElement('style')
   style.id = EXPORT_PAGE_STYLE_ID
-  style.textContent = pageRule(options)
+  style.textContent = rule
   doc.head.appendChild(style)
+}
+
+/** The page's own `@page` box, from its stylesheets, mbr's own left out. */
+export function documentPageBox(doc: Document, assetBase: string): DeclaredPageBox {
+  const isMbrSheet = mbrSheetMatcher(assetBase, doc.baseURI, EXPORT_PAGE_STYLE_ID)
+  return declaredPageBox(doc.styleSheets as unknown as ArrayLike<SheetLike>, isMbrSheet)
 }
 
 /** Makes every lazy image load now. Returns how many it changed. */
@@ -275,6 +339,11 @@ export interface ExportDeps {
   assetBase: () => string
   /** The main bundle's loaders' settle promises. */
   settled: { mermaid: () => Promise<void>; math: () => Promise<void>; hljs: () => Promise<void> }
+  /**
+   * The page's own `@page` box. Defaults to {@link documentPageBox}; tests
+   * stand it in (happy-dom drops `@page` rules).
+   */
+  pageBox?: () => DeclaredPageBox
   /** Defaults to {@link IMAGE_CAP_MS} / {@link SETTLE_CAP_MS}; tests shorten them. */
   imageCapMs?: number
   settleCapMs?: number
@@ -290,6 +359,12 @@ export function boundedText(text: string): string {
   return text.length > MAX_WARNING_LENGTH ? `${text.slice(0, MAX_WARNING_LENGTH - 1)}…` : text
 }
 
+/** Four decimals: a hundredth of a millimetre, as Rust writes the flag. */
+function roundedSize(size: PageSize): PageSize {
+  const round = (inches: number) => Math.round(inches * 10_000) / 10_000
+  return { widthIn: round(size.widthIn), heightIn: round(size.heightIn) }
+}
+
 /** Trims and caps warnings: they cross into Rust, which treats them as text. */
 function boundedWarnings(warnings: readonly string[]): string[] {
   return warnings.slice(0, MAX_WARNINGS).map(boundedText)
@@ -299,7 +374,7 @@ function boundedWarnings(warnings: readonly string[]): string[] {
  * Prepares the page and waits until it is ready to print. Rejects only for
  * a malformed flag or an unexpected error; every cap is a warning.
  */
-export async function prepareForExport(raw: unknown, deps: ExportDeps): Promise<{ warnings: string[] }> {
+export async function prepareForExport(raw: unknown, deps: ExportDeps): Promise<ExportResult> {
   const options = parseExportOptions(raw)
   const { doc } = deps
   const imageCapMs = deps.imageCapMs ?? IMAGE_CAP_MS
@@ -312,7 +387,6 @@ export async function prepareForExport(raw: unknown, deps: ExportDeps): Promise<
   // `*Settled()` promises below are the real ones.
   await tick()
 
-  installPageStyle(doc, options)
   const cssUrl = `${deps.assetBase()}${EXPORT_CSS_FILE}`
   const css = deps.loadCss(cssUrl).catch(() => {
     warnings.push(`export stylesheet failed to load: ${cssUrl}`)
@@ -342,10 +416,17 @@ export async function prepareForExport(raw: unknown, deps: ExportDeps): Promise<
   const late = allImages(doc).filter((img) => !seen.has(img))
   if (late.length > 0) await waitForImages(late, deadline, imageCapMs, warnings)
 
+  // Every stylesheet has loaded by now, so the page's own `@page` rules can
+  // be read: what they declare wins over the configured paper and margin.
+  const declared = deps.pageBox ? deps.pageBox() : documentPageBox(doc, deps.assetBase())
+  installPageStyle(doc, options, declared)
+
   // Last: KaTeX's fonts are only requested once math has rendered.
   const fonts = (doc as Document & { fonts?: FontFaceSet }).fonts
   if (fonts) await settle('fonts', () => fonts.ready.then(() => undefined))
 
-  return { warnings: boundedWarnings(warnings) }
+  const result: ExportResult = { warnings: boundedWarnings(warnings) }
+  if (declared.size) result.page = roundedSize(declared.size)
+  return result
 }
 

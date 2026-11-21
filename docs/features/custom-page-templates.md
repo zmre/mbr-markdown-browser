@@ -84,7 +84,9 @@ Payment is due within 30 days. Thank you for your business.
 <html lang="en">
 <head>
   {% include "/.mbr/_head.html" %}
+  {% include "/.mbr/_export_ready.html" %}
   <title>{{ title }}</title>
+  <style>@page { size: A4; margin: 18mm; }</style>
 </head>
 <body>
   <main class="container">
@@ -133,7 +135,8 @@ Payment is due within 30 days. Thank you for your business.
 ```
 
 Open `/clients/acme/2026-001/` and the invoice is the page. The template files
-themselves are not served or published (see below).
+themselves are not served or published (see below). `_export_ready.html` and
+the `@page` rule are for [saving it as a PDF](#printing-and-pdf-export).
 
 ## What a template can use
 
@@ -202,7 +205,8 @@ none). The raw values stay in `frontmatter` as written.
 A template that does not include `/.mbr/_head.html` and `/.mbr/_footer.html`
 gets none of mbr's interface: no sidebar, no search, no live reload. That is
 often the point (an invoice to print), but include them if you want the page
-to behave like the rest of the site.
+to behave like the rest of the site. mbr's scripts themselves are
+`/.mbr/_scripts.html`, which needs `_head.html` before it.
 
 The same goes for the theme of an app that [embeds mbr](../reference/embedding/#where-the-markup-appears):
 it reaches a page template through `/.mbr/_head.html`, or through
@@ -232,6 +236,30 @@ A URL with a scheme or a host (`https://…`, `//cdn…`, `mailto:`) passes thro
 unchanged. URLs inside the template are not otherwise rewritten, and a
 relative URL (`logo.png`) would be relative to the page's own address
 (`/clients/acme/2026-001/`), not to the template's folder.
+
+## Printing and PDF export
+
+A template page can be saved as a PDF like any other (`mbr --pdf`, **Save as
+PDF…**), with two things to know:
+
+- **Readiness.** The export waits for the page to say it has finished
+  rendering, and the script that says so is part of mbr's scripts
+  (`/.mbr/_scripts.html`). A template without them should include
+  `{% include "/.mbr/_export_ready.html" %}` in its `<head>`: a small script
+  that does nothing except during an export, when it waits for images, fonts
+  and (if the template loads mermaid) diagrams and then signals ready.
+  Without either, every export waits out the whole timeout (30 seconds by
+  default). For a page that can run no script of mbr's at all, `ready = "load"`
+  in `[pdf]` prints on the `load` event instead. See
+  [PDF Export](pdf-export/#pages-with-a-custom-template).
+- **Paper and margins.** The template's own `@page` rule wins over the
+  `[pdf]` paper and margin: `@page { size: A5; margin: 20mm }` gives an A5 PDF
+  with 20 mm margins whatever `[pdf]` says, and sides or a size it leaves out
+  come from `[pdf]`. See
+  [Paper and margins set by the page](pdf-export/#paper-and-margins-set-by-the-page).
+
+A host application that links mbr as a library exports the same way; see
+[Exporting PDFs from a host application](pdf-export/#exporting-pdfs-from-a-host-application).
 
 ## Template files are not published
 

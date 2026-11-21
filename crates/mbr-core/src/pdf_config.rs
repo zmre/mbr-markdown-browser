@@ -20,6 +20,12 @@ const MM_PER_INCH: f64 = 25.4;
 const MIN_PAPER_INCHES: f64 = 1.0;
 const MAX_PAPER_INCHES: f64 = 200.0;
 
+/// Whether `inches` is a paper edge mbr accepts (1–200 in), from a flag, the
+/// configuration or a page's own `@page { size }`.
+pub fn paper_edge_in_range(inches: f64) -> bool {
+    (MIN_PAPER_INCHES..=MAX_PAPER_INCHES).contains(&inches)
+}
+
 /// Default readiness timeout: how long the exporter waits for the page to say
 /// it has finished rendering before exporting anyway.
 pub const DEFAULT_PDF_TIMEOUT_MS: u64 = 30_000;
@@ -120,7 +126,7 @@ impl std::str::FromStr for Paper {
                 .filter(|_| plain)
                 .map(|v| v / per_inch)
                 .ok_or_else(invalid)?;
-            if (MIN_PAPER_INCHES..=MAX_PAPER_INCHES).contains(&inches) {
+            if paper_edge_in_range(inches) {
                 Ok(inches)
             } else {
                 Err(format!(
@@ -159,6 +165,46 @@ impl std::fmt::Display for Paper {
                 width_in,
                 height_in,
             } => write!(f, "{width_in}x{height_in}in"),
+        }
+    }
+}
+
+/// What the exporter waits for before printing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadySignal {
+    /// The page says it is ready (`mbr:export-ready:`): mbr's main bundle, or
+    /// the `/.mbr/_export_ready.html` partial on a custom template, waits for
+    /// images, diagrams, math, highlighting and fonts first. The default.
+    #[default]
+    Page,
+    /// The page's `load` event, then `document.fonts.ready`, signalled by the
+    /// exporter's own injected script — for a page that runs neither of mbr's
+    /// scripts. The page is printed as written: no export.css, no generated
+    /// `@page` rule, no link policy.
+    Load,
+}
+
+impl std::str::FromStr for ReadySignal {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "page" => Ok(ReadySignal::Page),
+            "load" => Ok(ReadySignal::Load),
+            _ => Err(format!(
+                "invalid ready {raw:?}, expected \"page\" or \"load\""
+            )),
+        }
+    }
+}
+
+impl ReadySignal {
+    /// The name the page reads in `window.__MBR_EXPORT__.ready`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadySignal::Page => "page",
+            ReadySignal::Load => "load",
         }
     }
 }
@@ -338,6 +384,9 @@ pub struct PdfConfig {
     /// anyway (with a warning), in milliseconds. Default 30000; must be > 0.
     #[serde(deserialize_with = "deserialize_timeout_ms")]
     pub timeout_ms: u64,
+    /// What to wait for before printing: `page` (default), the page's own
+    /// ready signal; `load`, the load event plus fonts.
+    pub ready: ReadySignal,
 }
 
 impl Default for PdfConfig {
@@ -349,6 +398,7 @@ impl Default for PdfConfig {
             page_numbers: false,
             link_base: None,
             timeout_ms: DEFAULT_PDF_TIMEOUT_MS,
+            ready: ReadySignal::Page,
         }
     }
 }

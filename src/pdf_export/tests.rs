@@ -74,10 +74,12 @@ fn flags_beat_the_configuration() {
         page_numbers: Some(true),
         link_base: Some("https://b.example.com/".parse().unwrap()),
         timeout_ms: Some(99),
+        ready: Some(ReadySignal::Load),
     };
     let options = PdfOptions::resolve(&config, &flags, no_default);
     assert_eq!(options.paper, Paper::Letter);
     assert_eq!(options.orientation, Orientation::Landscape);
+    assert_eq!(options.ready, ReadySignal::Load);
     assert_eq!(options.margin.as_css(), "0");
     assert!(options.page_numbers);
     assert_eq!(
@@ -139,6 +141,7 @@ fn export_flag_is_the_contract_json() {
             "paperWidthIn": 8.2677,
             "paperHeightIn": 11.6929,
             "margin": "0.6in 0.5in",
+            "ready": "page",
         })
     );
 
@@ -175,6 +178,96 @@ fn init_script_assigns_the_global() {
     );
 }
 
+/// `ready = "load"`: the flag says so (the page's scripts stay out), and the
+/// init script itself posts one ready message on `load` plus the fonts.
+#[test]
+fn ready_on_load_posts_from_the_init_script() {
+    let config = config_with(|c| {
+        c.ready = ReadySignal::Load;
+        c.paper = Some(Paper::A4);
+    });
+    let options = PdfOptions::resolve(&config, &PdfFlags::default(), no_default);
+    assert_eq!(options.ready, ReadySignal::Load);
+    let flag: serde_json::Value = serde_json::from_str(&options.export_flag_json()).unwrap();
+    assert_eq!(flag["ready"], "load");
+
+    let script = options.init_script();
+    let (assignment, signal) = script.split_once('\n').expect("two parts");
+    assert!(assignment.starts_with(&format!("window.{EXPORT_FLAG_GLOBAL} = ")));
+    assert!(signal.contains("addEventListener('load'"), "{signal}");
+    assert!(signal.contains("document.fonts"), "{signal}");
+    assert!(
+        signal.contains(r#"ipc.postMessage("mbr:export-ready:{\"warnings\":[]}")"#),
+        "{signal}"
+    );
+    assert!(!signal.contains("requestAnimationFrame"));
+    assert!(!script.contains("</script"));
+
+    // The flag beats the file, in either direction.
+    let flags = PdfFlags {
+        ready: Some(ReadySignal::Page),
+        ..PdfFlags::default()
+    };
+    let options = PdfOptions::resolve(&config, &flags, no_default);
+    assert_eq!(options.ready, ReadySignal::Page);
+    assert!(!options.init_script().contains("addEventListener"));
+}
+
+// ---- a page's own @page size -------------------------------------------------
+
+fn page(width_in: f64, height_in: f64) -> Option<PageSize> {
+    Some(PageSize {
+        width_in,
+        height_in,
+    })
+}
+
+#[test]
+fn no_page_size_keeps_the_options() {
+    let options = PdfOptions::resolve(&PdfConfig::default(), &PdfFlags::default(), || {
+        Paper::Letter
+    });
+    assert_eq!(options.with_page_size(None), options);
+}
+
+/// The declared sheet replaces the configured paper and orientation, and
+/// prints the same size it was declared as.
+#[test]
+fn a_declared_page_size_wins_over_paper_and_orientation() {
+    let mut options = PdfOptions::resolve(&PdfConfig::default(), &PdfFlags::default(), || {
+        Paper::Letter
+    });
+    options.orientation = Orientation::Landscape;
+    let round = |(w, h): (f64, f64)| ((w * 100.0).round() / 100.0, (h * 100.0).round() / 100.0);
+
+    // A5 portrait: a custom sheet, as written.
+    let a5 = options.with_page_size(page(5.8268, 8.2677));
+    assert_eq!(
+        a5.paper,
+        Paper::Custom {
+            width_in: 5.8268,
+            height_in: 8.2677
+        }
+    );
+    assert_eq!(a5.orientation, Orientation::Portrait);
+    assert_eq!(round(a5.page_size_in()), (5.83, 8.27));
+    // Everything else is untouched.
+    assert_eq!(a5.margin, options.margin);
+    assert_eq!(a5.links, options.links);
+
+    // A4 landscape: named A4, turned.
+    let a4 = options.with_page_size(page(11.6929, 8.2677));
+    assert_eq!(a4.paper, Paper::A4);
+    assert_eq!(a4.orientation, Orientation::Landscape);
+    assert_eq!(round(a4.page_size_in()), (11.69, 8.27));
+    assert_eq!(a4.sheet().orientation, Orientation::Landscape);
+
+    // Letter portrait, over a landscape configuration.
+    let letter = options.with_page_size(page(8.5, 11.0));
+    assert_eq!(letter.paper, Paper::Letter);
+    assert_eq!(letter.orientation, Orientation::Portrait);
+    assert_eq!(letter.page_size_in(), (8.5, 11.0));
+}
 // ---- IPC parsing -----------------------------------------------------------
 
 #[test]
@@ -182,13 +275,54 @@ fn ready_message_carries_its_warnings() {
     assert_eq!(
         parse_export_message(r#"mbr:export-ready:{"warnings":["image a.png did not load"]}"#),
         Some(ExportMessage::Ready {
-            warnings: vec!["image a.png did not load".to_owned()]
+            warnings: vec!["image a.png did not load".to_owned()],
+            page: None,
         })
     );
     assert_eq!(
         parse_export_message(r#"mbr:export-ready:{"warnings":[]}"#),
-        Some(ExportMessage::Ready { warnings: vec![] })
+        Some(ExportMessage::Ready {
+            warnings: vec![],
+            page: None
+        })
     );
+}
+
+/// A page whose own `@page { size }` declares the sheet says so; a size mbr
+/// cannot print on (or a malformed one) is ignored with a warning.
+#[test]
+fn ready_message_carries_the_page_size() {
+    assert_eq!(
+        parse_export_message(
+            r#"mbr:export-ready:{"warnings":[],"page":{"widthIn":5.8268,"heightIn":8.2677}}"#
+        ),
+        Some(ExportMessage::Ready {
+            warnings: vec![],
+            page: Some(PageSize {
+                width_in: 5.8268,
+                height_in: 8.2677
+            }),
+        })
+    );
+    for bad in [
+        r#"{"widthIn":0.5,"heightIn":8}"#,
+        r#"{"widthIn":5,"heightIn":500}"#,
+        r#"{"widthIn":"5","heightIn":8}"#,
+        r#"{"widthIn":5}"#,
+        r#""a4""#,
+        "null",
+    ] {
+        match parse_export_message(&format!(
+            r#"mbr:export-ready:{{"warnings":[],"page":{bad}}}"#
+        )) {
+            Some(ExportMessage::Ready { warnings, page }) => {
+                assert_eq!(page, None, "{bad}");
+                assert_eq!(warnings.len(), 1, "{bad}: {warnings:?}");
+                assert!(warnings[0].contains("@page size"), "{warnings:?}");
+            }
+            other => panic!("{bad} gave {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -227,7 +361,7 @@ fn other_messages_are_not_export_messages() {
 #[test]
 fn hostile_ready_payloads_are_contained() {
     let malformed = |body: &str| match parse_export_message(body) {
-        Some(ExportMessage::Ready { warnings }) => warnings,
+        Some(ExportMessage::Ready { warnings, .. }) => warnings,
         other => panic!("{body:?} gave {other:?}"),
     };
     assert_eq!(malformed("mbr:export-ready:not json").len(), 1);
@@ -302,7 +436,31 @@ fn editor_state_is_parsed_exactly() {
 fn ready(warnings: &[&str]) -> JobEvent {
     JobEvent::Message(ExportMessage::Ready {
         warnings: warnings.iter().map(|w| (*w).to_owned()).collect(),
+        page: None,
     })
+}
+
+#[test]
+fn job_keeps_the_page_size_from_the_ready_message() {
+    let mut job = PdfJob::new(Duration::from_secs(30));
+    assert_eq!(job.page_size(), None);
+    let page = PageSize {
+        width_in: 5.8268,
+        height_in: 8.2677,
+    };
+    let step = job.on_event(JobEvent::Message(ExportMessage::Ready {
+        warnings: vec![],
+        page: Some(page),
+    }));
+    assert_eq!(step, JobStep::Print);
+    assert_eq!(job.page_size(), Some(page));
+}
+
+#[test]
+fn job_without_a_ready_message_has_no_page_size() {
+    let mut job = PdfJob::new(Duration::from_secs(30));
+    assert_eq!(job.on_event(JobEvent::TimedOut), JobStep::Print);
+    assert_eq!(job.page_size(), None);
 }
 
 #[test]
