@@ -61,4 +61,10 @@
       // Written by components/src/calendar/companion-pref.ts, whose
       // companionHiddenKey() builds the same per-repository key.
       try { if (localStorage.getItem("mbr_calendar_companion_hidden" + ((window.__MBR_CONFIG__ || {}).repoId ? ":" + window.__MBR_CONFIG__.repoId : "")) === "1") document.documentElement.classList.add("mbr-companion-hidden") } catch (e) {}
-    </script>{% endif %}
+    </script>{% endif %}{#
+      An embedding app's theme and head markup (ServerConfig::theme_vars /
+      extra_head_html, see host_head.rs), last so it overrides mbr's and the
+      repository's CSS; nothing without a host. Keep this call in a custom
+      _head.html to keep the host's theme. Placed before the final newline so a
+      page without a host is byte-identical.
+    #}{{ host_head() }}

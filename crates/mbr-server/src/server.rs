@@ -1545,6 +1545,18 @@ pub struct ServerConfig {
     /// `config_parse_error`. `None` at a desktop launch, which refuses to
     /// start on a broken file.
     pub config_problem: Option<String>,
+    /// HTML an embedding app adds to the `<head>` of every page, after mbr's
+    /// own CSS (and after the `theme_vars` style). Emitted verbatim: it is
+    /// the host's markup, never a repository's. `None` (the default, and
+    /// what [`ServerConfig::from`] gives) adds nothing. See
+    /// [`mbr_core::host_head`].
+    pub extra_head_html: Option<String>,
+    /// CSS custom properties an embedding app sets on every page
+    /// (`--pico-primary` → `light-dark(#7c3aed, #a78bfa)`), emitted as one
+    /// `:root` rule with `!important` in an inline `<style>`. Validated at
+    /// [`Server::init`], which refuses a name or value that could leave its
+    /// declaration ([`ServerError::HostHead`]). Empty by default.
+    pub theme_vars: std::collections::BTreeMap<String, String>,
 }
 
 /// The repository storage an embedding app hands the server.
@@ -1638,6 +1650,8 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             transcode_enabled: config.transcode,
             embedded: None,
             config_problem: None,
+            extra_head_html: None,
+            theme_vars: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2539,7 +2553,11 @@ impl Server {
             transcode_enabled,
             embedded,
             config_problem,
+            extra_head_html,
+            theme_vars,
         } = config;
+        let host_head =
+            mbr_core::host_head::HostHead::new(extra_head_html.as_deref(), &theme_vars)?;
 
         let oembed_cache = match previous {
             Some(previous) if previous.oembed_cache_size == oembed_cache_size => {
@@ -2592,7 +2610,8 @@ impl Server {
             .try_init();
 
         let templates = templates::Templates::new(base_dir.as_path(), template_folder.as_deref())
-            .map_err(ServerError::TemplateInit)?;
+            .map_err(ServerError::TemplateInit)?
+            .with_host_head(host_head);
 
         let is_embedded = embedded.is_some();
         // A reload that leaves the scan inputs alone keeps the repository:

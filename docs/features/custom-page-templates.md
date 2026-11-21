@@ -208,6 +208,11 @@ often the point (an invoice to print), but include them if you want the page
 to behave like the rest of the site. mbr's scripts themselves are
 `/.mbr/_scripts.html`, which needs `_head.html` before it.
 
+The same goes for the theme of an app that [embeds mbr](../reference/embedding/#where-the-markup-appears):
+it reaches a page template through `/.mbr/_head.html`, or through
+`{{ host_head() }}` in a head of the template's own, and not at all otherwise,
+so a customer-facing document keeps its own look.
+
 ### URLs
 
 Write a URL to a file in the repository relative to the **repository root**,

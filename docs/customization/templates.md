@@ -22,7 +22,7 @@ Partials are prefixed with underscore and included by other templates:
 
 | Partial | Purpose |
 |---------|---------|
-| `_head.html` | Base `<head>` content |
+| `_head.html` | Base `<head>` content; ends with `{{ host_head() }}` (see [Host Theme](#host-theme)) |
 | `_head_markdown.html` | Extended head for markdown |
 | `_nav.html` | Navigation bar |
 | `_breadcrumbs.html` | Breadcrumb bar |
@@ -182,6 +182,18 @@ The `icon()` function draws one of mbr's built-in icons (the [Lucide](https://lu
 ```
 
 `name` is required; `size` is in CSS pixels and defaults to 20. The names available are the files in `crates/mbr-core/templates/icons/` (for example `chevron-left`, `chevron-right`, `arrow-up`, `house`, `info`, `search`, `x`, `user`, `building-2`). An unknown name is a template error rather than an empty space. Icons are decorative (`aria-hidden`), so give the surrounding link or button its own text or `aria-label`. The `mbr-icon-label` class puts an 8px gap between an icon and its label.
+
+### Host Theme
+
+`host_head()` writes the theme and head markup of an app that embeds mbr (see
+[Embedding mbr in an App](../reference/embedding/#theming-mbr-pages)), and
+nothing everywhere else. The built-in `_head.html` calls it as its last line.
+If you override `_head.html`, keep the call so the page still picks up the
+app's theme:
+
+```html
+{{ host_head() }}
+```
 
 ## Common Gotchas
 
