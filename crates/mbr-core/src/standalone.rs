@@ -2,7 +2,8 @@
 //! scan: what `mbr -o` prints, what `mbr --pdf` checks a note's page template
 //! with before it starts an export ([`check_page_template`]), and what an
 //! embedding app renders a live preview of unsaved text with
-//! ([`Renderer::render_source`]).
+//! ([`Renderer::render_source`], and [`Renderer::render_source_with_template`]
+//! for unsaved template text).
 //!
 //! The page is the one the server would send, minus what needs a server: no
 //! siblings, no backlinks, absolute URLs, and wikilinks resolved only against
@@ -123,11 +124,61 @@ impl Renderer {
     /// refused or fails to render; [`MbrError::Template`] when `index.html`
     /// fails.
     pub fn render_source(&self, relative_path: &Path, source: &str) -> Result<String, MbrError> {
+        self.render_source_through(relative_path, source, PageTemplateChoice::Note)
+    }
+
+    /// [`Self::render_source`] through **unsaved** template text: `source`
+    /// as the note at `relative_path`, rendered through `template_source` as
+    /// the page template file at `template_path` (from the repository root; a
+    /// leading `/`, as `template:` writes it, is allowed). For a template
+    /// editor's live preview, re-rendered on every edit.
+    ///
+    /// The note's own `template:` is not consulted: the page is always
+    /// rendered through the given template. Its path follows the rules of a
+    /// `template:` value (inside the repository, not hidden, `.html`) but the
+    /// file need not exist yet. The `.html` files beside it (what it includes
+    /// or extends) and mbr's templates come from disk, as for any render; its
+    /// own saved file does not. Nothing is cached: the next
+    /// [`Self::render_source`] reads the saved template again, so a broken
+    /// draft affects only this call.
+    ///
+    /// # Errors
+    ///
+    /// [`MbrError::PageTemplate`] when the path is refused, the text is
+    /// larger than [`page_template::MAX_TEMPLATE_BYTES`], or the text does
+    /// not parse or render — [`PageTemplateError::Render`], naming the
+    /// template and carrying Tera's message (line and column of a syntax
+    /// error).
+    pub fn render_source_with_template(
+        &self,
+        relative_path: &Path,
+        source: &str,
+        template_path: &Path,
+        template_source: &str,
+    ) -> Result<String, MbrError> {
+        self.render_source_through(
+            relative_path,
+            source,
+            PageTemplateChoice::Unsaved {
+                path: template_path,
+                source: template_source,
+            },
+        )
+    }
+
+    /// `source` as the note at `relative_path`, rendered with no I/O but the
+    /// page template's, through the page template `choice` names.
+    fn render_source_through(
+        &self,
+        relative_path: &Path,
+        source: &str,
+        choice: PageTemplateChoice<'_>,
+    ) -> Result<String, MbrError> {
         let absolute_path = self.config.root_dir.join(relative_path);
         let render_result =
             markdown::render_str(source, &absolute_path, self.render_options(&absolute_path))
                 .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
-        self.page(&absolute_path, relative_path, render_result)
+        self.page(&absolute_path, relative_path, render_result, choice)
     }
 
     /// Renders the markdown file at `absolute_path` (`relative_path` from the
@@ -158,7 +209,12 @@ impl Renderer {
         )
         .await
         .inspect_err(|e| tracing::error!("Error rendering markdown: {:?}", e))?;
-        self.page(absolute_path, relative_path, render_result)
+        self.page(
+            absolute_path,
+            relative_path,
+            render_result,
+            PageTemplateChoice::Note,
+        )
     }
 
     /// The markdown render's options for the note at `absolute_path`: build
@@ -198,13 +254,14 @@ impl Renderer {
     }
 
     /// The whole page for a rendered note: the context the server and the
-    /// static build give their templates, then the note's page template or
-    /// `index.html`.
+    /// static build give their templates, then the page template `choice`
+    /// names or `index.html`.
     fn page(
         &self,
         absolute_path: &Path,
         relative_path: &Path,
         render_result: MarkdownRenderResult,
+        choice: PageTemplateChoice<'_>,
     ) -> Result<String, MbrError> {
         let config = &self.config;
         // The same context builder the server and the static build use, so a
@@ -273,9 +330,19 @@ impl Renderer {
             &UrlMode::Absolute,
         );
 
-        let page_template = match page_template::requested_template(&frontmatter) {
-            None => None,
-            Some(requested) => Some(self.resolve(absolute_path, relative_path, requested?)?),
+        let page_template = match choice {
+            PageTemplateChoice::Note => match page_template::requested_template(&frontmatter) {
+                None => None,
+                Some(requested) => Some(self.resolve(absolute_path, relative_path, requested?)?),
+            },
+            PageTemplateChoice::Unsaved { path, source } => {
+                Some(page_template::unsaved_page_template(
+                    &self.vault,
+                    &path.to_string_lossy().replace('\\', "/"),
+                    source,
+                    &self.exempt_hidden_dirs,
+                )?)
+            }
         };
         Ok(match page_template {
             Some(template) => self.templates.render_page_template(
@@ -311,6 +378,14 @@ impl Renderer {
         };
         page_template::resolve_page_template(&self.vault, &note, template, &self.exempt_hidden_dirs)
     }
+}
+
+/// Which page template [`Renderer::page`] renders through.
+enum PageTemplateChoice<'a> {
+    /// The note's own `template:`, if any, read from disk.
+    Note,
+    /// Unsaved text as the template file at `path`.
+    Unsaved { path: &'a Path, source: &'a str },
 }
 
 /// Renders the markdown file at `absolute_path` (`relative_path` from
@@ -373,7 +448,8 @@ pub struct PageTemplateProblem {
 /// note, or a folder whose index note it shows) can be rendered through its page template, by rendering it
 /// standalone ([`render_note`]) and discarding the page.
 ///
-/// A note without `template:` costs one frontmatter read (the first 8 KB) and
+/// A note without `template:` costs one frontmatter read (the first 8 KB,
+/// more only for a longer frontmatter) and
 /// nothing else, and a folder without an index note costs a `stat`.
 pub async fn check_page_template(
     config: &Config,
@@ -609,6 +685,107 @@ mod tests {
         assert_eq!(
             renderer.render_source(Path::new("a.md"), source).unwrap(),
             "two T"
+        );
+    }
+
+    /// The invoicer's layout: notes in `invoices/`, templates in
+    /// `invoices/tpl/`, named root-relative.
+    fn invoice_repo() -> (tempfile::TempDir, Config) {
+        repo(&[
+            (
+                "invoices/tpl/invoice.html",
+                "saved {{ title }} {% include \"lines.html\" %}",
+            ),
+            ("invoices/tpl/lines.html", "[lines {{ frontmatter.n }}]"),
+        ])
+    }
+
+    const INVOICE: &str =
+        "---\ntitle: Inv\ntemplate: /invoices/tpl/invoice.html\nn: 3\n---\nBody\n";
+
+    #[test]
+    fn an_unsaved_template_renders_with_saved_partials() {
+        let (_d, config) = invoice_repo();
+        let renderer = Renderer::new(&config).unwrap();
+        let note = Path::new("invoices/2026-001.md");
+        let html = renderer
+            .render_source_with_template(
+                note,
+                INVOICE,
+                Path::new("/invoices/tpl/invoice.html"),
+                "draft {{ title }} {% include \"lines.html\" %} {{ markdown | safe }}",
+            )
+            .unwrap();
+        assert_eq!(
+            html,
+            "draft Inv [lines 3] <section>\n<p>Body</p>\n</section>\n"
+        );
+        // The saved template is untouched and still what a plain render uses.
+        assert_eq!(
+            renderer.render_source(note, INVOICE).unwrap(),
+            "saved Inv [lines 3]"
+        );
+        // The note's own `template:` is not consulted: a note naming another
+        // template, or none, renders through the given text too.
+        let plain = renderer
+            .render_source_with_template(
+                Path::new("invoices/plain.md"),
+                "---\ntitle: P\n---\n",
+                Path::new("invoices/tpl/new.html"),
+                "new {{ title }}",
+            )
+            .unwrap();
+        assert_eq!(plain, "new P");
+    }
+
+    #[test]
+    fn a_broken_unsaved_template_is_an_error_and_poisons_nothing() {
+        let (_d, config) = invoice_repo();
+        let renderer = Renderer::new(&config).unwrap();
+        let note = Path::new("invoices/2026-001.md");
+        let template = Path::new("invoices/tpl/invoice.html");
+        for (draft, expected) in [
+            // Syntax error: Tera names the place.
+            ("{% if title %}unclosed", " --> 1:"),
+            // Render error: an unknown variable.
+            ("{{ nope.nope }}", "nope"),
+            // An include of a partial that is not there.
+            ("{% include \"missing.html\" %}", "missing.html"),
+        ] {
+            let error = renderer
+                .render_source_with_template(note, INVOICE, template, draft)
+                .unwrap_err();
+            let MbrError::PageTemplate(problem @ PageTemplateError::Render { .. }) = &error else {
+                panic!("{draft}: {error:?}");
+            };
+            let message = problem.to_string();
+            assert!(
+                message.starts_with("template `/invoices/tpl/invoice.html` failed to render: "),
+                "{message}"
+            );
+            assert!(message.contains(expected), "{draft}: {message}");
+            // The next render, saved or unsaved, is unaffected.
+            assert_eq!(
+                renderer.render_source(note, INVOICE).unwrap(),
+                "saved Inv [lines 3]"
+            );
+            assert_eq!(
+                renderer
+                    .render_source_with_template(note, INVOICE, template, "ok {{ title }}")
+                    .unwrap(),
+                "ok Inv"
+            );
+        }
+        // A refused path is an error too, before anything is rendered.
+        let refused = renderer
+            .render_source_with_template(note, INVOICE, Path::new(".mbr/x.html"), "x")
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                MbrError::PageTemplate(PageTemplateError::Hidden { .. })
+            ),
+            "{refused:?}"
         );
     }
 

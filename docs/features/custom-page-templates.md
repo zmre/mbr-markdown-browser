@@ -43,7 +43,8 @@ hidden folder (`.mbr/`, `.git/`) and anything that is not an `.html` file.
 
 Keep templates out of a folder named `templates/`: it is in the default
 `ignore_dirs`, so the page still renders, but the watcher never sees you save
-the file, and the page will not live-reload.
+the file, and the page will not live-reload. Any other folder works, for
+example `invoices/tpl/` with `template: /invoices/tpl/invoice.html`.
 
 ## A worked example: an invoice
 
@@ -289,7 +290,11 @@ the normal page — for an invoice, the normal page would be the wrong document.
 ## Live reload
 
 Saving the template, or any `.html` file beside it, reloads every open page
-rendered with it, just as saving the note does.
+rendered with it, just as saving the note does. Pages that use another
+template, or none, are not reloaded.
+
+An app that embeds mbr can also preview a template before it is saved; see
+[Previewing an unsaved template](../reference/embedding/#previewing-an-unsaved-template).
 
 ## In QuickLook
 

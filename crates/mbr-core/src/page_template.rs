@@ -303,6 +303,47 @@ pub fn resolve_page_template(
     })
 }
 
+/// A page template from **unsaved** text: `source` as the contents of the
+/// template file at `template` (from the repository root; a leading `/` is
+/// allowed), for a template editor's live preview. Nothing is cached, so the
+/// text never replaces what is on disk for any other render.
+///
+/// The path obeys the rules of [`locate_page_template`] (inside the
+/// repository, not hidden, `.html`), but the file need not exist yet (a new
+/// template). The siblings are read from disk as [`resolve_page_template`]
+/// reads them — the template's own file excluded, so its saved version is not
+/// registered beside the unsaved one.
+pub fn unsaved_page_template(
+    vault: &dyn Vault,
+    template: &str,
+    source: &str,
+    exempt: &[VaultPath],
+) -> Result<PageTemplate, PageTemplateError> {
+    let rooted = format!("/{}", template.trim().trim_start_matches('/'));
+    let path = match locate_page_template(vault, &VaultPath::root(), &rooted, exempt) {
+        Ok(path) => path,
+        // Not on disk (yet): the lexical checks all passed before the lookup,
+        // so the lexical path is the template's.
+        Err(PageTemplateError::NotFound { .. }) => {
+            VaultPath::new(&rooted[1..]).map_err(|_| PageTemplateError::OutsideRoot {
+                template: rooted.clone(),
+            })?
+        }
+        Err(e) => return Err(e),
+    };
+    if u64::try_from(source.len()).unwrap_or(u64::MAX) > MAX_TEMPLATE_BYTES {
+        return Err(PageTemplateError::TooLarge { template: rooted });
+    }
+    let Siblings { read, pending } = read_siblings(vault, &path, exempt);
+    Ok(PageTemplate {
+        authored: rooted,
+        path,
+        source: source.to_string(),
+        siblings: read,
+        pending_siblings: pending,
+    })
+}
+
 /// [`read_siblings`]' answer.
 struct Siblings {
     read: Vec<(String, String)>,
@@ -614,6 +655,56 @@ mod tests {
         let (_d, vault) = repo(&[("n.md", "x"), ("t.html", &big)]);
         assert!(matches!(
             resolve(&vault, "n.md", "t.html"),
+            Err(PageTemplateError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unsaved_template_takes_the_text_and_the_saved_siblings() {
+        let (_d, vault) = repo(&[
+            ("invoices/tpl/invoice.html", "saved"),
+            ("invoices/tpl/lines.html", "lines"),
+        ]);
+        for given in ["invoices/tpl/invoice.html", "/invoices/tpl/invoice.html"] {
+            let t = unsaved_page_template(&vault, given, "unsaved", &[]).unwrap();
+            assert_eq!(t.path.as_str(), "invoices/tpl/invoice.html");
+            assert_eq!(t.authored, "/invoices/tpl/invoice.html");
+            assert_eq!(t.source, "unsaved");
+            // The saved file is not a sibling of its own unsaved text.
+            assert_eq!(
+                t.siblings,
+                [("lines.html".to_string(), "lines".to_string())]
+            );
+        }
+        // A template not saved yet, even in a folder not made yet.
+        let new = unsaved_page_template(&vault, "invoices/tpl/new.html", "n", &[]).unwrap();
+        assert_eq!(new.path.as_str(), "invoices/tpl/new.html");
+        assert_eq!(new.siblings.len(), 2);
+        let nowhere = unsaved_page_template(&vault, "drafts/x.html", "n", &[]).unwrap();
+        assert_eq!(nowhere.path.as_str(), "drafts/x.html");
+        assert!(nowhere.siblings.is_empty());
+    }
+
+    #[test]
+    fn an_unsaved_template_path_follows_the_location_rules() {
+        let (_d, vault) = repo(&[("t.html", "x")]);
+        let refused = |path: &str| unsaved_page_template(&vault, path, "x", &[]).unwrap_err();
+        assert!(matches!(
+            refused("../t.html"),
+            PageTemplateError::OutsideRoot { .. }
+        ));
+        assert!(matches!(
+            refused(".mbr/t.html"),
+            PageTemplateError::Hidden { .. }
+        ));
+        assert!(matches!(
+            refused("t.txt"),
+            PageTemplateError::NotHtml { .. }
+        ));
+        assert!(matches!(refused(""), PageTemplateError::NotHtml { .. }));
+        let big = "x".repeat(usize::try_from(MAX_TEMPLATE_BYTES).unwrap() + 1);
+        assert!(matches!(
+            unsaved_page_template(&vault, "t.html", &big, &[]),
             Err(PageTemplateError::TooLarge { .. })
         ));
     }

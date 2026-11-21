@@ -57,23 +57,7 @@ pub struct LeadingMetadata {
 /// start with `---`/`+++` costs one byte comparison.
 pub fn leading_metadata(source: &str, options: Options) -> Option<LeadingMetadata> {
     let bytes = source.as_bytes();
-    let delimiter = *bytes.first()?;
-    let kind = match delimiter {
-        b'-' if options.contains(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS) => {
-            MetadataBlockKind::YamlStyle
-        }
-        b'+' if options.contains(Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS) => {
-            MetadataBlockKind::PlusesStyle
-        }
-        _ => return None,
-    };
-    if run_of(bytes, delimiter) != 3 {
-        return None;
-    }
-    let content_start = next_line(bytes, 3);
-    if !bytes[3..content_start].iter().all(u8::is_ascii_whitespace) {
-        return None;
-    }
+    let (kind, delimiter, content_start) = opening_line(bytes, options)?;
     // The first content line can be neither blank nor the end of the block.
     // At end of input it is an empty line, i.e. blank.
     let first = &bytes[content_start..];
@@ -95,6 +79,38 @@ pub fn leading_metadata(source: &str, options: Options) -> Option<LeadingMetadat
         line = next_line(bytes, line);
     }
     None
+}
+
+/// Whether `source` starts with a metadata block's opening line (per
+/// `options`) — true even when the block never closes. With
+/// [`leading_metadata`] it tells a prefix that cut a block short (an opener,
+/// no block) from a note without frontmatter.
+pub fn starts_with_opening_line(source: &str, options: Options) -> bool {
+    opening_line(source.as_bytes(), options).is_some()
+}
+
+/// The block kind, delimiter byte and first content byte when `bytes` starts
+/// with an opening line: exactly three delimiters of a kind `options` enables,
+/// then only ASCII whitespace.
+fn opening_line(bytes: &[u8], options: Options) -> Option<(MetadataBlockKind, u8, usize)> {
+    let delimiter = *bytes.first()?;
+    let kind = match delimiter {
+        b'-' if options.contains(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS) => {
+            MetadataBlockKind::YamlStyle
+        }
+        b'+' if options.contains(Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS) => {
+            MetadataBlockKind::PlusesStyle
+        }
+        _ => return None,
+    };
+    if run_of(bytes, delimiter) != 3 {
+        return None;
+    }
+    let content_start = next_line(bytes, 3);
+    bytes[3..content_start]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+        .then_some((kind, delimiter, content_start))
 }
 
 /// `source` without its leading metadata block (per `options`).
@@ -231,6 +247,21 @@ mod tests {
             }
             _ => (None, events),
         }
+    }
+
+    #[test]
+    fn an_opening_line_is_recognised_without_its_close() {
+        assert!(starts_with_opening_line("---\ntitle: x\n", ALL));
+        assert!(starts_with_opening_line("+++  \nx = 1\n", ALL));
+        assert!(starts_with_opening_line("---\ntitle: x\n---\n", ALL));
+        assert!(!starts_with_opening_line("----\nx\n", ALL));
+        assert!(!starts_with_opening_line("--- x\n", ALL));
+        assert!(!starts_with_opening_line("# Title\n", ALL));
+        assert!(!starts_with_opening_line("", ALL));
+        assert!(!starts_with_opening_line(
+            "+++\nx\n",
+            Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        ));
     }
 
     #[test]

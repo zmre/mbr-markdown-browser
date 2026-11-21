@@ -3579,9 +3579,56 @@ fn yaml_hash_to_metadata(hash: &yaml_rust2::yaml::Hash) -> SimpleMetadata {
     hm
 }
 
-/// Maximum bytes to read when extracting frontmatter metadata.
-/// Frontmatter should always be at the top of the file, so 8KB is plenty.
+/// Bytes read first when extracting frontmatter metadata. Frontmatter is at
+/// the top of the file, so this almost always holds all of it; when it does
+/// not ([`frontmatter_cut_short`]), the read is repeated up to
+/// [`FRONTMATTER_FULL_MAX_BYTES`].
 const FRONTMATTER_MAX_BYTES: usize = 8 * 1024;
+
+/// The most read to find a frontmatter block that does not close within
+/// [`FRONTMATTER_MAX_BYTES`] (an invoice with many fields, a contact with many
+/// addresses). A block still open after this many bytes is reported and
+/// ignored, as an unclosed block always was.
+const FRONTMATTER_FULL_MAX_BYTES: usize = 1024 * 1024;
+
+/// Whether `prefix`, the first `cap` bytes read of a note, opens a
+/// frontmatter block it does not close although the file may go on — the
+/// block may close after the cut. A prefix shorter than `cap` is the whole
+/// file.
+fn frontmatter_cut_short(prefix: &[u8], cap: usize) -> bool {
+    if prefix.len() < cap {
+        return false;
+    }
+    let decoded = String::from_utf8_lossy(prefix);
+    let text = strip_bom(&decoded);
+    let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+    crate::frontmatter::starts_with_opening_line(text, options)
+        && crate::frontmatter::leading_metadata(text, options).is_none()
+}
+
+/// The first bytes of a note that hold its whole frontmatter, through
+/// `read_prefix(max_len)`: [`FRONTMATTER_MAX_BYTES`], or — when the block
+/// does not close within them — up to [`FRONTMATTER_FULL_MAX_BYTES`]. A block
+/// still open then is logged as a warning naming `file`; its metadata is
+/// ignored, as for any unclosed block.
+fn read_frontmatter_bytes<E>(
+    file: &Path,
+    read_prefix: impl Fn(usize) -> Result<Vec<u8>, E>,
+) -> Result<Vec<u8>, E> {
+    let prefix = read_prefix(FRONTMATTER_MAX_BYTES)?;
+    if !frontmatter_cut_short(&prefix, FRONTMATTER_MAX_BYTES) {
+        return Ok(prefix);
+    }
+    let full = read_prefix(FRONTMATTER_FULL_MAX_BYTES)?;
+    if frontmatter_cut_short(&full, FRONTMATTER_FULL_MAX_BYTES) {
+        tracing::warn!(
+            path = %file.display(),
+            "Frontmatter does not close within the first {FRONTMATTER_FULL_MAX_BYTES} \
+             bytes; it is ignored for this note"
+        );
+    }
+    Ok(full)
+}
 
 /// Frontmatter extracted from a file: the simplified metadata map plus the
 /// typed relationships parsed from the raw YAML.
@@ -3601,18 +3648,20 @@ pub struct FileMetadata {
 
 pub fn extract_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<FileMetadata, MarkdownError> {
     let path = path.as_ref();
-    // Only read the first 8KB - frontmatter is always at the top
-    let buffer = crate::vault::read_prefix_native(path, FRONTMATTER_MAX_BYTES).map_err(|e| {
-        MarkdownError::ReadFailed {
-            path: path.to_path_buf(),
-            source: e,
-        }
+    // Frontmatter is at the top: the first bytes, not the whole file.
+    let buffer = read_frontmatter_bytes(path, |max_len| {
+        crate::vault::read_prefix_native(path, max_len)
+    })
+    .map_err(|e| MarkdownError::ReadFailed {
+        path: path.to_path_buf(),
+        source: e,
     })?;
     Ok(extract_metadata_from_bytes(path, &buffer))
 }
 
-/// [`extract_metadata_from_file`] for a file in a vault: the same 8 KB read,
-/// through [`crate::vault::Vault::read_prefix`].
+/// [`extract_metadata_from_file`] for a file in a vault: the same prefix read
+/// ([`FRONTMATTER_MAX_BYTES`], more only for a longer frontmatter), through
+/// [`crate::vault::Vault::read_prefix`].
 ///
 /// Errors (and the YAML warning) name the file by its [`Vault::key`], which for
 /// a [`crate::vault::LocalVault`] is the path the old file-based call printed.
@@ -3623,18 +3672,19 @@ pub fn extract_metadata_from_vault(
     path: &crate::vault::VaultPath,
 ) -> Result<FileMetadata, MarkdownError> {
     let key = vault.key(path);
-    let buffer = vault
-        .read_prefix(path, FRONTMATTER_MAX_BYTES)
-        .map_err(|e| MarkdownError::ReadFailed {
-            path: key.clone(),
-            source: e.into(),
+    let buffer =
+        read_frontmatter_bytes(&key, |max_len| vault.read_prefix(path, max_len)).map_err(|e| {
+            MarkdownError::ReadFailed {
+                path: key.clone(),
+                source: e.into(),
+            }
         })?;
     Ok(extract_metadata_from_bytes(&key, &buffer))
 }
 
 /// The **lossless** frontmatter ([`lossless_frontmatter`]) of the note at
-/// index key `file`, from the first [`FRONTMATTER_MAX_BYTES`] of it, read
-/// through `vault`. An empty object without frontmatter.
+/// index key `file`, from the first bytes of it ([`read_frontmatter_bytes`]),
+/// read through `vault`. An empty object without frontmatter.
 pub fn lossless_frontmatter_from_vault(
     vault: &dyn crate::vault::Vault,
     file: &Path,
@@ -3644,16 +3694,15 @@ pub fn lossless_frontmatter_from_vault(
         source,
     };
     let path = vault.vault_path(file).map_err(|e| read_failed(e.into()))?;
-    let buffer = vault
-        .read_prefix(&path, FRONTMATTER_MAX_BYTES)
+    let buffer = read_frontmatter_bytes(file, |max_len| vault.read_prefix(&path, max_len))
         .map_err(|e| read_failed(e.into()))?;
     let text = String::from_utf8_lossy(&buffer);
     Ok(lossless_frontmatter(&parse_frontmatter_block(&text).yaml))
 }
 
 /// Frontmatter (and the first-H1 title fallback) from the **first bytes** of a
-/// markdown file — [`FRONTMATTER_MAX_BYTES`] of them is always enough, since
-/// frontmatter is at the top. `path` is only used to name the file in the
+/// markdown file — enough of them to hold the whole frontmatter block
+/// ([`read_frontmatter_bytes`]). `path` is only used to name the file in the
 /// warning a malformed YAML block logs.
 ///
 /// Invalid UTF-8 is decoded lossily: a prefix can end mid-character, and a
@@ -4763,6 +4812,99 @@ mod tests {
         assert_eq!(result.relationships.len(), 1);
         assert_eq!(result.relationships[0].rel_type, "child");
         assert_eq!(result.relationships[0].from.as_deref(), Some("[[Sam Doe]]"));
+    }
+
+    /// A note whose frontmatter is `lines` filler lines and then `last_key:
+    /// here`, followed by a body with an H1.
+    fn long_frontmatter_note(lines: usize) -> String {
+        let filler: String = (0..lines)
+            .map(|i| format!("field_{i:05}: some value for field {i}\n"))
+            .collect();
+        format!("---\n{filler}last_key: here\n---\n# Body Title\n\nText.\n")
+    }
+
+    /// The bytes [`read_frontmatter_bytes`] keeps for `text`, and the
+    /// `max_len` of each read it made.
+    fn frontmatter_reads(text: &str) -> (Vec<u8>, Vec<usize>) {
+        let reads = std::cell::RefCell::new(Vec::new());
+        let bytes = read_frontmatter_bytes(Path::new("n.md"), |max_len| {
+            reads.borrow_mut().push(max_len);
+            Ok::<_, std::io::Error>(text.as_bytes()[..text.len().min(max_len)].to_vec())
+        })
+        .unwrap();
+        (bytes, reads.into_inner())
+    }
+
+    #[test]
+    fn frontmatter_within_the_cap_is_one_short_read() {
+        // A long body after a short frontmatter: the prefix holds the block.
+        let note = format!("---\ntitle: T\n---\n{}", "body line\n".repeat(2000));
+        assert!(note.len() > FRONTMATTER_MAX_BYTES);
+        let (bytes, reads) = frontmatter_reads(&note);
+        assert_eq!(reads, [FRONTMATTER_MAX_BYTES]);
+        assert_eq!(bytes.len(), FRONTMATTER_MAX_BYTES);
+        // A long file with no frontmatter, or starting with a thematic break
+        // that is not an opener, is not read again either.
+        for text in [
+            "# Plain\n".repeat(2000),
+            format!("----\n{}", "x\n".repeat(5000)),
+        ] {
+            assert_eq!(frontmatter_reads(&text).1, [FRONTMATTER_MAX_BYTES]);
+        }
+    }
+
+    #[test]
+    fn frontmatter_past_the_cap_is_read_whole() {
+        let note = long_frontmatter_note(400);
+        let fence = note.find("\n---\n").unwrap();
+        assert!(fence > FRONTMATTER_MAX_BYTES, "the fence is past the cap");
+        let (bytes, reads) = frontmatter_reads(&note);
+        assert_eq!(reads, [FRONTMATTER_MAX_BYTES, FRONTMATTER_FULL_MAX_BYTES]);
+        assert_eq!(bytes, note.as_bytes());
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(note.as_bytes()).unwrap();
+        let meta = extract_metadata_from_file(file.path()).unwrap().metadata;
+        assert_eq!(meta.get("last_key"), Some(&serde_json::json!("here")));
+        assert_eq!(
+            meta.get("field_00000"),
+            Some(&serde_json::json!("some value for field 0"))
+        );
+        // The body is found after the block: its H1 is the title fallback.
+        assert_eq!(meta.get("title"), Some(&serde_json::json!("Body Title")));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("n.md"), &note).unwrap();
+        let vault = crate::vault::LocalVault::new(dir.path());
+        let path = crate::vault::VaultPath::new("n.md").unwrap();
+        let from_vault = extract_metadata_from_vault(&vault, &path).unwrap().metadata;
+        assert_eq!(from_vault, meta);
+        let key = crate::vault::Vault::key(&vault, &path);
+        let lossless = lossless_frontmatter_from_vault(&vault, &key).unwrap();
+        assert_eq!(lossless["last_key"], "here");
+    }
+
+    #[test]
+    fn frontmatter_that_never_closes_is_reported_not_truncated() {
+        // Still open at the full-read limit: ignored, with a warning naming
+        // the file, as any unclosed block is ignored.
+        let lines = FRONTMATTER_FULL_MAX_BYTES / 25;
+        let note = format!(
+            "---\n{}",
+            (0..lines)
+                .map(|i| format!("field_{i:07}: value {i:07}\n"))
+                .collect::<String>()
+        );
+        assert!(note.len() > FRONTMATTER_FULL_MAX_BYTES);
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(note.as_bytes()).unwrap();
+        let (meta, logs) =
+            crate::test_support::capture_tracing(|| extract_metadata_from_file(file.path()));
+        assert!(meta.unwrap().metadata.is_empty());
+        assert!(
+            logs.contains("Frontmatter does not close within the first"),
+            "{logs}"
+        );
     }
 
     #[test]

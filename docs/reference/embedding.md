@@ -168,6 +168,36 @@ let renderer = Renderer::new(&config)?
 an OpenGraph card only if this renderer's `render_file` already fetched it;
 YouTube, Giphy and media embeds need no network and always work.
 
+### Previewing an unsaved template
+
+A template editor can preview the template it is editing before it is saved,
+on every keystroke, with the same kept `Renderer`:
+
+```rust
+let html = renderer.render_source_with_template(
+    Path::new("invoices/2026-001.md"),        // the note to preview with
+    &note_text,                               // its text (saved or not)
+    Path::new("/invoices/tpl/invoice.html"),  // the template being edited
+    &template_editor_text,                    // its unsaved text
+)?;
+```
+
+The note is rendered through `template_editor_text` as if it were the file at
+the template path, whatever the note's own `template:` says. That path
+follows the same rules as a `template:` value (inside the repository, not in
+a hidden folder, an `.html` file) but the file need not exist yet, so a new
+template can be previewed too. The `.html` files beside it, which it includes
+or extends, and mbr's own templates still come from disk. Its own saved file
+does not.
+
+Nothing is cached. A template that does not parse or render is an
+`MbrError::PageTemplate` error (`PageTemplateError::Render`) whose message
+names the template and gives Tera's explanation, with the line and column of a
+syntax error; show it in place of the preview. The next render, through the
+saved template or a corrected draft, is unaffected. Each call costs what a
+render through a saved template costs, less the template read, and never
+scans the repository.
+
 ### Cost
 
 A `Renderer` loads mbr's templates (`.mbr/` or the built-in ones) once. Each

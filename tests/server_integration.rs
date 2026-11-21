@@ -8649,6 +8649,104 @@ async fn test_live_reload_frames_carry_the_page_fingerprint_for_its_own_note() {
     );
 }
 
+/// The next frame naming `relative_path` on a live-reload socket, rewriting
+/// the file with `rewrite` every 500 ms until one arrives (under a loaded test
+/// run the watcher may not be listening yet when the first write lands).
+#[cfg(feature = "watcher")]
+async fn ws_frame_for(
+    ws: &mut tokio::net::TcpStream,
+    buf: &mut Vec<u8>,
+    relative_path: &str,
+    rewrite: impl Fn(),
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no frame for {relative_path}"
+        );
+        let Ok(text) =
+            tokio::time::timeout(Duration::from_millis(500), ws_next_text(ws, buf)).await
+        else {
+            rewrite();
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("JSON frame");
+        if frame["relative_path"] == relative_path && frame["event"] != "deleted" {
+            return frame;
+        }
+    }
+}
+
+/// The Ledgeline Invoicer's layout: invoices name a template under
+/// `invoices/tpl/`, root-relative. That folder is watched (neither
+/// `ignore_dirs` nor `watcher_ignore_dirs` names it), and saving the template
+/// reloads the pages rendered through it — a `template: true` frame — and no
+/// other page; the reloaded page shows the edit.
+#[cfg(feature = "watcher")]
+#[tokio::test]
+async fn test_saving_a_page_template_reloads_the_notes_that_use_it() {
+    let defaults = mbr::Config::default();
+    for dir in ["invoices", "tpl"] {
+        assert!(!defaults.ignore_dirs.iter().any(|d| d == dir), "{dir}");
+        assert!(
+            !defaults.watcher_ignore_dirs.iter().any(|d| d == dir),
+            "{dir}"
+        );
+    }
+
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "invoices/2026-001.md",
+        "---\ntitle: Invoice 1\ntemplate: /invoices/tpl/invoice.html\n---\nBody\n",
+    );
+    repo.create_markdown("notes/plain.md", "# Plain\n");
+    let template = repo.create_static_file("invoices/tpl/invoice.html", b"<h1>v1 {{ title }}</h1>");
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    assert_html_contains(
+        &server.get_text("/invoices/2026-001/").await,
+        "<h1>v1 Invoice 1</h1>",
+    );
+    // The watcher starts on a background thread; give it time to listen.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let (mut invoice_ws, mut invoice_buf) =
+        ws_open_live_reload(server.port, "?source=invoices/2026-001.md").await;
+    let (mut plain_ws, mut plain_buf) =
+        ws_open_live_reload(server.port, "?source=notes/plain.md").await;
+    for (ws, buf) in [
+        (&mut invoice_ws, &mut invoice_buf),
+        (&mut plain_ws, &mut plain_buf),
+    ] {
+        assert_eq!(ws_next_text(ws, buf).await, r#"{"status":"connected"}"#);
+    }
+
+    let save = || std::fs::write(&template, "<h1>v2 {{ title }}</h1>").expect("save template");
+    save();
+    let frame = ws_frame_for(
+        &mut invoice_ws,
+        &mut invoice_buf,
+        "invoices/tpl/invoice.html",
+        save,
+    )
+    .await;
+    assert_eq!(frame["template"], true, "{frame}");
+    let other = ws_frame_for(
+        &mut plain_ws,
+        &mut plain_buf,
+        "invoices/tpl/invoice.html",
+        save,
+    )
+    .await;
+    assert!(other.get("template").is_none(), "{other}");
+
+    assert_html_contains(
+        &server.get_text("/invoices/2026-001/").await,
+        "<h1>v2 Invoice 1</h1>",
+    );
+}
+
 // ============================================================================
 // Typed relationships (genealogy fixture)
 // ============================================================================
