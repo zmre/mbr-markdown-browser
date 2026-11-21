@@ -8649,7 +8649,7 @@ async fn test_live_reload_frames_carry_the_page_fingerprint_for_its_own_note() {
     );
 }
 
-/// The next frame naming `relative_path` on a live-reload socket, rewriting
+/// The next frame naming `relative_path` (`/`-separated) on a live-reload socket, rewriting
 /// the file with `rewrite` every 500 ms until one arrives (under a loaded test
 /// run the watcher may not be listening yet when the first write lands).
 #[cfg(feature = "watcher")]
@@ -8672,7 +8672,12 @@ async fn ws_frame_for(
             continue;
         };
         let frame: serde_json::Value = serde_json::from_str(&text).expect("JSON frame");
-        if frame["relative_path"] == relative_path && frame["event"] != "deleted" {
+        // The watcher reports Windows paths with `\`; the client (and
+        // `live_reload::normalized`) compare them `/`-separated, so match the same way.
+        let path = frame["relative_path"]
+            .as_str()
+            .map(|path| path.replace('\\', "/"));
+        if path.as_deref() == Some(relative_path) && frame["event"] != "deleted" {
             return frame;
         }
     }
