@@ -161,6 +161,15 @@ templates) is in [Frontmatter links](../features/links/#frontmatter-links).
 The in-browser editor has a form for frontmatter that keeps your YAML exactly
 as written; see [Editing Properties](../features/editing-properties/).
 
+## Long frontmatter
+
+There is no size limit you are likely to meet. When mbr indexes a note it
+reads only the first 8 KB, which holds almost any frontmatter; when the block
+has not closed by then (an invoice with many line items, a contact with many
+addresses), it reads on until it closes, up to 1 MB. A block still open after
+1 MB is ignored like any block that never closes, with a warning naming the
+file.
+
 ## Malformed frontmatter
 
 One YAML mistake (a duplicated key is the easy one) discards the **whole**

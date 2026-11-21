@@ -567,6 +567,32 @@ mod tests {
         assert_eq!(x.tags, vec!["customer"]);
     }
 
+    /// Frontmatter longer than the 8 KB the scan reads first (an invoice with
+    /// many lines, a customer with many contacts) is read whole: the keys
+    /// after the cut are in the index, not silently dropped.
+    #[test]
+    fn frontmatter_longer_than_the_scan_cap_is_indexed_whole() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let lines: String = (0..300)
+            .map(|i| format!("line_{i:03}: \"Widget {i}, 2 hours at 150.00\"\n"))
+            .collect();
+        let text =
+            format!("---\ntitle: Big invoice\n{lines}status: sent\ntype: invoice\n---\nBody.\n");
+        assert!(text.find("status: sent").unwrap() > 8 * 1024);
+        write(&root, "invoices/big.md", &text);
+        let site = Site::open(&root, Config::default()).unwrap();
+
+        let invoices = site.notes_of_type("invoice");
+        assert_eq!(invoices.len(), 1);
+        assert_eq!(invoices[0].title, "Big invoice");
+        let with_fields = site.notes_with_fields(Some("invoice"), &["status".to_string()]);
+        assert_eq!(with_fields[0].fields["status"], "sent");
+        let frontmatter = site.frontmatter(Path::new("invoices/big.md")).unwrap();
+        assert_eq!(frontmatter["type"], "invoice");
+        assert_eq!(frontmatter["line_299"], "Widget 299, 2 hours at 150.00");
+    }
+
     #[test]
     fn notes_of_type_is_case_insensitive() {
         let (_dir, site) = fixture();
