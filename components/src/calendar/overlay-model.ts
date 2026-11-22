@@ -20,6 +20,7 @@ import type { CalendarView } from './month-grid.js'
 import { addDays, noteDayOf, todayKey, type DateKey } from './note-date.js'
 import { periodSpan, type PeriodKind } from './period.js'
 import type { PlotBy } from './types.js'
+import type { GridTaskHit, TaskStatus } from '../tasks/types.js'
 
 // The key map and the view ranges live with the grid math; re-exported for
 // the overlay and its tests.
@@ -71,6 +72,51 @@ export const PLOT_BY_LABELS: Readonly<Record<PlotBy, string>> = {
 /** The plot-by after `current` (`p`). */
 export function nextPlotBy(current: PlotBy): PlotBy {
   return PLOT_BYS[(PLOT_BYS.indexOf(current) + 1) % PLOT_BYS.length]
+}
+
+/**
+ * Which tasks the overlay shows beside the notes (server/GUI only): none,
+ * open ones ("Due": placed by their due date, else their scheduled date), or
+ * open and done ("Due & done": a ticked task sits on its done date).
+ */
+export type TasksShow = 'none' | 'due' | 'all'
+
+/** Tasks choices in the options menu's order; the default is the last. */
+export const TASKS_SHOWS: readonly TasksShow[] = ['none', 'due', 'all']
+
+export const DEFAULT_TASKS_SHOW: TasksShow = 'all'
+
+export const TASKS_SHOW_LABELS: Readonly<Record<TasksShow, string>> = {
+  none: 'None',
+  due: 'Due',
+  all: 'Due & done',
+}
+
+/** The statuses a grid request asks for; empty for `none` (no request). */
+export function tasksStatuses(show: TasksShow): readonly TaskStatus[] {
+  return show === 'due' ? ['open'] : show === 'all' ? ['open', 'done'] : []
+}
+
+/**
+ * Whether a task passes the filter: plain terms are substrings of its text,
+ * its note's title or its source path; `#tag` matches its tags by prefix.
+ * A task has no `type`, so a `type:x` term leaves every task out.
+ */
+export function taskMatchesFilter(hit: GridTaskHit, terms: readonly FilterTerm[]): boolean {
+  if (!terms.length) return true
+  let hay: string | null = null
+  return terms.every((t) => {
+    if (t.kind === 'type') return false
+    if (t.kind === 'tag') return hit.tags.some((tag) => tag.toLowerCase().startsWith(t.value))
+    hay ??= `${hit.text}\n${hit.note}\n${hit.path}`.toLowerCase()
+    return hay.includes(t.value)
+  })
+}
+
+/** Minutes after midnight of a grid task's `HH:MM`, else `null`. */
+export function taskMinutes(time: string | undefined): number | null {
+  const m = time ? /^(\d{1,2}):(\d{2})$/.exec(time) : null
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null
 }
 
 /** List on a phone (≤600px), where month cells are too small to read; Month otherwise. */
@@ -335,6 +381,7 @@ export const OVERLAY_SHORTCUTS: readonly { readonly keys: string; readonly descr
   { keys: 'm / w / a', description: 'Month / Week / List view' },
   { keys: 'g', description: 'Jump to a month or date' },
   { keys: 'p', description: 'Plot by note date, modified, created' },
+  { keys: 'o', description: 'Options: scope, plot by, tasks' },
   { keys: '/', description: 'Filter' },
   { keys: 'Enter', description: "Open the day's note, or list the day" },
   { keys: 'Esc', description: 'Close' },
