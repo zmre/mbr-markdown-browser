@@ -141,15 +141,17 @@ CI pushes to [zmre.cachix.org](https://zmre.cachix.org) so that contributors and
 end users substitute prebuilt outputs instead of compiling ffmpeg, pdfium, and
 the full crate graph. Two things keep that working, and both are easy to break:
 
-**Explicit pushes only.** Every `cachix-action` block in `ci.yml` sets
-`skipPush: true`: the action's post-job daemon would upload everything the job
-put in the store (test runs, clippy output, per-commit binaries), and that
-churn evicts what is worth keeping. What CI pushes is named, through
-`scripts/ci-cachix.sh`: the crane dependency layers (`cargoArtifactsTest`,
-`cargoArtifactsMinimal`, release `cargoArtifacts`) from the jobs that built
-them and `mbr-components`, on PRs as well as `main`, plus the pinned artifacts
-below on pushes to `main`. A new job with a `cachix-action` step and no
-`skipPush` silently starts uploading everything again.
+**Explicit pushes only.** Every `cachix-action` block (`ci.yml`, `release.yml`,
+`docs.yml`, `codeql.yml`) sets `skipPush: true`: the action's post-job daemon
+would upload everything the job put in the store (test runs, clippy output,
+per-commit binaries), and that churn evicts what is worth keeping. What CI pushes
+is named, through `scripts/ci-cachix.sh`: the crane dependency layers
+(`cargoArtifactsTest`, `cargoArtifactsMinimal`, release `cargoArtifacts`) from
+the jobs that built them and `mbr-components`, on PRs as well as `main`, plus the
+pinned artifacts below on pushes to `main`. The other workflows push nothing:
+what they build starts from the deps layers `ci.yml` pushes. A new job with a
+`cachix-action` step and no `skipPush` silently starts uploading everything
+again.
 
 **Pins on the consumer artifacts.** Cachix's free tier garbage-collects
 least-recently-used, which is exactly backwards here: the ~950 MB crane
