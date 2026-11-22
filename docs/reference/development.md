@@ -125,23 +125,38 @@ between CI, Release, and your laptop:
 
 All checks must pass before merge.
 
+The clippy and test attrs build with Cargo.toml's `ci-test` profile (the
+release profile without LTO; fat-LTO links of the test binaries used to be most
+of a test run), over their own dependency layers (`cargoArtifactsTest`,
+`cargoArtifactsMinimal`). Only what ships (`.#mbr`) is built with `release`.
+
+Everything macOS — tests, clippy, `.#mbr` with its docs-link and PDF checks,
+and the Swift checks — is one `macos` job, because macOS runners are scarce.
+`ci-rerun.yml` re-runs CI runs whose failed or cancelled jobs never started a
+step (a runner that was never acquired), at most twice.
+
 ### Binary Cache
 
 CI pushes to [zmre.cachix.org](https://zmre.cachix.org) so that contributors and
 end users substitute prebuilt outputs instead of compiling ffmpeg, pdfium, and
 the full crate graph. Two things keep that working, and both are easy to break:
 
-**`pushFilter` on every `cachix-action` block.** The action's post-job daemon
-uploads everything the job put in the store, so the filter belongs on every
-block — including jobs that build nothing new. A new job with a `cachix-action`
-step and no `pushFilter` silently starts uploading source and vendor trees.
+**Explicit pushes only.** Every `cachix-action` block in `ci.yml` sets
+`skipPush: true`: the action's post-job daemon would upload everything the job
+put in the store (test runs, clippy output, per-commit binaries), and that
+churn evicts what is worth keeping. What CI pushes is named, through
+`scripts/ci-cachix.sh`: the crane dependency layers (`cargoArtifactsTest`,
+`cargoArtifactsMinimal`, release `cargoArtifacts`) from the jobs that built
+them and `mbr-components`, on PRs as well as `main`, plus the pinned artifacts
+below on pushes to `main`. A new job with a `cachix-action` step and no
+`skipPush` silently starts uploading everything again.
 
 **Pins on the consumer artifacts.** Cachix's free tier garbage-collects
 least-recently-used, which is exactly backwards here: the ~950 MB crane
 dependency layer is touched by every CI run and stays warm, while
 `packages.default` is fetched only when someone runs `nix run` and is therefore
-always the coldest thing in the cache. The `build` job pins these after a green
-build on `main` (see the comment on that step for the full reasoning):
+always the coldest thing in the cache. The `build` jobs (Linux) and the `macos`
+job pin these after a green build on `main` (see the comment on that step for the full reasoning):
 
 | Pin name | Attr | Why |
 |---|---|---|

@@ -434,6 +434,15 @@ codegen-units = 16
 panic = 'abort'
 strip = 'debuginfo'
 
+# What CI's `.#tests` and `.#clippy*` build with (flake.nix's
+# `cargoArtifactsTest`/`cargoArtifactsMinimal`): the release profile without
+# fat LTO. LTO buys nothing for a test binary and turned ~12 test/bin/example
+# links into most of an hour of every CI test run; the code under test is
+# otherwise compiled with the shipped settings (opt-level 3, codegen-units).
+[profile.ci-test]
+inherits = "release"
+lto = false
+
 [[bench]]
 name = "markdown_render"
 harness = false

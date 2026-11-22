@@ -1,0 +1,138 @@
+# Re-run CI runs that died because GitHub never gave them a runner.
+#
+# macOS runners are a scarce pool, and now and then a `macos` (or `cask-lint`)
+# job of ci.yml is cancelled (or failed with "The job was not acquired by
+# Runner…") before a single step ran. That is not a signal about the code: nothing was built, nothing was
+# tested. Left alone it is a red X on main or on a PR that someone has to
+# notice and click "Re-run failed jobs" on — so this does the clicking.
+#
+# What counts as a runner-acquisition casualty, and nothing else:
+#   * a CI run that completed `cancelled` or `failure` in the last ~24 h,
+#   * on its 1st or 2nd attempt (`run_attempt < 3` — so a run that keeps
+#     losing the lottery gets two retries, not an infinite loop),
+#   * that is still the NEWEST CI run for its branch + event. Newer run =
+#     superseded: ci.yml's `concurrency: cancel-in-progress` cancels the old
+#     one on purpose, and re-running it would just be cancelled again (or,
+#     worse, cancel the new one).
+#   * where EVERY job that did not succeed (conclusion cancelled/failure) has
+#     no step that actually started — an empty `steps` array, or every step
+#     null/skipped. A single real step failure or a mid-step cancel anywhere
+#     means a human should look, so the run is left alone.
+# Anything else is logged with the reason and skipped.
+#
+# `gh run rerun --failed` re-runs failed AND cancelled jobs plus whatever
+# depended on them, on the same commit, as attempt N+1.
+#
+# NOTE: `schedule` triggers only ever run the copy of this file on the DEFAULT
+# branch, so none of this does anything until it is merged to main. Use the
+# "Run workflow" button (workflow_dispatch, with `dry_run`) to try it by hand.
+name: CI rerun (runner casualties)
+
+on:
+  schedule:
+    # Every 30 minutes, off the top of the hour (GitHub's busiest minute for
+    # cron, where scheduled runs are most often delayed or dropped).
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log decisions only; do not re-run anything"
+        type: boolean
+        default: false
+
+# `actions: write` is what POST /actions/runs/{id}/rerun-failed-jobs needs;
+# nothing here reads the code.
+permissions:
+  actions: write
+  contents: read
+
+# Two overlapping sweeps could both decide to re-run the same run.
+concurrency:
+  group: ci-rerun
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: Re-run runner-acquisition casualties
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and re-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Empty on `schedule` (no inputs), which reads as "not a dry run".
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          # By creation time — a run cancelled for want of a runner is never
+          # long-lived, and runs older than a day are someone's to triage.
+          since=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+
+          # id, attempt, branch, event, conclusion — one TSV line per candidate.
+          candidates=$(gh api --method GET --paginate \
+            "repos/$repo/actions/workflows/ci.yml/runs" \
+            -f status=completed -f "created=>=$since" -F per_page=100 \
+            --jq '.workflow_runs[]
+                  | select((.conclusion == "cancelled" or .conclusion == "failure")
+                           and .run_attempt < 3)
+                  | [.id, .run_attempt, (.head_branch // "-"), .event, .conclusion]
+                  | @tsv')
+
+          if [ -z "$candidates" ]; then
+            echo "No cancelled/failed CI runs (attempt < 3) since $since."
+            exit 0
+          fi
+
+          reran=0
+          while IFS=$'\t' read -r id attempt branch event conclusion; do
+            label="run $id (attempt $attempt, $event on $branch, $conclusion)"
+
+            # The runs list is newest-first, so the first entry is the latest
+            # CI run for this branch + event. If it is not this one, a newer
+            # push superseded it.
+            newest=$(gh api --method GET "repos/$repo/actions/workflows/ci.yml/runs" \
+              -f "branch=$branch" -f "event=$event" -F per_page=1 \
+              --jq '.workflow_runs[0].id // empty')
+            if [ -n "$newest" ] && [ "$newest" != "$id" ]; then
+              echo "SKIP $label: superseded by run $newest."
+              continue
+            fi
+
+            # Jobs of THIS attempt (a rerun's attempt N+1 is a separate list).
+            # --paginate emits one object per page, hence the slurp.
+            verdict=$(gh api --method GET --paginate \
+              "repos/$repo/actions/runs/$id/attempts/$attempt/jobs" -F per_page=100 \
+              --jq '.jobs[]' \
+              | jq -rs '
+                  [ .[] | select(.conclusion == "cancelled" or .conclusion == "failure") ] as $bad
+                  | [ $bad[]
+                      | select(any((.steps // [])[];
+                                   .conclusion != null and .conclusion != "skipped")) ] as $ran
+                  | if ($bad | length) == 0 then "none-bad"
+                    elif ($ran | length) > 0 then "ran:" + ($ran | map(.name) | join(", "))
+                    else "casualty:" + ($bad | map(.name) | join(", "))
+                    end')
+
+            case "$verdict" in
+              none-bad)
+                echo "SKIP $label: no cancelled/failed jobs in this attempt."
+                ;;
+              ran:*)
+                echo "SKIP $label: steps actually ran in ${verdict#ran:} — a real result, not a runner casualty."
+                ;;
+              casualty:*)
+                if [ "${DRY_RUN:-false}" = "true" ]; then
+                  echo "DRY-RUN would rerun $label: no step started in ${verdict#casualty:}."
+                elif gh run rerun "$id" --failed --repo "$repo"; then
+                  echo "RERUN $label: no step started in ${verdict#casualty:}."
+                  reran=$((reran + 1))
+                else
+                  # One bad rerun (e.g. a run GitHub has already started
+                  # re-running) must not stop the sweep of the others.
+                  echo "::warning::Could not rerun $label."
+                fi
+                ;;
+            esac
+          done <<< "$candidates"
+
+          echo "Re-ran $reran run(s)."

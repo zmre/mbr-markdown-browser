@@ -43,6 +43,19 @@ jobs:
       # Do NOT add nixpkgs to this filter. Cachix has skipped paths already
       # available from cache.nixos.org since 2020; when this cache is full it is
       # full of our own build products.
+      #
+      # PULL-ONLY (`skipPush: true`), here and in every other cachix block in
+      # this file, so `pushFilter` is dormant until a block drops `skipPush`.
+      # The daemon uploaded EVERY path a job built — test runs, clippy output,
+      # per-commit binaries — and on the 5 GB free plan (LRU, shared with
+      # ledgeline) that churn is what evicts the things worth caching. What IS
+      # pushed is explicit and named, through scripts/ci-cachix.sh:
+      #   * the crane dependency layers, on PRs and pushes, by the jobs that
+      #     build them: `cargoArtifactsTest` (lint, test, macos),
+      #     `cargoArtifactsMinimal` (minimal-features), release `cargoArtifacts`
+      #     (build, macos) — once per system;
+      #   * `mbr-components` (build-components);
+      #   * on pushes to main, the pinned consumer artifacts (build, macos).
       - name: Setup Cachix
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
@@ -50,6 +63,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       # `nix build .#fmt` (craneLib.cargoFmt), not `nix develop --command cargo
       # fmt`. The dev shell pulls in the whole build closure — ffmpeg, webkitgtk,
@@ -81,6 +95,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       - name: Build components
         run: |
@@ -115,6 +130,15 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # Every Nix job below copies this derivation in through a preBuild, so
+      # pushing it here saves each of them the npm build. `!cancelled()` and
+      # the local-store check in the script: see the deps-layer push in `test`.
+      - name: Push mbr-components to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push mbr-components
+
   # Clippy lint
   #
   # NOTE: no `needs: build-components` and no artifact download here, unlike the
@@ -139,6 +163,10 @@ jobs:
   # If anyone un-gitignores crates/mbr-core/templates/components-js, or switches these
   # invocations to `path:.`, this decoupling silently becomes wrong and these
   # jobs need their `needs` + download restored.
+  #
+  # Linux only: the macOS clippy runs inside the single `macos` job below. Still
+  # a one-entry matrix because the job name "Clippy Lint (ubuntu-latest)" is a
+  # required status check of the `protect main` ruleset.
   lint:
     name: Clippy Lint (${{ matrix.os }})
     needs: format-check
@@ -146,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
 
     steps:
       - name: Checkout
@@ -162,9 +190,18 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       - name: Clippy lint
         run: nix build -L .#clippy
+
+      # Same layer as `test` builds; whichever job builds it first pushes it
+      # (pushing an already-cached path is a cheap no-op).
+      - name: Push deps layer to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push cargoArtifactsTest
 
   # Tests
   #
@@ -172,6 +209,8 @@ jobs:
   # self-supplying via the `tests` attr's preBuild (flake.nix ~595-598). See the
   # long note on the `lint` job above for the full reasoning and the `path:.#`
   # hazard.
+  #
+  # Linux only: the macOS tests run inside the single `macos` job below.
   test:
     name: Test (${{ matrix.os }})
     needs: format-check
@@ -179,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
 
     steps:
       - name: Checkout
@@ -195,9 +234,26 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       - name: Run tests
         run: nix build -L .#tests
+
+      # The crane dependency layer is the expensive, cold part of every build
+      # and the only thing whose cache hit changes how long CI takes. Pushed on
+      # PRs too, deliberately: a Cargo.lock bump lands on a PR first, and that
+      # PR's runs are exactly the cold ones.
+      #
+      # `!cancelled()`, not the default `success()`: the layer is built before
+      # a single test runs, so a red test run still produced it. The script's
+      # `nix path-info` checks the LOCAL store only, so if the layer itself
+      # failed to build this skips rather than retrying the build that failed.
+      # Not pinned: LRU evicting a stale deps layer is the cache doing its job.
+      - name: Push deps layer to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push cargoArtifactsTest
 
   # Full build - runs in parallel with lint/test
   #
@@ -213,6 +269,9 @@ jobs:
   # minute build onto the release critical path, which is exactly how the Intel
   # Darwin leg died. There is no `ubuntu-latest-arm` alias; the version has to be
   # pinned explicitly.
+  #
+  # Linux only: the macOS build, docs check, PDF smoke test and pins run inside
+  # the single `macos` job below.
   build:
     name: Build (${{ matrix.os }})
     needs: format-check
@@ -220,7 +279,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
 
     steps:
       - name: Checkout
@@ -236,6 +295,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       - name: Build
         run: nix build -L .#mbr
@@ -243,52 +303,11 @@ jobs:
       - name: Check docs for broken links
         run: ./result/bin/mbr -b docs --fail-on-broken-links
 
-      # `mbr --pdf` end to end with the real platform webview. `.#tests` runs in
-      # the Nix sandbox, where no webview can open, so this is the only place
-      # the built macOS and Linux binaries actually print a PDF. Linux runs it
-      # under Xvfb: a CI check of the WebKitGTK backend, not a supported
-      # headless mode (without a display mbr refuses, which the next step
-      # pins). The step fails when no PDF is written, when the file is not a
-      # PDF or is implausibly small, or when the page never reported itself
-      # ready (the exporter then prints whatever was on screen after its
-      # timeout, which would hide a broken front end).
+      # `mbr --pdf` end to end with the real platform webview (Xvfb here). See
+      # the script for what it checks; the `macos` job runs the same script.
       - name: PDF export smoke test (real webview)
-        if: runner.os == 'macOS' || runner.os == 'Linux'
         timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/smoke.pdf"
-          log="$RUNNER_TEMP/smoke.stderr"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # The bundle's executable, as users run it (Contents/MacOS/mbr).
-            ./result/Applications/MBR.app/Contents/MacOS/mbr \
-              --pdf tests/fixtures/pdf-export/note.md --output "$out" 2> "$log" \
-              || { cat "$log"; echo "::error::mbr --pdf failed on macOS"; exit 1; }
-          else
-            command -v xvfb-run >/dev/null || {
-              sudo apt-get update && sudo apt-get install -y xvfb
-            }
-            # Ubuntu 24.04 restricts unprivileged user namespaces through
-            # AppArmor, and WebKitGTK's bubblewrap sandbox needs them; a desktop
-            # without the restriction is what users run. CI-only.
-            if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            fi
-            xvfb-run -a ./result/bin/mbr \
-              --pdf tests/fixtures/pdf-export/note.md --output "$out" 2> "$log" \
-              || { cat "$log"; echo "::error::mbr --pdf failed on Linux (Xvfb)"; exit 1; }
-          fi
-          cat "$log"
-          [ -f "$out" ] || { echo "::error::no PDF was written to $out"; exit 1; }
-          magic=$(head -c 5 "$out")
-          [ "$magic" = "%PDF-" ] || { echo "::error::$out does not start with %PDF- (got '$magic')"; exit 1; }
-          size=$(wc -c < "$out" | tr -d ' ')
-          [ "$size" -gt 10000 ] || { echo "::error::$out is only $size bytes"; exit 1; }
-          if grep -q 'did not finish rendering' "$log"; then
-            echo "::error::the export page never reported ready (front end missing from the build?)"
-            exit 1
-          fi
-          echo "OK: $out is a PDF of $size bytes"
+        run: scripts/ci-pdf-smoke.sh
 
       - name: PDF export without a display refuses with exit 2 (Linux)
         if: runner.os == 'Linux'
@@ -333,37 +352,28 @@ jobs:
       # already warns about. The ~950 MB crate layer is emphatically NOT pinned —
       # it churns on every Cargo.lock bump and CI keeps it warm by itself.
       #
-      # This pushes before it pins because the cachix-action daemon does its
-      # upload as a POST-JOB step, i.e. after everything here has already run.
-      # Pinning a path the cache has never seen is at best a no-op.
+      # This pushes before it pins, and the push is the only one: the
+      # cachix-action daemon is pull-only (`skipPush`). Pinning a path the cache
+      # has never seen is at best a no-op.
+      #
+      # The `macos` job pins the same three for aarch64-darwin.
       - name: Push and pin consumer artifacts
         if: github.event_name == 'push'
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Secrets are absent on fork PRs. Without this guard every outside
-          # contributor's PR goes red on a step that is none of their business.
-          if [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
-            echo "No CACHIX_AUTH_TOKEN (fork or unset) - skipping push and pins."
-            exit 0
-          fi
-          # Derived rather than hardcoded: this matrix spans three systems and
-          # runner architectures change.
-          sys=$(nix eval --raw --impure --expr builtins.currentSystem)
-          push_and_pin() {
-            local name="$1" attr="$2" path
-            path=$(nix build --no-link --print-out-paths ".#$attr")
-            echo "==> $name-$sys -> $path"
-            cachix push zmre "$path"
-            cachix pin zmre "$name-$sys" "$path" --keep-revisions 2
-          }
-          # A pin name is the stable identity of "current artifact for this
-          # system"; --keep-revisions 2 keeps the previous one alive while a new
-          # one propagates, instead of accruing a pin per commit.
-          push_and_pin mbr default
-          push_and_pin ffmpeg-minimal-static ffmpegMinimalStatic
-          push_and_pin x264-static x264Static
+        run: >-
+          scripts/ci-cachix.sh push-and-pin
+          mbr=default
+          ffmpeg-minimal-static=ffmpegMinimalStatic
+          x264-static=x264Static
+
+      # The release deps layer `.#mbr` was built on (mbr-cli). `!cancelled()`
+      # and the local-store check: see the same step in `test`.
+      - name: Push deps layer to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push cargoArtifacts
 
   # Build and test the exact feature set Windows ships, but on Linux.
   #
@@ -406,6 +416,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
       - name: Clippy lint
         run: nix build -L .#clippy-minimal
@@ -420,6 +431,13 @@ jobs:
       # `cargoArtifactsMinimal`.
       - name: Clippy lint (library, gui only)
         run: nix build -L .#clippy-gui-lib
+
+      # `!cancelled()` and the local-store check: see the same step in `test`.
+      - name: Push deps layer to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push cargoArtifactsMinimal
 
   # Windows build + lint + test.
   #
@@ -542,10 +560,17 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Swift checks - only run on macOS
-  swift-check:
-    name: Swift Checks
-    runs-on: macos-latest
+  # Everything CI does on macOS, in ONE job: the macOS legs of `lint`, `test`
+  # and `build`, plus the Swift checks. macOS runners are a scarce pool, and
+  # four jobs meant queueing for four of them (and one runner-acquisition
+  # casualty per run was enough to turn CI red; ci-rerun.yml retries those).
+  #
+  # Pinned to macos-15 rather than macos-latest, so a relabel cannot silently
+  # move the runner image (and its Xcode) under a green CI.
+  macos:
+    name: macOS (tests + clippy + build + swift)
+    needs: format-check
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -560,23 +585,78 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
           pushFilter: '-(source|vendor)$'
+          skipPush: true
 
-      - name: Swift format check
-        run: nix build -L .#swiftfmt
+      # ONE invocation, so shared inputs are realised once and the rest build
+      # in parallel. `--keep-going` so one red check does not hide another: as
+      # separate jobs a failing test still let clippy and the build report;
+      # without it Nix stops scheduling new builds at the first failure.
+      - name: Tests, clippy, build, Swift checks (one nix build)
+        run: nix build -L --no-link --keep-going .#tests .#clippy .#mbr .#swiftfmt .#swiftlint-check
 
-      - name: SwiftLint check
-        run: nix build -L .#swiftlint-check
+      # `./result` for the checks below. `!cancelled()` so a red test or lint
+      # does not hide the docs and PDF checks, which only need the app (as when
+      # they were separate jobs). Fails without building when `.#mbr` failed
+      # above, rather than attempting that build a second time.
+      - name: Link the build
+        id: mbr
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mbr=$(nix eval --raw .#mbr.outPath)
+          nix path-info "$mbr" > /dev/null 2>&1 \
+            || { echo "::error::.#mbr did not build"; exit 1; }
+          nix build .#mbr
 
-  # Lint the Homebrew cask (Casks/mbr.rb) and smoke-test the script release.yml
-  # uses to bump it, so a hand edit to either cannot break the tap unnoticed.
-  # The release job runs the same style/audit before every automated bump; this
-  # covers everything else. Only does real work when one of those two files
-  # changed, using the same diff-against-base approach as components-lock-sync
-  # below (a job-level `paths:` filter is per-workflow, not per-job). On a push
-  # to main the base is the previous tip, so a direct push is checked too.
-  cask-lint:
-    name: Homebrew Cask Lint
-    runs-on: macos-latest
+      - name: Check docs for broken links
+        id: docs
+        if: ${{ !cancelled() && steps.mbr.outcome == 'success' }}
+        run: ./result/bin/mbr -b docs --fail-on-broken-links
+
+      # Through the app bundle's executable. See the script and the same step
+      # in `build`.
+      - name: PDF export smoke test (real webview)
+        id: pdf
+        if: ${{ !cancelled() && steps.mbr.outcome == 'success' }}
+        timeout-minutes: 5
+        run: scripts/ci-pdf-smoke.sh
+
+      # Both layers this job built: `cargoArtifactsTest` (tests, clippy) and
+      # the release `cargoArtifacts` (mbr-cli, mbr-quicklook-staticlib).
+      # `!cancelled()` and the local-store check: see the same step in `test`.
+      - name: Push deps layers to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: scripts/ci-cachix.sh push cargoArtifactsTest cargoArtifacts
+
+      # The aarch64-darwin twin of `build`'s step; see there for why. Gated on
+      # the app's own checks, as it was when it lived in `build`, not on the
+      # tests and clippy that share this job.
+      - name: Push and pin consumer artifacts
+        if: >-
+          ${{ !cancelled() && github.event_name == 'push'
+          && steps.mbr.outcome == 'success'
+          && steps.docs.outcome == 'success'
+          && steps.pdf.outcome == 'success' }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: >-
+          scripts/ci-cachix.sh push-and-pin
+          mbr=default
+          ffmpeg-minimal-static=ffmpegMinimalStatic
+          x264-static=x264Static
+
+  # Does the Homebrew cask need linting? Decided on a cheap Linux runner, so
+  # `cask-lint` takes a scarce macOS runner only when it has work to do. A
+  # job-level `paths:` filter is per-workflow, not per-job, hence the diff
+  # against the base, as in components-lock-sync below. On a push to main the
+  # base is the previous tip, so a direct push is checked too.
+  cask-changes:
+    name: Detect Homebrew cask changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -601,10 +681,24 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Lint the Homebrew cask (Casks/mbr.rb) and smoke-test the script release.yml
+  # uses to bump it, so a hand edit to either cannot break the tap unnoticed.
+  # The release job runs the same style/audit before every automated bump; this
+  # covers everything else, when `cask-changes` says one of those files changed.
+  cask-lint:
+    name: Homebrew Cask Lint
+    needs: cask-changes
+    if: needs.cask-changes.outputs.changed == 'true'
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       # Every failure case must exit non-zero and leave the scratch copy
       # untouched; the good case must change exactly the two lines.
       - name: Smoke-test scripts/update-cask.sh
-        if: steps.changes.outputs.changed == 'true'
         run: |
           set -euo pipefail
           scratch="$RUNNER_TEMP/mbr.rb"
@@ -655,7 +749,6 @@ jobs:
       # whole repository: shfmt over scripts/ and actionlint over workflows,
       # with Homebrew's style rules rather than this project's.
       - name: brew style and audit
-        if: steps.changes.outputs.changed == 'true'
         env:
           HOMEBREW_NO_ANALYTICS: 1
           HOMEBREW_NO_ENV_HINTS: 1
