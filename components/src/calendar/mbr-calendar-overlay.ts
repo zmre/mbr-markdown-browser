@@ -8,8 +8,14 @@
  * the view, plot-by and filter persist for the life of the page; it hands over
  * `scope` (`CalendarScope`: the notes, or all of them) and the services the
  * chunk may not import (`siteIndex`, `resolveUrl`, `navigate`, `config`,
- * `tagFields`). It reads `site.json` alone, so it works the same in static
- * builds.
+ * `tagFields`, and `taskSource` where there is a task endpoint). Notes come
+ * from `site.json` alone, so it works the same in static builds; with a
+ * `taskSource` (server/GUI with `tasks_enabled`) it also places tasks on
+ * their days — due, scheduled or done — from `POST /.mbr/tasks`
+ * `mode: "grid"`, one request per range on screen.
+ *
+ * The toolbar keeps the filter field, the active-scope chips and the count;
+ * scope ("This folder"), plot-by and tasks are in the options menu (`o`).
  *
  * The model is `overlay-model.ts` (bucketing once per scope and plot-by, the
  * filter) and `month-grid.ts` (the key map, ranges and titles); the grids are
@@ -26,7 +32,21 @@ import { LitElement, css, html, nothing, type PropertyValues, type TemplateResul
 import { customElement, property, state } from 'lit/decorators.js'
 import { positionAnchored } from '../anchored-popover.js'
 import { ICON_BUTTON_CSS, KBD_CSS } from '../controls.js'
-import { ICON_SM, icon, iconChevronDown, iconChevronLeft, iconChevronRight, iconCircleHelp, iconX } from '../icons.js'
+import {
+  ICON_SM,
+  icon,
+  iconChevronDown,
+  iconChevronLeft,
+  iconChevronRight,
+  iconCircleHelp,
+  iconSlidersHorizontal,
+  iconX,
+} from '../icons.js'
+import { folderScopeValue } from '../tasks/folder-tree.js'
+import { gridHiddenCount, gridRange } from '../tasks/task-grid.js'
+import { taskHref } from '../tasks/task-groups.js'
+import { taskDisplayText } from '../tasks/task-text.js'
+import type { GridTaskHit, Placement, TaskGridResponse } from '../tasks/types.js'
 import type { MarkdownFile } from '../sorting.js'
 import { DEFAULT_CALENDAR_CONFIG, type CalendarConfig } from './config.js'
 import { formatClock, formatDate, isoWeekOf, monthOf, resolveWeekStart, viewTitle, weekNumberLabel } from './month-grid.js'
@@ -36,6 +56,9 @@ import {
   OVERLAY_SHORTCUTS,
   PLOT_BYS,
   PLOT_BY_LABELS,
+  DEFAULT_TASKS_SHOW,
+  TASKS_SHOWS,
+  TASKS_SHOW_LABELS,
   bucketNotes,
   daysBetween,
   defaultView,
@@ -50,14 +73,26 @@ import {
   pageFolder,
   parseFilter,
   parseJump,
+  taskMatchesFilter,
+  taskMinutes,
+  tasksStatuses,
   viewRange,
   type Buckets,
   type CalendarView,
   type OverlayCommand,
   type OverlayEntry,
+  type TasksShow,
 } from './overlay-model.js'
 import { findPeriod, periodicIndexOf, type PeriodicIndex } from './periodic.js'
-import { OVERLAY_CLOSE_EVENT, type CalendarScope, type DayMarks, type GridEntry, type PlotBy, type SiteIndex } from './types.js'
+import {
+  OVERLAY_CLOSE_EVENT,
+  type CalendarScope,
+  type DayMarks,
+  type GridEntry,
+  type PlotBy,
+  type SiteIndex,
+  type TaskGridSource,
+} from './types.js'
 import './mbr-calendar-grid.js'
 
 declare global {
@@ -77,15 +112,61 @@ const LIST_DAY_CAP = 50
 /** One day as the views draw it, after the filter. */
 interface DayView {
   readonly daily: OverlayEntry | null
+  /** The day's notes (the day note aside). */
   readonly entries: readonly OverlayEntry[]
+  /** The day's tasks in scope that pass the filter, in the server's order (open first). */
+  readonly tasks: readonly GridTaskHit[]
+  /** Tasks the day has but the server's row limit dropped (counted only without a filter). */
+  readonly hiddenTasks: number
+  /** Tasks in scope before the filter, the dropped ones included. */
+  readonly taskTotal: number
+  /** A past day with an open task due on it (the server's flag). */
+  readonly overdue: boolean
 }
 
-const EMPTY_DAY: DayView = Object.freeze({ daily: null, entries: [] })
+const EMPTY_DAY: DayView = Object.freeze({ daily: null, entries: [], tasks: [], hiddenTasks: 0, taskTotal: 0, overdue: false })
+
+/** One line of a day in the popover and the List: a note or a task. */
+type DayItem = { readonly kind: 'note'; readonly entry: OverlayEntry } | { readonly kind: 'task'; readonly hit: GridTaskHit }
+
+/** Everything a day lists, day note first, then notes, then tasks. */
+function dayItemCount(day: DayView): number {
+  return (day.daily ? 1 : 0) + day.entries.length + day.tasks.length
+}
+
+/** The first `cap` lines of a day, without building the rest. */
+function dayItems(day: DayView, cap: number): DayItem[] {
+  const out: DayItem[] = day.daily ? [{ kind: 'note', entry: day.daily }] : []
+  for (const entry of day.entries) {
+    if (out.length >= cap) return out
+    out.push({ kind: 'note', entry })
+  }
+  for (const hit of day.tasks) {
+    if (out.length >= cap) return out
+    out.push({ kind: 'task', hit })
+  }
+  return out
+}
+
+/** Commands that move the focus into the grid: not taken from inside the options menu. */
+const MOVES: ReadonlySet<OverlayCommand> = new Set(['left', 'right', 'up', 'down', 'prev', 'next', 'open'])
+
+/** Why a task sits on its day, for its tooltip and its List / popover row. */
+const PLACED_LABELS: Readonly<Record<Placement, string>> = { due: 'Due', scheduled: 'Scheduled', done: 'Done' }
 
 /** The List view's rows, and how many each capped day left out. */
 interface ListRows {
-  readonly rows: readonly { readonly date: DateKey; readonly entry: OverlayEntry }[]
+  readonly rows: readonly { readonly date: DateKey; readonly item: DayItem }[]
   readonly more: ReadonlyMap<DateKey, number>
+}
+
+/** The grids' per-day callbacks, rebuilt (new identities) whenever the day data changes. */
+interface GridCallbacks {
+  readonly gen: number
+  readonly month: (date: DateKey, limit: number) => readonly GridEntry[]
+  readonly week: (date: DateKey, limit: number) => readonly GridEntry[]
+  readonly count: (date: DateKey) => number
+  readonly marks: (date: DateKey) => DayMarks
 }
 
 @customElement('mbr-calendar-overlay')
@@ -101,6 +182,12 @@ export class MbrCalendarOverlayElement extends LitElement {
   @property({ attribute: false }) tagFields: readonly string[] = ['tags']
   @property() locale = typeof navigator === 'undefined' ? 'en-US' : navigator.language || 'en-US'
   @property({ attribute: false }) now: () => Date = () => new Date()
+  /**
+   * Task rows for the range on screen (`calendar/task-markers.ts`); `null`
+   * where there is no task endpoint (static builds, `tasks_enabled = false`):
+   * no Tasks option, no request. A new identity means the rows went stale.
+   */
+  @property({ attribute: false }) taskSource: TaskGridSource | null = null
 
   @state() private _all: readonly MarkdownFile[] | null = null
   @state() private _label = 'All notes'
@@ -121,6 +208,11 @@ export class MbrCalendarOverlayElement extends LitElement {
   @state() private _pickerYear = 2026
   @state() private _jumpError = false
   @state() private _help = false
+  @state() private _options = false
+  /** Which tasks to show beside the notes, kept for the life of the page. */
+  @state() private _tasksShow: TasksShow = DEFAULT_TASKS_SHOW
+  /** The task rows of the range on screen; `null` while none are wanted or loaded. */
+  @state() private _tasks: TaskGridResponse | null = null
 
   private _buckets: Buckets | null = null
   private _bucketsKey: readonly [readonly MarkdownFile[], boolean, PlotBy] | null = null
@@ -130,7 +222,11 @@ export class MbrCalendarOverlayElement extends LitElement {
   private _listMemo: { key: string; value: ListRows } | null = null
   private _matchMemo = new Map<string, DateKey | null>()
   private _debounce: number | null = null
-  private _focusAfterRender: 'grid' | 'popover' | 'list' | null = null
+  private _focusAfterRender: 'grid' | 'popover' | 'list' | 'options' | 'options-button' | null = null
+  private _gridCallbacks: GridCallbacks | null = null
+  /** The task request in flight or answered: its query key and the source asked. */
+  private _tasksAsked: { key: string; source: TaskGridSource } | null = null
+  private _scopedUrls: { files: readonly MarkdownFile[]; urls: ReadonlySet<string> } | null = null
 
   override connectedCallback(): void {
     super.connectedCallback()
@@ -156,6 +252,55 @@ export class MbrCalendarOverlayElement extends LitElement {
       else window.removeEventListener('keydown', this._onKeydown, true)
     }
     if ((changed.has('open') || changed.has('scope')) && this.open) this._applyScope()
+    this._syncTasks()
+  }
+
+  /** Whether tasks are on screen: an endpoint and a Tasks choice other than None. */
+  private get _tasksOn(): boolean {
+    return this.taskSource !== null && this._tasksShow !== 'none'
+  }
+
+  /**
+   * Asks for the tasks of the range on screen when it, the statuses, the
+   * folder or the source changed: once per change, never while closed. A new
+   * range drops the old rows at once; a new source (a file changed) keeps
+   * them on screen until the fresh ones arrive.
+   */
+  private _syncTasks(): void {
+    if (!this.open || !this._focus) return
+    const source = this._tasksOn ? this.taskSource : null
+    if (!source) {
+      if (this._tasks || this._tasksAsked) {
+        this._tasks = null
+        this._tasksAsked = null
+        this._dropDays()
+      }
+      return
+    }
+    const view = this._view ?? 'month'
+    const weekStart = this._weekStart()
+    const { from, to } = view === 'list' ? viewRange('list', this._focus, weekStart) : gridRange(view, this._focus, weekStart)
+    const statuses = tasksStatuses(this._tasksShow)
+    const folder = this._folderOnly && this._folder ? folderScopeValue(this._folder) : null
+    const key = `${from}|${to}|${statuses.join(',')}|${folder ?? ''}`
+    const asked = this._tasksAsked
+    if (asked?.key === key && asked.source === source) return
+    if (asked?.key !== key && this._tasks) {
+      this._tasks = null
+      this._dropDays()
+    }
+    const ask = { key, source }
+    this._tasksAsked = ask
+    source({ from, to, statuses, folder })
+      .then((response) => {
+        if (this._tasksAsked !== ask) return
+        this._tasks = response
+        this._dropDays()
+      })
+      .catch((err: unknown) => {
+        if (this._tasksAsked === ask) this._tasksAsked = null
+        console.warn('mbr-calendar: could not load tasks', err)
+      })
   }
 
   protected override updated(): void {
@@ -168,6 +313,16 @@ export class MbrCalendarOverlayElement extends LitElement {
         positionAnchored(this._popover.anchor, card)
         card.querySelector<HTMLElement>('a')?.focus()
       }
+    } else if (target === 'options') {
+      const card = this.renderRoot.querySelector<HTMLElement>('.options')
+      const button = this.renderRoot.querySelector<HTMLElement>('.options-btn')
+      if (card && button) {
+        positionAnchored(button, card)
+        const radio = card.querySelector<HTMLElement>('input:checked') ?? card.querySelector<HTMLElement>('input')
+        radio?.focus()
+      }
+    } else if (target === 'options-button') {
+      this.renderRoot.querySelector<HTMLElement>('.options-btn')?.focus()
     } else if (target === 'list' || this._view === 'list') {
       this.renderRoot.querySelector<HTMLElement>(`.row[data-i="${this._listIndex}"]`)?.focus()
     } else {
@@ -190,6 +345,7 @@ export class MbrCalendarOverlayElement extends LitElement {
     this._popover = null
     this._picker = false
     this._help = false
+    this._options = false
     this._focusAfterRender = 'grid'
     const ready = (files: readonly MarkdownFile[]): void => {
       this._all = files
@@ -271,34 +427,66 @@ export class MbrCalendarOverlayElement extends LitElement {
     return this._matchMemo.get(key)!
   }
 
-  /** One day after the filter, memoized until the filter or buckets change. */
+  /** The url_paths of an explicit scope's notes, which its tasks must come from. */
+  private _scopedUrlSet(): ReadonlySet<string> | null {
+    const files = this._scoped
+    if (!files) return null
+    if (this._scopedUrls?.files !== files) this._scopedUrls = { files, urls: new Set(files.map((f) => f.url_path)) }
+    return this._scopedUrls.urls
+  }
+
+  /**
+   * One day after the filter, memoized until the filter, buckets or tasks
+   * change. Tasks are in scope when their note is (an explicit scope is
+   * matched here; "This folder" was the request's own folder filter).
+   */
   private _day(date: DateKey): DayView {
     const buckets = this._bucketsNow()
     const all = buckets?.days.get(date)
-    if (!all) return EMPTY_DAY
+    const taskDay = this._tasks?.days[date]
+    if (!all && !taskDay) return EMPTY_DAY
     let view = this._dayCache.get(date)
     if (!view) {
-      const kept = this._terms.length ? all.filter((e) => matchesFilter(e, this._terms)) : all
+      const kept = !all ? [] : this._terms.length ? all.filter((e) => matchesFilter(e, this._terms)) : all
       const daily = kept[0]?.daily ? kept[0] : null
-      view = { daily, entries: daily ? kept.slice(1) : kept }
+      const urls = this._scopedUrlSet()
+      const inScope = taskDay ? (urls ? taskDay.tasks.filter((h) => urls.has(h.url_path)) : taskDay.tasks) : []
+      // The rows the server's limit dropped are counted only where its counts
+      // describe the scope (no explicit scope) and no filter narrows them.
+      const dropped = taskDay && !urls ? gridHiddenCount(taskDay, tasksStatuses(this._tasksShow)) : 0
+      const tasks = this._terms.length ? inScope.filter((h) => taskMatchesFilter(h, this._terms)) : inScope
+      const hiddenTasks = this._terms.length ? 0 : dropped
+      view = {
+        daily,
+        entries: daily ? kept.slice(1) : kept,
+        tasks,
+        hiddenTasks,
+        taskTotal: inScope.length + dropped,
+        overdue: (taskDay?.overdue ?? false) && tasks.length + hiddenTasks > 0,
+      }
       this._dayCache.set(date, view)
     }
     return view
   }
 
-  private _countRange(from: DateKey, to: DateKey): { shown: number; total: number } {
+  /** Notes (shown of total) and tasks (shown of total) across `from`…`to`. */
+  private _countRange(from: DateKey, to: DateKey): { shown: number; total: number; tasksShown: number; taskTotal: number } {
     let shown = 0
     let total = 0
+    let tasksShown = 0
+    let taskTotal = 0
     const buckets = this._bucketsNow()
-    if (!buckets) return { shown, total }
+    if (!buckets) return { shown, total, tasksShown, taskTotal }
     for (const date of daysBetween(from, to)) {
       const all = buckets.days.get(date)
-      if (!all) continue
-      total += all.length
+      if (!all && !this._tasks?.days[date]) continue
+      total += all?.length ?? 0
       const day = this._day(date)
       shown += day.entries.length + (day.daily ? 1 : 0)
+      tasksShown += day.tasks.length + day.hiddenTasks
+      taskTotal += day.taskTotal
     }
-    return { shown, total }
+    return { shown, total, tasksShown, taskTotal }
   }
 
   private _gridEntry(e: OverlayEntry, withTime: boolean): GridEntry {
@@ -311,15 +499,64 @@ export class MbrCalendarOverlayElement extends LitElement {
     }
   }
 
-  /** The first `limit` entries of a day as grid lines: a grid never asks for more than it draws. */
-  private _monthEntries = (date: DateKey, limit: number): readonly GridEntry[] =>
-    this._day(date).entries.slice(0, limit).map((e) => this._gridEntry(e, false))
-  private _weekEntries = (date: DateKey, limit: number): readonly GridEntry[] =>
-    this._day(date).entries.slice(0, limit).map((e) => this._gridEntry(e, true))
-  private _dayCount = (date: DateKey): number => this._day(date).entries.length
-  private _dayMarks = (date: DateKey): DayMarks => {
-    const daily = this._day(date).daily
-    return daily ? { dailyUrl: this.resolveUrl(daily.file.url_path) } : {}
+  /** A task as a grid line: its checkbox glyph, its text, a link to its line, why it sits there on hover. */
+  private _taskEntry(hit: GridTaskHit, withTime: boolean): GridEntry {
+    const text = taskDisplayText(hit.text)
+    const minutes = withTime ? taskMinutes(hit.time) : null
+    return {
+      title: text,
+      href: taskHref(hit, this.resolveUrl),
+      status: hit.status,
+      ...(minutes !== null ? { time: formatClock(minutes, this.locale) } : {}),
+      tooltip: [text, PLACED_LABELS[hit.placed_by], hit.note].join(' · '),
+    }
+  }
+
+  /** The first `limit` lines of a day — notes, then tasks: a grid never asks for more than it draws. */
+  private _dayGridEntries(date: DateKey, limit: number, withTime: boolean): GridEntry[] {
+    const day = this._day(date)
+    const notes = day.entries.slice(0, limit).map((e) => this._gridEntry(e, withTime))
+    const room = limit - notes.length
+    return room > 0 ? [...notes, ...day.tasks.slice(0, room).map((h) => this._taskEntry(h, withTime))] : notes
+  }
+
+  /**
+   * The grids' callbacks, with new identities whenever the day data changes
+   * (`_dayGen`): a grid re-renders only when one of its properties changes,
+   * and the same functions over new buckets (a filter, "This folder", plot-by,
+   * tasks arriving) would leave every cell as it was. Kept between renders
+   * otherwise, so an unrelated overlay render does not re-render the grid.
+   */
+  private _callbacks(): GridCallbacks {
+    this._bucketsNow()
+    const gen = this._dayGen
+    if (this._gridCallbacks?.gen !== gen) {
+      this._gridCallbacks = {
+        gen,
+        month: (date, limit) => this._dayGridEntries(date, limit, false),
+        week: (date, limit) => this._dayGridEntries(date, limit, true),
+        count: (date) => {
+          const day = this._day(date)
+          return day.entries.length + day.tasks.length
+        },
+        marks: (date) => {
+          const day = this._day(date)
+          const marks: { -readonly [K in keyof DayMarks]: DayMarks[K] } = { notes: day.entries.length }
+          if (day.daily) marks.dailyUrl = this.resolveUrl(day.daily.file.url_path)
+          if (day.tasks.length || day.hiddenTasks) {
+            marks.open = day.tasks.filter((h) => h.status === 'open').length
+            marks.hidden = day.hiddenTasks
+            marks.overdue = day.overdue
+          }
+          return marks
+        },
+      }
+    }
+    return this._gridCallbacks
+  }
+
+  private _itemHref(item: DayItem): string {
+    return item.kind === 'task' ? taskHref(item.hit, this.resolveUrl) : this.resolveUrl(item.entry.file.url_path)
   }
 
   private _periodUrl(key: string): string | null {
@@ -336,6 +573,7 @@ export class MbrCalendarOverlayElement extends LitElement {
     this._popover = null
     this._picker = false
     this._help = false
+    this._options = false
     this.dispatchEvent(new CustomEvent(OVERLAY_CLOSE_EVENT, { bubbles: true, composed: true }))
   }
 
@@ -370,18 +608,55 @@ export class MbrCalendarOverlayElement extends LitElement {
     }, FILTER_DEBOUNCE_MS)
   }
 
-  private _toggleFolder(): void {
-    this._folderOnly = !this._folderOnly
+  private _setFolderOnly(on: boolean): void {
+    this._folderOnly = on
     this._listIndex = 0
+    this._popover = null
   }
 
-  /** Enter on a day: its only note opens; several list in the popover. */
+  private _setTasksShow(show: TasksShow): void {
+    this._tasksShow = show
+    this._listIndex = 0
+    this._popover = null
+  }
+
+  /** The options menu (`o`, the sliders button); opening it closes the other popovers. */
+  private _toggleOptions(): void {
+    if (this._options) {
+      this._closeOptions()
+      return
+    }
+    this._options = true
+    this._popover = null
+    this._picker = false
+    this._help = false
+    this._focusAfterRender = 'options'
+  }
+
+  private _closeOptions(): void {
+    this._options = false
+    this._focusAfterRender = 'options-button'
+  }
+
+  /** A press outside the open options menu (and its button) closes it. */
+  private _onDialogPointer = (e: PointerEvent): void => {
+    if (!this._options) return
+    const inside = e.composedPath().some((n) => n instanceof Element && (n.classList.contains('options') || n.classList.contains('options-btn')))
+    if (!inside) this._options = false
+  }
+
+  /** Whether any option differs from its default (the button's dot). */
+  private _optionsChanged(): boolean {
+    return this._folderOnly || this._plotBy !== 'date' || (this.taskSource !== null && this._tasksShow !== DEFAULT_TASKS_SHOW)
+  }
+
+  /** Enter on a day: its only note or task opens; several list in the popover. */
   private _openDay(date: DateKey, anchor?: HTMLElement | null): void {
     const day = this._day(date)
-    const count = day.entries.length + (day.daily ? 1 : 0)
+    const count = dayItemCount(day)
     if (count === 0) return
     if (count === 1) {
-      this.navigate(this.resolveUrl((day.daily ?? day.entries[0]).file.url_path))
+      this.navigate(this._itemHref(dayItems(day, 1)[0]))
       return
     }
     const cell = anchor ?? this._grid()?.cellFor(date)
@@ -392,8 +667,7 @@ export class MbrCalendarOverlayElement extends LitElement {
 
   private _onGridDay = (e: CustomEvent<{ date: DateKey; anchor: HTMLElement }>): void => {
     this._focus = e.detail.date
-    const day = this._day(e.detail.date)
-    if (day.entries.length + (day.daily ? 1 : 0) > 0) {
+    if (dayItemCount(this._day(e.detail.date)) > 0) {
       this._popover = { date: e.detail.date, anchor: e.detail.anchor }
       this._focusAfterRender = 'popover'
     }
@@ -405,6 +679,7 @@ export class MbrCalendarOverlayElement extends LitElement {
 
   private _togglePicker(): void {
     this._picker = !this._picker
+    if (this._picker) this._options = false
     this._pickerYear = Number(this._focus.slice(0, 4))
     this._jumpError = false
   }
@@ -435,13 +710,13 @@ export class MbrCalendarOverlayElement extends LitElement {
     this._bucketsNow()
     const key = `${from}|${this._dayGen}`
     if (this._listMemo?.key === key) return this._listMemo.value
-    const rows: { date: DateKey; entry: OverlayEntry }[] = []
+    const rows: { date: DateKey; item: DayItem }[] = []
     const more = new Map<DateKey, number>()
     for (const date of daysBetween(from, to)) {
       const day = this._day(date)
-      const all = day.daily ? [day.daily, ...day.entries.slice(0, LIST_DAY_CAP)] : day.entries
-      const split = overflowSplit(Math.min(all.length, LIST_DAY_CAP), LIST_DAY_CAP, day.entries.length + (day.daily ? 1 : 0))
-      for (const entry of all.slice(0, split.shown)) rows.push({ date, entry })
+      const items = dayItems(day, LIST_DAY_CAP)
+      const split = overflowSplit(items.length, LIST_DAY_CAP, dayItemCount(day) + day.hiddenTasks)
+      for (const item of items.slice(0, split.shown)) rows.push({ date, item })
       if (split.more) more.set(date, split.more)
     }
     const value = { rows, more }
@@ -454,6 +729,7 @@ export class MbrCalendarOverlayElement extends LitElement {
     switch (command) {
       case 'escape':
         if (this._help) this._help = false
+        else if (this._options) this._closeOptions()
         else if (this._popover) {
           this._popover = null
           this._focusAfterRender = 'grid'
@@ -478,6 +754,9 @@ export class MbrCalendarOverlayElement extends LitElement {
       case 'plot':
         this._setPlotBy(nextPlotBy(this._plotBy))
         return true
+      case 'options':
+        this._toggleOptions()
+        return true
       case 'filter':
         this.renderRoot.querySelector<HTMLInputElement>('input.filter')?.focus()
         return true
@@ -487,7 +766,7 @@ export class MbrCalendarOverlayElement extends LitElement {
           return true
         }
         const row = this._listRows().rows[this._listIndex]
-        if (row) this.navigate(this.resolveUrl(row.entry.file.url_path))
+        if (row) this.navigate(this._itemHref(row.item))
         return true
       }
       default:
@@ -525,6 +804,19 @@ export class MbrCalendarOverlayElement extends LitElement {
     const target = e.composedPath()[0] as HTMLElement | undefined
     const tag = target?.tagName
     const handled = (): void => e.preventDefault()
+    // The options menu's radios: their arrows, Space and Enter are native,
+    // Esc closes the menu, and every other key is an overlay key (`p`, `o`…).
+    if (tag === 'INPUT' && (target as HTMLInputElement).type === 'radio') {
+      if (e.key === 'Escape') {
+        handled()
+        this._closeOptions()
+        return
+      }
+      if (e.key.startsWith('Arrow') || e.key === ' ' || e.key === 'Enter' || e.key === 'Tab') return
+      const command = overlayCommand(e.key)
+      if (command && !MOVES.has(command) && this._run(command)) handled()
+      return
+    }
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
       const toGrid = e.key === 'Escape' || (target!.classList.contains('filter') && (e.key === 'Enter' || e.key === 'ArrowDown'))
       if (!toGrid) return
@@ -617,9 +909,8 @@ export class MbrCalendarOverlayElement extends LitElement {
     const pop = this._popover
     if (!pop) return nothing
     const day = this._day(pop.date)
-    const count = day.entries.length + (day.daily ? 1 : 0)
-    const { shown, more } = overflowSplit(count, POPOVER_CAP)
-    const rows = [...(day.daily ? [day.daily] : []), ...day.entries.slice(0, shown)].slice(0, shown)
+    const items = dayItems(day, POPOVER_CAP)
+    const { shown, more } = overflowSplit(items.length, POPOVER_CAP, dayItemCount(day) + day.hiddenTasks)
     return html`
       <div class="popover" role="dialog" aria-label=${formatDate(pop.date, this.locale, { dateStyle: 'full' })}>
         <div class="ph">
@@ -627,21 +918,36 @@ export class MbrCalendarOverlayElement extends LitElement {
           <button type="button" class="mbr-icon-btn sm" aria-label="Close" @click=${this._closePopover}>${icon(iconX, { size: ICON_SM })}</button>
         </div>
         <ul>
-          ${rows.map((e) => html`<li>${this._renderRowBody(e, e.daily)}</li>`)}
+          ${items.slice(0, shown).map((item) => html`<li>${this._renderItem(item)}</li>`)}
           ${more ? html`<li class="more">+${more} more — filter (/) to narrow</li>` : nothing}
         </ul>
       </div>
     `
   }
 
-  private _renderRowBody(e: OverlayEntry, daily: boolean, attrs?: { i: number; focus: boolean }): TemplateResult {
-    const dot = e.color === null ? '' : `background:var(--mbr-cal-type-${e.color})`
-    const time = e.minutes !== null ? html`<span class="time">${formatClock(e.minutes, this.locale)}</span>` : nothing
-    const folder = e.folder ? html`<span class="folder">${e.folder}</span>` : nothing
-    const body = html`<i class="dot" style=${dot}></i>${time}<span class="t">${daily ? 'Daily note' : e.title}</span>${folder}`
+  /** A popover / List line: a note (type dot, time, title, folder) or a task (checkbox, time, text, why, note). */
+  private _renderItem(item: DayItem, attrs?: { i: number; focus: boolean }): TemplateResult {
+    let body: TemplateResult
+    let title: string | typeof nothing = nothing
+    if (item.kind === 'note') {
+      const e = item.entry
+      const dot = e.color === null ? '' : `background:var(--mbr-cal-type-${e.color})`
+      const time = e.minutes !== null ? html`<span class="time">${formatClock(e.minutes, this.locale)}</span>` : nothing
+      const folder = e.folder ? html`<span class="folder">${e.folder}</span>` : nothing
+      body = html`<i class="dot" style=${dot}></i>${time}<span class="t">${e.daily ? 'Daily note' : e.title}</span>${folder}`
+    } else {
+      const hit = item.hit
+      const minutes = taskMinutes(hit.time)
+      const time = minutes !== null ? html`<span class="time">${formatClock(minutes, this.locale)}</span>` : nothing
+      const text = taskDisplayText(hit.text)
+      title = `${text} — ${hit.note}`
+      body = html`<i class=${`check ${hit.status}`} aria-hidden="true"></i>${time}<span class="t">${text}</span
+        ><span class="placed">${PLACED_LABELS[hit.placed_by]}</span><span class="folder">${hit.note}</span>`
+    }
     return html`<a
-      class=${attrs ? 'row' : 'prow'}
-      href=${this.resolveUrl(e.file.url_path)}
+      class=${`${attrs ? 'row' : 'prow'}${item.kind === 'task' ? ` task ${item.hit.status}` : ''}`}
+      href=${this._itemHref(item)}
+      title=${title}
       data-i=${attrs?.i ?? nothing}
       tabindex=${attrs ? (attrs.focus ? 0 : -1) : nothing}
     >${body}</a>`
@@ -660,7 +966,7 @@ export class MbrCalendarOverlayElement extends LitElement {
         const label = formatDate(row.date, this.locale, { weekday: 'long', month: 'long', day: 'numeric' })
         out.push(html`<h3 class=${row.date === this._today ? 'today' : ''}><time datetime=${row.date}>${label}</time></h3>`)
       }
-      out.push(this._renderRowBody(row.entry, row.entry.daily, { i, focus: i === this._listIndex }))
+      out.push(this._renderItem(row.item, { i, focus: i === this._listIndex }))
       const left = more.get(row.date)
       if (left && rows[i + 1]?.date !== row.date) out.push(html`<p class="more">+${left} more — filter (/) to narrow</p>`)
     })
@@ -668,6 +974,7 @@ export class MbrCalendarOverlayElement extends LitElement {
   }
 
   private _renderView(view: CalendarView): TemplateResult {
+    const fns = this._callbacks()
     const weekNumbers = this.config.weekNumbers ?? (this._index ? this._index.week.length > 0 : false)
     if (view === 'list') return this._renderList()
     if (view === 'week') {
@@ -677,9 +984,9 @@ export class MbrCalendarOverlayElement extends LitElement {
           .focused=${this._focus}
           .today=${this._today}
           .locale=${this.locale}
-          .dayEntries=${this._weekEntries}
-          .dayCount=${this._dayCount}
-          .dayMarks=${this._dayMarks}
+          .dayEntries=${fns.week}
+          .dayCount=${fns.count}
+          .dayMarks=${fns.marks}
           @mbr-calendar-focus=${this._onGridFocus}
           @mbr-calendar-day=${this._onGridDay}
         ></mbr-calendar-week-grid>
@@ -693,13 +1000,86 @@ export class MbrCalendarOverlayElement extends LitElement {
         .weekStart=${this._weekStart()}
         .weekNumbers=${weekNumbers}
         .locale=${this.locale}
-        .dayEntries=${this._monthEntries}
-        .dayCount=${this._dayCount}
-        .dayMarks=${this._dayMarks}
+        .dayEntries=${fns.month}
+        .dayCount=${fns.count}
+        .dayMarks=${fns.marks}
         .weekHref=${this._weekHref}
         @mbr-calendar-focus=${this._onGridFocus}
         @mbr-calendar-day=${this._onGridDay}
       ></mbr-calendar-month-grid>
+    `
+  }
+
+  /**
+   * What narrows the view, at a glance: an explicit scope (its ✕ widens to
+   * all notes), "This folder" (its ✕ turns it off) and a plot-by other than
+   * note date (its ✕ goes back to it). Nothing while all notes show by note date.
+   */
+  private _renderChips(): TemplateResult[] {
+    const chip = (label: string, clear: string, onClear: () => void) => html`
+      <span class="chip">${label}<button type="button" class="mbr-icon-btn sm" aria-label=${clear} title=${clear} @click=${onClear}>
+          ${icon(iconX, { size: ICON_SM })}
+        </button></span
+      >
+    `
+    const chips: TemplateResult[] = []
+    if (this._scoped) chips.push(chip(this._label, 'Show all notes', () => this.widen()))
+    else if (this._folderOnly && this._folder) {
+      chips.push(chip(`Folder: ${this._folder}`, 'Show all folders', () => this._setFolderOnly(false)))
+    }
+    if (this._plotBy !== 'date') {
+      chips.push(chip(`Plot by ${PLOT_BY_LABELS[this._plotBy].toLowerCase()}`, 'Plot by note date', () => this._setPlotBy('date')))
+    }
+    return chips
+  }
+
+  /** One radio group of the options menu. */
+  private _renderRadios<T extends string>(
+    legend: string,
+    name: string,
+    options: readonly T[],
+    label: (value: T) => string,
+    current: T,
+    choose: (value: T) => void
+  ): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>${legend}</legend>
+        ${options.map(
+          (value) => html`
+            <label>
+              <input type="radio" name=${name} value=${value} .checked=${value === current} @change=${() => choose(value)} />
+              <span>${label(value)}</span>
+            </label>
+          `
+        )}
+      </fieldset>
+    `
+  }
+
+  /**
+   * The options menu: scope ("This folder", only when opened from a page and
+   * not over an explicit scope), plot-by, and tasks (only with a task source).
+   */
+  private _renderOptions(): TemplateResult {
+    const folder = this._folder && !this._scoped ? this._folder : ''
+    return html`
+      <div class="options" role="group" aria-label="Calendar options">
+        ${folder
+          ? this._renderRadios(
+              'Scope',
+              'scope',
+              ['all', 'folder'] as const,
+              (v) => (v === 'all' ? 'All notes' : `This folder: ${folder}`),
+              this._folderOnly ? 'folder' : 'all',
+              (v) => this._setFolderOnly(v === 'folder')
+            )
+          : nothing}
+        ${this._renderRadios('Plot by', 'plot', PLOT_BYS, (p) => PLOT_BY_LABELS[p], this._plotBy, (p) => this._setPlotBy(p))}
+        ${this.taskSource
+          ? this._renderRadios('Tasks', 'tasks', TASKS_SHOWS, (t) => TASKS_SHOW_LABELS[t], this._tasksShow, (t) => this._setTasksShow(t))
+          : nothing}
+      </div>
     `
   }
 
@@ -708,11 +1088,14 @@ export class MbrCalendarOverlayElement extends LitElement {
     const view = this._view ?? 'month'
     const buckets = this._bucketsNow()
     const { from, to } = viewRange(view, this._focus, this._weekStart())
-    const { shown, total } = this._countRange(from, to)
+    const { shown, total, tasksShown, taskTotal } = this._countRange(from, to)
     const where = view === 'week' ? 'this week' : `in ${formatDate(from, this.locale, { month: 'long' })}`
-    const count = `${this._terms.length ? `${shown} of ` : ''}${total} ${total === 1 ? 'note' : 'notes'} ${where}`
-    const before = buckets && shown === 0 ? this._nearMatch(-1, from, to) : null
-    const after = buckets && shown === 0 ? this._nearMatch(1, from, to) : null
+    const of = (n: number) => (this._terms.length ? `${n} of ` : '')
+    const tasksText = this._tasksOn && this._tasks ? ` · ${of(tasksShown)}${taskTotal} ${taskTotal === 1 ? 'task' : 'tasks'}` : ''
+    const count = `${of(shown)}${total} ${total === 1 ? 'note' : 'notes'}${tasksText} ${where}`
+    const nothingShown = buckets !== null && shown === 0 && tasksShown === 0
+    const before = nothingShown ? this._nearMatch(-1, from, to) : null
+    const after = nothingShown ? this._nearMatch(1, from, to) : null
     const unit = view === 'week' ? 'week' : 'month'
     const step = (d: number) => () => this._run(d < 0 ? 'prev' : 'next')
     const viewName = (v: CalendarView): string => (v === 'list' ? 'List' : v === 'week' ? 'Week' : 'Month')
@@ -760,19 +1143,10 @@ export class MbrCalendarOverlayElement extends LitElement {
         <button type="button" class="mbr-icon-btn" aria-label="Close" title="Close (Esc)" @click=${() => this._close()}>${icon(iconX)}</button>
       </div>
     `
-    const widen = this._scoped
-      ? html`<button type="button" class="mbr-icon-btn sm" aria-label="Show all notes" title="Show all notes" @click=${() => this.widen()}>
-          ${icon(iconX, { size: ICON_SM })}
-        </button>`
-      : nothing
+    const changed = this._optionsChanged()
     const tools = html`
       <div class="tools">
-        <span class="chip">${this._label}${widen}</span>
-        ${this._folder && !this._scoped
-          ? html`<button type="button" class="chip toggle" aria-pressed=${this._folderOnly ? 'true' : 'false'} @click=${() => this._toggleFolder()}>
-              This folder: ${this._folder}
-            </button>`
-          : nothing}
+        ${this._renderChips()}
         <input
           class="filter"
           type="search"
@@ -783,17 +1157,21 @@ export class MbrCalendarOverlayElement extends LitElement {
           autocomplete="off"
           spellcheck="false"
         />
-        <label class="plot">
-          Plot by
-          <select @change=${(e: Event) => this._setPlotBy((e.target as HTMLSelectElement).value as PlotBy)}>
-            ${PLOT_BYS.map((p) => html`<option value=${p} ?selected=${p === this._plotBy}>${PLOT_BY_LABELS[p]}</option>`)}
-          </select>
-        </label>
+        <button
+          type="button"
+          class="mbr-icon-btn options-btn"
+          aria-label=${changed ? 'Calendar options (changed)' : 'Calendar options'}
+          aria-haspopup="true"
+          aria-expanded=${this._options ? 'true' : 'false'}
+          title="Options: scope, plot by, tasks (o)"
+          @click=${() => this._toggleOptions()}
+        >
+          ${icon(iconSlidersHorizontal)}${changed ? html`<span class="badge" aria-hidden="true"></span>` : nothing}
+        </button>
         <span class="count" role="status">${buckets ? count : 'Loading…'}</span>
       </div>
     `
-    const empty =
-      buckets && shown === 0
+    const empty = nothingShown
         ? html`
             <div class="empty">
               ${this._terms.length ? 'No matches' : 'No notes'} ${where}.
@@ -817,10 +1195,10 @@ export class MbrCalendarOverlayElement extends LitElement {
       : nothing
     return html`
       <div class="backdrop" @click=${() => this._close()}></div>
-      <div class="dialog" role="dialog" aria-modal="true" aria-label="Calendar">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="Calendar" @pointerdown=${this._onDialogPointer}>
         ${bar} ${tools} ${empty}
         <div class=${`view ${view}`}>${buckets ? this._renderView(view) : nothing}</div>
-        ${this._picker ? this._renderPicker() : nothing}${this._renderPopover()}${help}
+        ${this._picker ? this._renderPicker() : nothing}${this._options ? this._renderOptions() : nothing}${this._renderPopover()}${help}
       </div>
     `
   }
@@ -919,6 +1297,11 @@ export class MbrCalendarOverlayElement extends LitElement {
         gap: 0.2rem;
         padding: 0.1rem 0.5rem;
         border-radius: 999px;
+        max-width: 18rem;
+        padding-right: 0.1rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         background: var(--mbr-cal-daily-bg, rgba(1, 114, 173, 0.12));
         cursor: default;
       }
@@ -926,38 +1309,87 @@ export class MbrCalendarOverlayElement extends LitElement {
         width: 22px;
         height: 22px;
       }
-      .chip.toggle {
-        cursor: pointer;
-        background: none;
-        border: 1px solid var(--pico-muted-border-color, #ccc);
-      }
-      .chip.toggle[aria-pressed='true'] {
-        background: var(--mbr-cal-daily-bg, rgba(1, 114, 173, 0.12));
-        border-color: var(--pico-primary);
-      }
       .filter {
-        flex: 1 1 10rem;
+        flex: 1 1 14rem;
         min-width: 6rem;
-        max-width: 22rem;
+        max-width: 36rem;
         height: 2rem;
         margin: 0;
         padding: 0 0.5rem;
         font-size: 0.9rem;
       }
-      .plot {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.3rem;
+      .options-btn {
+        position: relative;
+      }
+      .badge {
+        position: absolute;
+        top: 5px;
+        right: 5px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--pico-primary);
+      }
+      .options {
+        width: 15rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+      }
+      .options fieldset {
         margin: 0;
+        padding: 0;
+        border: 0;
+      }
+      .options legend {
+        margin-bottom: 0.2rem;
+        padding: 0;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--pico-muted-color, #666);
+      }
+      .options label {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin: 0;
+        padding: 0.15rem 0;
         font-size: 0.85rem;
+        cursor: pointer;
+      }
+      .options input[type='radio'] {
+        flex: none;
+        width: 1rem;
+        height: 1rem;
+        margin: 0;
+      }
+      .options label span {
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .plot select {
-        width: auto;
-        height: 2rem;
-        margin: 0;
-        padding: 0 2rem 0 0.5rem;
-        font-size: 0.85rem;
+      .check {
+        flex: none;
+        width: 9px;
+        height: 9px;
+        border: 1.5px solid currentColor;
+        border-radius: 2px;
+      }
+      .check.done {
+        background: currentColor;
+      }
+      .task.done .t {
+        text-decoration: line-through;
+        color: var(--pico-muted-color);
+      }
+      .placed {
+        flex: none;
+        font-size: 0.7rem;
+        color: var(--pico-muted-color);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
       }
       .count {
         margin-left: auto;
@@ -1043,6 +1475,7 @@ export class MbrCalendarOverlayElement extends LitElement {
       }
       .picker,
       .popover,
+      .options,
       .help {
         position: fixed;
         z-index: 1002;
@@ -1143,9 +1576,15 @@ export class MbrCalendarOverlayElement extends LitElement {
         .nav {
           flex-basis: 100%;
         }
-        .links,
-        .plot {
+        .links {
           font-size: 0.8rem;
+        }
+        .options-btn {
+          width: 44px;
+          height: 44px;
+        }
+        .options label {
+          min-height: 44px;
         }
         .filter {
           font-size: 16px;

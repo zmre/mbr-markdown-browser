@@ -283,6 +283,22 @@ title open the month, quarter and year notes (and the week note in Week view)
 when they exist. A dot's colour is fixed per type, so `meeting` is the same
 colour on every page and in every repository.
 
+Beside the **Filter** field, the options button (sliders icon, or `o`) opens
+the calendar's options. A dot on the button means one of them is not at its
+default:
+
+- **Scope**: **All notes**, or **This folder** (the folder of the page you
+  opened the calendar from, subfolders included). Offered only when you opened
+  it with `c` from a page in a folder.
+- **Plot by**: **Note date**, **Modified** or **Created** (below).
+- **Tasks**: **None**, **Due**, or **Due & done** (the default). Server and
+  GUI only, with the [task browser](tasks/) enabled; a static build has no
+  task index, so the option is not there and nothing is requested.
+
+Whatever narrows the view also shows as a chip beside the field, with a ✕ to
+undo it: the selection you opened the calendar on, **This folder**, and a
+plot-by other than note date.
+
 **Plot by** chooses which date places a note: its **note date** (see
 [Note dates](#note-dates); week, month, quarter and year notes are reached
 through their links rather than drawn on their first day), when it was last
@@ -292,8 +308,23 @@ worked on things, long-lived notes included.
 **Filter** narrows what is shown as you type. Every word must match the title,
 path, `type` or a tag; `#project` matches tags starting with `project`, and
 `type:meeting` matches the type exactly. When a month has nothing that matches,
-links jump to the nearest month that does. The view, plot-by and filter stay
-as you left them while you move between months, and until you leave the page.
+links jump to the nearest month that does. The view, the options and the filter
+stay as you left them while you move between months, and until you leave the
+page.
+
+**Tasks.** With tasks on, each day also lists the tasks placed on it, after its
+notes, as the [task grids](tasks/#week-and-month-grids) place them: an open
+task on its due date, else its scheduled date; a ticked task on its done date
+(with **Due & done**); never a canceled one. **Due** means open tasks, scheduled
+ones included. A task is drawn with a checkbox (filled when done), links to its
+line in its note, and shows its time in Week view and in the day list, where
+it also says why it is there (**Due**, **Scheduled** or **Done**). The filter
+matches a task's text, its note's title and path, and `#tags`; `type:` matches
+notes only. Tasks follow the scope (**This folder**, or the notes you opened
+the calendar on) but not plot-by: they always sit on their own dates. The count
+line gives notes and tasks separately ("12 notes · 5 tasks in November").
+Tasks are read only here; tick them in the note or the task browser. They are
+asked for once per month or week shown and refreshed when a file changes.
 
 What it shows depends on where you opened it:
 
@@ -314,12 +345,14 @@ The chip naming the selection has a ✕ that widens it to all notes.
 | `m` / `w` / `a` | Month / Week / List view |
 | `g` | Open the jump picker |
 | `p` | Next plot-by |
+| `o` | Options (scope, plot by, tasks) |
 | `/` | Filter |
 | Enter | Open the day's only note, else list the day |
 | `?` | These keys |
-| Esc | Close the day list or picker, then the calendar |
+| Esc | Close the options, day list or picker, then the calendar |
 
-The overlay reads only the site index, so it works the same in static builds.
+The overlay reads only the site index for notes, so it works the same in static
+builds (without tasks).
 
 ### In the file browser
 

@@ -7,6 +7,7 @@
  */
 import type { MarkdownFile } from '../sorting.js'
 import type { DateKey } from './note-date.js'
+import type { TaskGridResponse, TaskStatus } from '../tasks/types.js'
 
 /** What one day cell shows besides its number. */
 export interface DayMarks {
@@ -42,6 +43,26 @@ export interface DayTaskCount {
  * asks again.
  */
 export type TaskMarkerSource = (from: DateKey, to: DateKey) => Promise<ReadonlyMap<DateKey, DayTaskCount>>
+
+/** What the overlay asks {@link TaskGridSource} for: the days on screen, the statuses, a folder. */
+export interface TaskGridQuery {
+  /** First day, inclusive (at most 62 days with `to`). */
+  readonly from: DateKey
+  readonly to: DateKey
+  /** `['open']` (Due) or `['open', 'done']` (Due & done). */
+  readonly statuses: readonly TaskStatus[]
+  /** Folder scope in the server's shape (`/meetings/`, subfolders included), `null` for all. */
+  readonly folder: string | null
+}
+
+/**
+ * Task rows for the overlay (`POST /.mbr/tasks` `mode: "grid"`), built by
+ * `calendar/task-markers.ts` beside the marker source and sharing its cache.
+ * `null` where there is no task endpoint: the overlay then offers no Tasks
+ * option and makes no request. A new function identity means the rows went
+ * stale (a file changed), and the overlay asks again.
+ */
+export type TaskGridSource = (query: TaskGridQuery) => Promise<TaskGridResponse>
 
 /** `site.json`, as far as the calendar reads it. */
 export interface SiteIndex {

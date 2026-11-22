@@ -244,6 +244,7 @@ export type OverlayCommand =
   | 'open'
   | 'escape'
   | 'help'
+  | 'options'
 
 const KEY_COMMANDS: ReadonlyMap<string, OverlayCommand> = new Map(
   Object.entries({
@@ -269,6 +270,7 @@ const KEY_COMMANDS: ReadonlyMap<string, OverlayCommand> = new Map(
     Enter: 'open',
     Escape: 'escape',
     '?': 'help',
+    o: 'options',
   }) as [string, OverlayCommand][]
 )
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createTaskMarkers, dayTaskCounts } from './task-markers.ts'
+import { OVERLAY_TASK_LIMIT, createTaskMarkers, dayTaskCounts } from './task-markers.ts'
 
 const NOW = () => new Date(2026, 9, 31, 12, 0)
 
@@ -82,5 +82,30 @@ describe('createTaskMarkers', () => {
     await expect(markers.source('2026-09-28', '2026-11-08')).rejects.toThrow('HTTP 500')
     await expect(markers.source('2026-09-28', '2026-11-08')).rejects.toThrow()
     expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('serves the overlay rows from the same cache, with its statuses and folder', async () => {
+    const fetchImpl = respond({ days: {} })
+    const markers = createTaskMarkers('/.mbr/tasks', fetchImpl as unknown as typeof fetch, NOW)
+    const query = { from: '2026-09-28', to: '2026-11-08', statuses: ['open', 'done'] as const, folder: '/meetings/' }
+    await markers.grid(query)
+    await markers.grid(query)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1]!.body as string)).toEqual({
+      mode: 'grid',
+      from: '2026-09-28',
+      to: '2026-11-08',
+      statuses: ['open', 'done'],
+      folder: '/meetings/',
+      limit: OVERLAY_TASK_LIMIT,
+      today: '2026-10-31',
+    })
+    await markers.grid({ ...query, folder: null })
+    expect(JSON.parse(fetchImpl.mock.calls[1][1]!.body as string)).not.toHaveProperty('folder')
+    const first = markers.grid
+    markers.invalidate()
+    expect(markers.grid).not.toBe(first)
+    await markers.grid(query)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
   })
 })

@@ -108,7 +108,7 @@ export class MbrCalendarElement extends LitElement implements MbrOverlay {
   /** The overlay's scope once it has been opened (kept while hidden). */
   @state() private _overlayScope: CalendarScope | null = null
   @state() private _overlayOpen = false
-  /** The companion's task markers; `null` without a task endpoint (static builds). */
+  /** The companion's task markers and the overlay's task rows; `null` without a task endpoint (static builds). */
   private _markers: TaskMarkers | null = null
   /** The page's agenda, parsed once by the chunk's `enhancePage`. */
   private _pageEntries: readonly AgendaEntry[] = []
@@ -370,6 +370,8 @@ export class MbrCalendarElement extends LitElement implements MbrOverlay {
       this._overlayEl = overlay
     }
     overlay.scope = scope
+    // Its tasks: a new function after a file changed (`_onFileChanged`), which makes it ask again.
+    overlay.taskSource = this._markers?.grid ?? null
     overlay.open = this._overlayOpen
     if (!overlay.isConnected) document.body.append(overlay)
   }
