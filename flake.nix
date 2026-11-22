@@ -553,25 +553,22 @@
           buildInputs = commonBuildInputs;
         };
 
-      # Build dependencies only (cached separately from source changes)
-      cargoArtifacts = craneLib.buildDepsOnly (commonArgs
+      # Arguments shared by the two full-feature deps-only builds below. Both
+      # compile the same dependency graph; they differ only in the Cargo
+      # profile and in which cargo commands they run.
+      depsOnlyArgs =
+        commonArgs
         // {
           # Dummy source for dependency-only build
           src = craneLib.cleanCargoSource ./.;
           cargoExtraArgs = "--locked --workspace --features ${cliFeatures},${mobileFeature}";
 
-          # crane defaults to `zstd -3`; -19 takes this artifact from 942 MB to
-          # 582 MB (measured) for byte-identical contents. Worth it because this
-          # is the single largest thing we push: 3.54 GB of target/ that is ~63%
-          # redundant by construction — `panic = 'abort'` in Cargo.toml plus
-          # crane's `cargo test --no-run` means the whole dep tree is compiled
-          # twice (libtest needs unwinding), and `cargo check --all-targets`
-          # adds a third set of rmeta on top. None of that is safely removable:
-          # packages.tests and packages.clippy reuse exactly those artifacts.
-          #
-          # The cost lands only when this derivation actually rebuilds (a
-          # Cargo.lock bump): ~7s -> ~140s of compression. Every consumer job
-          # then downloads 360 MB less, so on balance CI gets faster.
+          # crane defaults to `zstd -3`; -19 shrinks these artifacts by ~40%
+          # (942 MB -> 582 MB measured for the old single layer) for
+          # byte-identical contents. Worth it because the deps layers are the
+          # largest things we push. The cost lands only when a layer actually
+          # rebuilds (a Cargo.lock bump): ~7s -> ~140s of compression. Every
+          # consumer job then downloads hundreds of MB less.
           #
           # Deliberately not `--long=27` or higher: crane's inherit hook
           # decompresses with a plain `zstd -d`, which would need a matching
@@ -588,9 +585,9 @@
             #
             # The same stripping un-gates the `mbr` bin (`required-features =
             # ["cli"]`) and the `[[test]]` targets. Those need no re-gating:
-            # every deps-only build here (this one and cargoArtifactsMinimal)
-            # enables `cli`, `server` and `ssg`, and the only build without them,
-            # mbr-quicklook-staticlib, selects `-p mbr-ffi --lib`, which has no
+            # every deps-only command here that selects the root package
+            # enables `cli`, `server` and `ssg`, and the `-p mbr-ffi --lib`
+            # ones (the release layer's, for mbr-quicklook-staticlib) have no
             # bins or tests. The workspace members declare no required-features
             # of their own, so the root Cargo.toml is the only file to patch.
             grep -q 'required-features = \["ffi"\]' Cargo.toml \
@@ -601,6 +598,51 @@
             mkdir -p crates/mbr-core/templates/components-js
             touch crates/mbr-core/templates/components-js/mbr-components.min.js
           '';
+        };
+
+      # Release-profile dependencies, for what ships: `mbr-cli` (and through
+      # it `mbr`) and, on Darwin, `mbr-quicklook-staticlib`. Nothing else uses
+      # this layer, so instead of crane's default `cargo check --all-targets`
+      # + `cargo build --workspace` + `cargo test --no-run` it runs exactly the
+      # commands those two run. Exactly, because cargo resolves features per
+      # selected package: built as part of the workspace, ~50 of mbr-cli's
+      # dependencies (and ~two dozen of the staticlib's) got other features or
+      # metadata than its own `-p` build asks for, and so were compiled again
+      # in every mbr-cli/staticlib build.
+      #   * mbr-cli's `cargo build` (doCheck = false there).
+      #   * Darwin only: the staticlib's `cargo build`, and its check phase
+      #     (buildPackage's doCheck defaults to true), `cargo test --no-run`:
+      #     `panic = 'abort'` makes a libtest build compile the dependencies
+      #     again with unwinding.
+      # The checks (clippy, tests) use `cargoArtifactsTest` instead.
+      cliCargoArgs = "--locked -p mbr-markdown-browser --features ${cliFeatures}";
+      quicklookCargoArgs = "--locked -p mbr-ffi --lib";
+      cargoArtifacts = craneLib.buildDepsOnly (depsOnlyArgs
+        // {
+          buildPhaseCargoCommand =
+            ''
+              cargoWithProfile build ${cliCargoArgs}
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+              cargoWithProfile build ${quicklookCargoArgs}
+            '';
+          doCheck = pkgs.stdenv.isDarwin;
+          checkPhaseCargoCommand = "cargoWithProfile test ${quicklookCargoArgs} --no-run";
+        });
+
+      # `ci-test`-profile dependencies (Cargo.toml: the release profile without
+      # LTO), for `packages.tests` and `packages.clippy`. A separate layer
+      # because LTO changes how every dependency is compiled (embedded bitcode),
+      # so release artifacts would not be reused under another profile.
+      #
+      # crane's full default sequence, all of it used: `cargo check
+      # --all-targets` (clippy's rmeta), `cargo build` (the `mbr` binary the
+      # integration tests run, built with `panic = 'abort'`) and `cargo test
+      # --no-run` (the same dependencies again with unwinding, for libtest).
+      cargoArtifactsTest = craneLib.buildDepsOnly (depsOnlyArgs
+        // {
+          pname = "mbr-ci-test";
+          CARGO_PROFILE = "ci-test";
         });
 
       # The exact feature set Windows ships: every default subsystem except
@@ -614,7 +656,7 @@
 
       # Dependency artifacts for the minimal feature set.
       #
-      # This cannot reuse `cargoArtifacts` above: a different feature set is a
+      # This cannot reuse `cargoArtifactsTest` above: a different feature set is a
       # different dependency graph (no ffmpeg-next, pdfium-render, metadata, or
       # uniffi), so cargo would rebuild the world anyway. Giving the minimal
       # checks their own buildDepsOnly means the dep tree is content-addressed
@@ -630,13 +672,17 @@
           src = craneLib.cleanCargoSource ./.;
           pname = "mbr-minimal";
           cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures},${mobileFeature}";
+          # Only checks consume this layer (clippy-minimal, tests-minimal,
+          # clippy-gui-lib), so it is built with the LTO-free `ci-test` profile
+          # like `cargoArtifactsTest`, and so must every consumer be.
+          CARGO_PROFILE = "ci-test";
 
-          # Same reasoning as cargoArtifacts above. This one is 747 MB at crane's
+          # Same reasoning as depsOnlyArgs above. This one is 747 MB at crane's
           # default, and the two together were 1.69 GB per system — over the 5 GB
           # cache tier on their own once multiplied by the three systems CI builds.
           zstdCompressionExtraArgs = "-19";
           preBuild = ''
-            # Same crane mkDummySrc workaround as cargoArtifacts above — see the
+            # Same crane mkDummySrc workaround as depsOnlyArgs above — see the
             # comment there. It matters more here: `ffi` is off in this feature
             # set, so an un-gated uniffi-bindgen bin would pull the macOS-only
             # uniffi dependency into a build that never wants it.
@@ -669,6 +715,12 @@
               cp -r ../crates/mbr-core/templates/components-js/* $out/
             '';
           };
+
+          # The crane dependency layers, exposed so CI can push each one by
+          # name (`nix eval .#cargoArtifactsTest.outPath`): the cachix daemon
+          # is pull-only (`skipPush`), so these and mbr-components are the
+          # only things CI pushes on every run.
+          inherit cargoArtifacts cargoArtifactsTest cargoArtifactsMinimal;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           # QuickLook staticlib: builds libmbr_ffi.a without GUI/ffmpeg for sandbox compatibility
@@ -681,7 +733,7 @@
               # bulk of the code), and no GUI or media-metadata, which would pull
               # in SDL/ffmpeg that crash in the QuickLook sandbox. The workspace
               # split makes that a crate boundary rather than a feature list.
-              cargoExtraArgs = "--locked -p mbr-ffi --lib";
+              cargoExtraArgs = quicklookCargoArgs;
 
               preBuild = ''
                 mkdir -p crates/mbr-core/templates/components-js
@@ -797,7 +849,7 @@
             // {
               inherit cargoArtifacts;
               pname = "mbr-cli";
-              cargoExtraArgs = "--locked -p mbr-markdown-browser --features ${cliFeatures}";
+              cargoExtraArgs = cliCargoArgs;
               doCheck = false; # Tests run separately via packages.tests
 
               preBuild = ''
@@ -1077,7 +1129,8 @@
           # Clippy check - runs lints without full build
           clippy = craneLib.cargoClippy (commonArgs
             // {
-              inherit cargoArtifacts;
+              cargoArtifacts = cargoArtifactsTest;
+              CARGO_PROFILE = "ci-test";
               cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
 
               preBuild = ''
@@ -1089,7 +1142,8 @@
           # Test - runs all tests
           tests = craneLib.cargoTest (commonArgs
             // {
-              inherit cargoArtifacts;
+              cargoArtifacts = cargoArtifactsTest;
+              CARGO_PROFILE = "ci-test";
               cargoTestExtraArgs = "--workspace --features ${cliFeatures},${mobileFeature}";
 
               preBuild = ''
@@ -1117,6 +1171,7 @@
           clippy-minimal = craneLib.cargoClippy (commonArgs
             // {
               cargoArtifacts = cargoArtifactsMinimal;
+              CARGO_PROFILE = "ci-test";
               pname = "mbr-minimal";
               cargoExtraArgs = "--locked --workspace --no-default-features --features ${minimalFeatures}";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
@@ -1130,6 +1185,7 @@
           tests-minimal = craneLib.cargoTest (commonArgs
             // {
               cargoArtifacts = cargoArtifactsMinimal;
+              CARGO_PROFILE = "ci-test";
               pname = "mbr-minimal";
               # Features go in cargoExtraArgs ONLY. crane composes the command as
               # `cargo test ${cargoExtraArgs} ${cargoTestExtraArgs}`, and cargo
@@ -1165,6 +1221,7 @@
           clippy-gui-lib = craneLib.cargoClippy (commonArgs
             // {
               cargoArtifacts = cargoArtifactsMinimal;
+              CARGO_PROFILE = "ci-test";
               pname = "mbr-gui-lib";
               cargoExtraArgs = "--locked -p mbr-markdown-browser --no-default-features --features gui";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
