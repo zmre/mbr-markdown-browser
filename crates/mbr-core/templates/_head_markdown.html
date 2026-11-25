@@ -37,22 +37,27 @@
        heading, file path or sibling URL can terminate this script block or
        break out of a string literal. `| safe` is required *because* the values
        are already script-safe — HTML entity escaping would corrupt them, since
-       entities are not decoded inside <script>. #}
-    <script>
-      // Frontmatter available to page scripts (excludes rendered markdown for efficiency)
-      window.frontmatter = {{ frontmatter_json | safe }};
-      // Headings for table of contents
-      window.headings = {{ headings_json | default(value="[]") | safe }};
-      // Extended metadata
-      window.extendedMeta = {
-        wordCount: {{ word_count | default(value=0) }},
-        readingTimeMinutes: {{ reading_time_minutes | default(value=0) }},
-        fleschReadingEase: {{ flesch_reading_ease | default(value="null") }},
-        fleschKincaidGrade: {{ flesch_kincaid_grade | default(value="null") }},
-        filePath: {{ file_path_json | default(value='""') | safe }},
-        fileLocation: {{ file_location_json | default(value="null") | safe }},
-        modifiedTimestamp: {{ modified_timestamp | default(value=0) }},
-        {% if prev_page %}prevPage: {{ prev_page_json | default(value="null") | safe }},{% endif %}
-        {% if next_page %}nextPage: {{ next_page_json | default(value="null") | safe }}{% endif %}
-      };
-    </script>
+       entities are not decoded inside <script>.
+
+       A JSON data block, not a script: mbr-bootstrap.js, loaded right after
+       it, defines window.frontmatter (excludes rendered markdown for
+       efficiency), window.headings (the table of contents) and
+       window.extendedMeta from it, so a strict Content-Security-Policy needs
+       no 'unsafe-inline' (mbr_core::csp). Keep it valid JSON: quoted keys, no
+       trailing comma (modifiedTimestamp stays last for that). #}
+    <script type="application/json" data-mbr-globals>{
+      "frontmatter": {{ frontmatter_json | safe }},
+      "headings": {{ headings_json | default(value="[]") | safe }},
+      "extendedMeta": {
+        "wordCount": {{ word_count | default(value=0) }},
+        "readingTimeMinutes": {{ reading_time_minutes | default(value=0) }},
+        "fleschReadingEase": {{ flesch_reading_ease | default(value="null") }},
+        "fleschKincaidGrade": {{ flesch_kincaid_grade | default(value="null") }},
+        "filePath": {{ file_path_json | default(value='""') | safe }},
+        "fileLocation": {{ file_location_json | default(value="null") | safe }},
+        {% if prev_page %}"prevPage": {{ prev_page_json | default(value="null") | safe }},{% endif %}
+        {% if next_page %}"nextPage": {{ next_page_json | default(value="null") | safe }},{% endif %}
+        "modifiedTimestamp": {{ modified_timestamp | default(value=0) }}
+      }
+    }</script>
+    <script src="{{ asset_base }}mbr-bootstrap.js"></script>

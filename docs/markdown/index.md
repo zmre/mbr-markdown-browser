@@ -117,3 +117,18 @@ A bare URL alone on its own line becomes an embed instead; see
 HTML in a note is passed through, so `<details>`, `<kbd>`, `<picture>` and the
 like all work. Relative `src` and `href` values in it are resolved like
 markdown links (see [Links](links/)).
+
+When the notes come from someone you do not trust with script on your pages,
+set [`raw_html`](../reference/configuration/#content-settings) to change that:
+
+| `raw_html` | What a note's HTML becomes |
+|------------|----------------------------|
+| `passthrough` (default) | Written as is, scripts included. |
+| `sanitize` | Formatting is kept (`<b>`, `<kbd>`, `<details>`, tables, lists, links, images, `<picture>`, `<video>`, `<audio>`, `class`, `id`, `align`). Removed: `<script>`, `<style>`, `<iframe>`, forms and every other element not on that list (with the content of `script`, `style`, `textarea`, `title` and frames), `on…` handlers, `style` attributes, and URLs with a scheme other than `http`, `https`, `mailto`, `tel` and the like. Comments are dropped. |
+| `escape` | Shown as text, the way it is written. Comments stay hidden. |
+
+`sanitize` and `escape` touch only HTML the note's author wrote. What mbr
+itself writes (sections, media embeds, task checkboxes, wikilinks, chat
+bubbles, math) is unchanged. They also drop `on…` handlers and script URLs from
+the `{…}` attributes of a heading or a [`--- {…}` section](sections/), and a
+bare GitHub gist URL stays a link instead of loading the gist's script.

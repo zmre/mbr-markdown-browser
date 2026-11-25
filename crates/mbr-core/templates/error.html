@@ -44,7 +44,7 @@
           <nav>
             <ul>
               <li>
-                <button onclick="history.back()" class="outline secondary">&larr; Go Back</button>
+                <button type="button" data-mbr-history-back class="outline secondary">&larr; Go Back</button>
               </li>
               <li>
                 {% if relative_root %}<a href="{{ relative_root }}" role="button" class="outline">Home</a>{% else %}<a href="./" role="button" class="outline">Home</a>{% endif %}

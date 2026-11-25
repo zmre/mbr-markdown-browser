@@ -287,6 +287,33 @@ the normal page — for an invoice, the normal page would be the wrong document.
 | `mbr --pdf` | Refuses before starting (exit status 2), naming the note, the template and the problem, and writes no PDF — it never prints the error page. Save as PDF… in the GUI prints the page on screen, which is then the error page |
 | QuickLook | Shows the normal preview; the problem goes to the system log |
 
+## Limits
+
+Templates come with repositories, and a repository may come from someone
+else, so a template — a note's page template or a `.mbr/` override — is held
+to a few limits:
+
+- **`get_env` is disabled.** Tera's `get_env(name=…)` would read the
+  environment of the process running mbr (tokens, keys) into the page; calling
+  it is a render error, ``get_env is disabled in MBR templates``.
+- **`range` is bounded.** `range(start, end, step_by)` works as in Tera, but
+  one call may produce at most 100 000 numbers, all the `range` calls of one
+  page at most 1 000 000 together (so nested loops cannot multiply past the
+  first limit), and `step_by=0` is an error rather than a loop that never
+  ends.
+- **Pages are bounded.** A rendered page may be at most
+  [`template_output_max_bytes`](../reference/configuration.md#behavior-settings)
+  (16 MiB by default; set only by whoever runs mbr, through the
+  `MBR_TEMPLATE_OUTPUT_MAX_BYTES` environment variable, never by the
+  repository's `.mbr/config.toml`); a template writing more stops there with
+  an error naming the limit.
+
+Each is reported like any other template error (see
+[When something goes wrong](#when-something-goes-wrong)). On the server, a page
+template stopped by a limit is not rendered again for the same note: the next
+request gets the same error at once, until the template, a file beside it, or
+the note changes.
+
 ## Live reload
 
 Saving the template, or any `.html` file beside it, reloads every open page

@@ -154,7 +154,10 @@ fn get_renders_a_markdown_page_with_editing_on() {
         "source path escapes the vault root"
     );
     // The #336 Host gate: `mbr://localhost` pages advertise editing.
-    assert!(html.contains("editEnabled: true"), "editing not advertised");
+    assert!(
+        html.contains("\"editEnabled\": true"),
+        "editing not advertised"
+    );
 }
 
 #[test]

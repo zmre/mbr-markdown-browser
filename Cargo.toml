@@ -42,6 +42,9 @@ mbr-server = { path = "crates/mbr-server", version = "=0.7.4" }
 mbr-ssg = { path = "crates/mbr-ssg", version = "=0.7.4" }
 
 aho-corasick = "1.1"
+# Raw-HTML sanitizing in notes (mbr-core raw_html.rs): ammonia decides what
+# survives of each tag.
+ammonia = "4.2"
 # Lock-free swap of the live server behind one listener when the
 # configuration is reloaded (mbr-server `live.rs`): one atomic load per request.
 arc-swap = "1.7"
@@ -66,6 +69,9 @@ glob = "0.3.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 html-escape = "0.3"
+# The tokenizer raw_html.rs splits author HTML with; the major ammonia uses,
+# so it adds no second copy of its own.
+html5ever = "0.40"
 # `MbrError::Http`'s `From<http::Error>`. Already in the tree via reqwest and
 # axum at this major version, so naming it adds no crate.
 http = "1"

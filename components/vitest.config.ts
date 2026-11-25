@@ -98,6 +98,9 @@ export default defineConfig({
     // and the kanban slide rules live there.
     __MBR_REVEAL_SLIDES_CSS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/reveal-slides.css')),
     __MBR_HEAD_TEMPLATE__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/_head.html')),
+    // The classic script that turns the templates' `data-mbr-globals` JSON
+    // blocks into page globals (strict-CSP pages), for bootstrap.test.ts.
+    __MBR_BOOTSTRAP_JS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/mbr-bootstrap.js')),
     // Pico itself, for the flashcard deck's guard against its [role=group] rules.
     __MBR_PICO_CSS__: JSON.stringify(readRepoFile('../crates/mbr-core/templates/pico-main/pico.min.css')),
     __MBR_APP_BRIDGE_SWIFT__: JSON.stringify(readRepoFile('../apple/ios/MBRMobile/Web/AppBridge.swift')),

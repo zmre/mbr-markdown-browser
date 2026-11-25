@@ -288,7 +288,7 @@ mod tests {
     }
 
     fn render(template: &str) -> tera::Result<String> {
-        let mut tera = tera::Tera::default();
+        let mut tera = crate::template_guard::new_engine();
         tera.register_function("icon", icon_function);
         tera.add_raw_template("t", template)?;
         tera.render("t", &tera::Context::new())

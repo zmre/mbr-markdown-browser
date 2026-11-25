@@ -46,7 +46,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tera::{Context, Tera};
+use tera::Context;
 use thiserror::Error;
 
 // Match every src="...", srcset="...", href="...", poster="..." attribute;
@@ -667,12 +667,12 @@ impl QuickLookTarget {
         let template = page_template::resolve_page_template(&vault, &note, requested, &exempt)?;
 
         let templates =
-            templates::Templates::new(&self.root_path, config.template_folder.as_deref()).map_err(
-                |e| PageTemplateError::Render {
+            templates::Templates::new(&self.root_path, config.template_folder.as_deref())
+                .map_err(|e| PageTemplateError::Render {
                     template: template.authored.clone(),
                     message: e.to_string(),
-                },
-            )?;
+                })?
+                .with_output_limit(config.template_output_max_bytes);
 
         // The context a server page gets, minus what needs a server: no
         // siblings, no calendar bar, absolute URLs (`relative_root` unset, so
@@ -797,6 +797,7 @@ impl QuickLookTarget {
                 // A preview inlines no KaTeX, so a math fence stays a
                 // highlighted code block: readable TeX, not an unstyled div.
                 math_fences: false,
+                raw_html: config.raw_html,
             },
         )
         .map_err(|e| QuickLookError::MarkdownRenderError {
@@ -1462,7 +1463,7 @@ fn render_quicklook_template(
 
     // Create Tera template engine with QuickLook template and the shared
     // card partial (plus the helpers it calls, e.g. `icon()`).
-    let mut tera = Tera::default();
+    let mut tera = mbr_core::template_guard::new_engine();
     templates::register_template_helpers(&mut tera);
     tera.add_raw_template("quicklook.html", QUICKLOOK_TEMPLATE)
         .map_err(template_error)?;

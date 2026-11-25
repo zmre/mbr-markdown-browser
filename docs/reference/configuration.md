@@ -137,7 +137,40 @@ tasks_ignore_globs = [
 |--------|------|---------|-------------|
 | `markdown_extensions` | array | `["md"]` | File extensions treated as markdown |
 | `index_file` | string | `"index.md"` | Default file for directories |
+| `raw_html` | string | `"passthrough"` | What happens to HTML written in a note: `passthrough` (verbatim), `sanitize` (formatting kept; scripts, handlers, `style`, frames, forms and script URLs removed) or `escape` (shown as text). Applies to the server, GUI, static builds, `mbr -o` and QuickLook. See [Raw HTML](../markdown/#raw-html). `MBR_RAW_HTML=sanitize` |
 | `static_folder` | string | `"static"` | Folder for static file overlay. Must stay inside the markdown root, or land under a directory at most two levels above it (`../static`, `../../static`); values reaching further — or into `$HOME` or `/`, or onto a directory that contains the root — are rejected at startup, as are absolute paths from a config file. See [Static Folder](#static-folder) |
+
+### Content Security Policy
+
+The `[content_security_policy]` table makes the server (and the GUI) send a
+`Content-Security-Policy` header, one value per kind of response. Nothing is
+sent by default.
+
+| Key | Applies to |
+|-----|------------|
+| `pages` | Pages mbr renders from the repository: notes, the home page, folder listings, tag pages, error pages |
+| `user_files` | Repository files served as they are: images, PDFs, an `.html` file, and the repository's own `.mbr/` files (`user.css`, overridden components) |
+| `mbr_assets` | mbr's own `/.mbr/` routes: built-in CSS and scripts, `site.json` and the other JSON endpoints, the media viewers |
+
+```toml
+[content_security_policy]
+# A repository HTML file opened in the browser cannot run script.
+user_files = "sandbox allow-same-origin"
+# mbr's pages need no inline script.
+pages = "script-src 'self'"
+```
+
+`sandbox allow-same-origin` sandboxes a response without letting it run
+script; on `pages` it also stops mbr's own sidebar, search and editor, so the
+page is plain reading. mbr's pages work under `script-src 'self'`: they carry
+no inline script, event-handler attribute or `javascript:` URL (page data is
+written as JSON and read by `/.mbr/mbr-bootstrap.js`). A note's own raw HTML,
+a bare gist URL's embed, a customized `.mbr/` template and a
+[page template](../features/custom-page-templates/) are not covered; see
+[Embedding: Content Security Policy](embedding/#content-security-policy).
+
+Environment: `MBR_CONTENT_SECURITY_POLICY__PAGES="script-src 'self'"`. A value
+that is not a valid HTTP header value stops the server at startup.
 
 ### Ignore Settings
 
@@ -192,6 +225,7 @@ assert a fact about the command line that was never typed.
 | `incomplete_markers` | array | `["TK", "TODO", "FIXME", "XXX"]` | Marker strings that flag work as incomplete |
 | `flashcards_concentric_threshold` | number | `0.7` | Share of the flashcard deck's Concentric stack that must be known (rated Good/Easy last, this session) before a card is folded in; must be greater than 0 and at most 1. See [Flashcard Settings](#flashcard-settings). |
 | `flashcards_progress_indicators` | bool | `true` | Show review-progress borders and heading pies on flashcard notes. See [Flashcard Settings](#flashcard-settings). |
+| `MBR_TEMPLATE_OUTPUT_MAX_BYTES` (environment only) | number | `16777216` (16 MiB) | The most bytes one page rendered through a template (a `.mbr/` override, a note's [page template](../features/custom-page-templates.md#limits)) may have. A render that would write more stops with an error naming the limit (an error page, status 500, on the server). **Not read from `.mbr/config.toml`** (a `template_output_max_bytes` key there is ignored): the cap protects whoever runs mbr from the repository's own templates, and the config file ships inside the repository. Must be a whole number greater than 0; anything else refuses to start. Applies to the server, GUI, `mbr -o`, `mbr --pdf` and QuickLook; static builds always use the default. An app embedding mbr sets `ServerConfig::template_output_max_bytes` (or `Config::template_output_max_bytes`) instead. |
 
 ### Navigation Settings
 
@@ -1527,6 +1561,10 @@ MBR_SLIDES__SLIDE_NUMBER=c/t
 MBR_PDF__PAPER=a4
 MBR_PDF__MARGIN="0.5in"
 
+# Notes written by others: sanitize their HTML, sandbox raw repository files
+MBR_RAW_HTML=sanitize
+MBR_CONTENT_SECURITY_POLICY__USER_FILES="sandbox allow-same-origin"
+
 # Video transcoding (requires media-metadata feature)
 MBR_TRANSCODE=true
 
@@ -1542,6 +1580,9 @@ MBR_TASKS_IGNORE_GLOBS='["templates/**","**/archive/**"]'  # kept out of the tas
 # Editing
 MBR_EDIT_ENABLED=true   # or false to keep the GUI read-only
 MBR_UPLOAD_MAX_BYTES=26214400  # 25 MiB cap for editor asset uploads
+
+# Templates (environment only: never read from .mbr/config.toml)
+MBR_TEMPLATE_OUTPUT_MAX_BYTES=8388608  # 8 MiB cap on one rendered page
 ```
 
 Environment variables override config file settings, which in turn override the

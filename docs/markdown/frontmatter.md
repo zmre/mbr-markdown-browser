@@ -177,3 +177,9 @@ block, not just the bad line: the note loses its title, tags, `type` and
 relationships at once. mbr logs a warning naming the file and the line, and
 `mbr -b` reports it. See
 [Frontmatter parse errors](../features/relationships/#frontmatter-parse-errors).
+
+YAML anchors and aliases (`&name` / `*name`) work, within limits that keep a
+small block from expanding into millions of values: at most 100 aliases,
+100,000 values once every alias is expanded, and 128 levels of nesting. A
+block past a limit is ignored the same way, with an error that starts
+"frontmatter refused".

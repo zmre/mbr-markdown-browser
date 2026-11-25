@@ -507,7 +507,7 @@ const MAX_BLOCKED_SCHEME_LEN: usize = 10;
 /// line feed, and carriage return characters are removed anywhere they appear.
 /// Without that, `" java\tscript:alert(1)"` would slip through while still
 /// navigating.
-fn is_blocked_destination(dest: &str) -> bool {
+pub(crate) fn is_blocked_destination(dest: &str) -> bool {
     let mut scheme = [0u8; MAX_BLOCKED_SCHEME_LEN];
     let mut len = 0usize;
     let mut found_colon = false;

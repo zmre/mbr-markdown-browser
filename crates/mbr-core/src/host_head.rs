@@ -210,7 +210,7 @@ fn forbidden_reason(c: char) -> Option<&'static str> {
 }
 
 /// RFC 4648 base64 with padding, which CSP hash sources use.
-fn base64_standard(bytes: &[u8]) -> String {
+pub(crate) fn base64_standard(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     bytes
         .chunks(3)

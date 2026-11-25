@@ -590,11 +590,11 @@ fn served_edit_enabled(repo: &TestRepo, args: &[&str], env: &[(&str, &str)]) -> 
     let _ = child.kill();
     let _ = child.wait();
     let page = page.expect("server never served the page");
-    if page.contains("editEnabled: true,") {
+    if page.contains("\"editEnabled\": true,") {
         true
     } else {
         assert!(
-            page.contains("editEnabled: false,"),
+            page.contains("\"editEnabled\": false,"),
             "no editEnabled in page"
         );
         false

@@ -146,6 +146,15 @@ pub enum ConfigError {
     #[error("Invalid build_concurrency: {value}. Must be greater than 0")]
     InvalidBuildConcurrency { value: usize },
 
+    #[error("Invalid template_output_max_bytes: {value}. Must be greater than 0")]
+    InvalidTemplateOutputMaxBytes { value: usize },
+
+    #[error(
+        "Invalid MBR_TEMPLATE_OUTPUT_MAX_BYTES: {value:?}. Must be a whole number of bytes \
+         greater than 0"
+    )]
+    InvalidTemplateOutputMaxBytesEnv { value: String },
+
     #[error(
         "Invalid tasks_ignore_globs pattern {pattern:?}: {reason}. \
          Patterns match a file's repository-relative path, e.g. \"templates/**\" \

@@ -226,7 +226,15 @@ app's theme:
 
 ### JavaScript Configuration Object
 
-The `_head.html` partial exposes a global `window.__MBR_CONFIG__` object for use by JavaScript:
+The `_head.html` partial exposes a global `window.__MBR_CONFIG__` object for use by JavaScript.
+It is written as a JSON data block
+(`<script type="application/json" data-mbr-globals>`) and defined by
+`/.mbr/mbr-bootstrap.js`, which `_head.html` loads right after it, so it exists
+before any other script runs, and mbr's pages carry no inline script (see
+[Content Security Policy](../reference/embedding/#strict-script-src-for-mbr-s-pages)).
+`_head_markdown.html` does the same for `window.frontmatter`,
+`window.headings` and `window.extendedMeta`. A `.mbr/_head.html` copied from an
+older mbr, which assigns them in an inline `<script>`, keeps working.
 
 ```javascript
 window.__MBR_CONFIG__ = {

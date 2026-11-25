@@ -142,6 +142,28 @@ as you scroll, animate, and open on the chart you last chose), none of which
 makes a faithful page. The contact card itself, with its Relationships list, is
 exported.
 
+**Embedded players and other sites in frames** (a YouTube video, an `<iframe>`
+onto another site) print as an empty frame on macOS and Linux: the export view
+loads nothing in a frame from another site. See [Security](#security).
+
+### Security
+
+A note can hold scripts (raw HTML is markdown), and in the export they run on
+mbr's local address, where they can read anything mbr serves. So the export
+view **stays on that address**: it may load pages from it, `about:blank` and
+`about:srcdoc` documents, and nothing else (not even a `data:` document, which
+would be outside any Content-Security-Policy the page carries). A script that sends the
+page elsewhere (`location = 'https://…'`, a form posted to another site, a
+popup, a download) is refused, the refusal is logged as a warning, and the note
+that was being exported is still the one printed. This holds for frames too on
+macOS and Linux, whose webviews ask about every frame; on Windows, WebView2
+asks only about the page itself.
+
+Requests a page makes without navigating (`fetch`, images from other sites) are
+not navigations and are not stopped by this. A program exporting pages it does
+not trust also sends a `Content-Security-Policy` (see
+[Exporting PDFs from a host application](#exporting-pdfs-from-a-host-application)).
+
 ### Links
 
 The export serves the note from a short-lived local address, so links to other
@@ -401,6 +423,29 @@ rename into place) and returns `Some` once, when it is over. Events from an
 earlier session are ignored by a later one. Everything else on this page
 applies unchanged: the hidden view, the page's readiness, the `@page`
 precedence, the link policy, warnings that never fail an export.
+
+**Navigation stays on the exported URL's origin** (scheme, host and port), as
+described under [Security](#security). A host whose pages embed content from a
+site it trusts can allow that origin as well, with
+`ExportSession::start_with_navigation` (same arguments as `start`, plus the
+list; `start` is the same call with an empty one):
+
+```rust
+use mbr::pdf_export::{ExportSession, NavigationAllowlist};
+
+let navigation = NavigationAllowlist::new()
+    .allow_origin("https://www.youtube.com")?; // a path, if any, is ignored
+let session = ExportSession::start_with_navigation(
+    target, url, options, output, sink, navigation,
+)?;
+```
+
+An allowed origin can be loaded in a frame **and** navigated to by the page
+itself, so a script in an exported page can send it anything the page can
+read: allow only sites you would trust with the content. `allow_origin`, and
+`start` for the exported URL, refuse anything that is not `http(s)` with a host
+(`PdfError::ExportUrl`). Navigation control does not cover `fetch` or images;
+send a `Content-Security-Policy` with the pages for those.
 
 **Keep tao and wry in step.** `ExportSession::start` takes tao's
 `EventLoopWindowTarget`, so the host must use the same tao (and the wry it
