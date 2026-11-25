@@ -43,9 +43,11 @@
 //! - `export_window(WindowBuilder)` — the export window's platform settings
 //!   (Windows: shown off-screen and never activated, because a hidden WebView2
 //!   may be throttled; elsewhere unchanged, i.e. hidden);
-//! - `build_webview(builder, &window)` — where the hidden webview lives (Linux
-//!   builds it into a `gtk::OffscreenWindow` so it is realized and mapped
-//!   without appearing);
+//! - `build_webview(builder, &window, &origins)` — where the hidden webview
+//!   lives (Linux builds it into a `gtk::OffscreenWindow` so it is realized
+//!   and mapped without appearing), plus any guard the platform needs beyond
+//!   wry's navigation handler (Windows: document requests `origins` refuses
+//!   are answered before they are sent; see `ExportOrigins`);
 //! - `prepare_export_view(&webview)` — force the light appearance;
 //! - `default_paper()` — the paper when neither `[pdf] paper` nor a flag says;
 //! - `print_to_pdf(&webview, &options, tmp_path, done) -> PrintInFlight` —
@@ -839,6 +841,7 @@ impl ExportSession {
         .map_err(PdfError::Window)?;
 
         let ipc_sink = Arc::clone(&sink);
+        let navigation_origins = origins.clone();
         let builder = WebViewBuilder::new()
             .with_url(url)
             .with_initialization_script_for_main_only(options.init_script(), true)
@@ -857,7 +860,7 @@ impl ExportSession {
             // carry it off with `location = 'https://…?' + data`), no system
             // handler, no popups, no downloads. See `ExportOrigins`.
             .with_navigation_handler(move |url| {
-                let allowed = origins.allows(&url);
+                let allowed = navigation_origins.allows(&url);
                 if !allowed {
                     tracing::warn!("The export page tried to navigate to {url}; refused");
                 }
@@ -869,7 +872,7 @@ impl ExportSession {
                 tracing::warn!("The export page tried to download {url}; refused");
                 false
             });
-        let webview = platform::build_webview(builder, &window)?;
+        let webview = platform::build_webview(builder, &window, &origins)?;
         platform::prepare_export_view(&webview);
 
         let timer_sink = Arc::clone(&sink);
@@ -1019,10 +1022,12 @@ fn http_origin(url: &str) -> Result<url::Origin, PdfError> {
 /// Why no more: the export page runs the note's scripts on the server's
 /// origin, so it can read anything the server serves, and a top-level
 /// navigation elsewhere is a way out with it. Frames go through the same
-/// check where the webview reports them — WKWebView and WebKitGTK call wry's
-/// navigation handler for subframes too; WebView2 only for the main frame —
-/// so a cross-origin embed (a YouTube player) prints as an empty frame on
-/// macOS and Linux unless its origin is allowed.
+/// check — WKWebView and WebKitGTK call wry's navigation handler for
+/// subframes too; WebView2 calls it for the main frame only, and too late to
+/// stop the request (`NavigationStarting` is cancelled after Chromium has
+/// sent it), so on Windows `windows.rs` also answers every document request
+/// this refuses, frames included, before it is sent — so a cross-origin embed
+/// (a YouTube player) prints as an empty frame unless its origin is allowed.
 ///
 /// What this cannot stop: subresource requests (`fetch`, `<img>`) are not
 /// navigations. A host exporting pages it does not trust also sends a
