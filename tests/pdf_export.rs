@@ -201,33 +201,56 @@ fn a_missing_output_folder_fails_clearly() {
     assert!(stderr.contains("does not exist"), "{stderr}");
 }
 
+/// What the sink server on the other origin saw.
+#[derive(Default)]
+struct SinkLog {
+    /// TCP connections accepted. Chromium (WebView2) preconnects to a URL as
+    /// a navigation to it starts, before the navigation handler refuses it,
+    /// so a connection alone carries no data: no request line, no query.
+    connections: usize,
+    /// The first line of every HTTP request that actually arrived.
+    requests: Vec<String>,
+}
+
 /// A tiny HTTP server on another origin (another port) that answers every
-/// request with a page saying `LEFTMARKER` and counts the requests.
-fn spawn_sink_server() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+/// request with a page saying `LEFTMARKER` and records what reached it.
+fn spawn_sink_server() -> (u16, std::sync::Arc<std::sync::Mutex<SinkLog>>) {
     use std::io::{Read, Write};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&hits);
-    // Left running for the rest of the test process.
+    let log = Arc::new(Mutex::new(SinkLog::default()));
+    let shared = Arc::clone(&log);
+    // Left running for the rest of the test process; one thread per
+    // connection, so an idle preconnect cannot hold up a real request.
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            counter.fetch_add(1, Ordering::SeqCst);
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request);
-            let body = "<!doctype html><title>left</title><p>LEFTMARKER</p>";
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
-                 Connection: close\r\n\r\n{body}",
-                body.len()
-            );
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                shared.lock().expect("sink log").connections += 1;
+                let mut request = [0_u8; 4096];
+                let n = stream.read(&mut request).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                let first_line = String::from_utf8_lossy(&request[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                shared.lock().expect("sink log").requests.push(first_line);
+                let body = "<!doctype html><title>left</title><p>LEFTMARKER</p>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
-    (port, hits)
+    (port, log)
 }
 
 /// A note's script cannot take the export page (and what it read from the
@@ -241,7 +264,7 @@ fn a_script_cannot_navigate_the_export_away() {
     if !enabled() {
         return;
     }
-    let (port, hits) = spawn_sink_server();
+    let (port, sink) = spawn_sink_server();
     let repo = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(repo.path().join(".mbr")).expect("mkdir .mbr");
     let note = repo.path().join("leave.md");
@@ -278,11 +301,23 @@ fn a_script_cannot_navigate_the_export_away() {
             "the navigation to /{path} was not refused:\n{stderr}"
         );
     }
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "the other origin was asked for something:\n{stderr}"
-    );
+    {
+        let sink = sink.lock().expect("sink log");
+        // A preconnect (WebView2) may open a connection; no request may
+        // follow it.
+        assert!(
+            sink.requests.is_empty(),
+            "the other origin was asked for {:?} ({} connections):\n{stderr}",
+            sink.requests,
+            sink.connections
+        );
+        if sink.connections > 0 {
+            eprintln!(
+                "note: {} connection(s) to the other origin carried no request (preconnect)",
+                sink.connections
+            );
+        }
+    }
     let doc = Document::load_mem(&std::fs::read(&target).expect("the PDF exists"))
         .expect("lopdf reads it");
     let text = page_text(&doc);

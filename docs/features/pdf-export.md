@@ -157,7 +157,12 @@ page elsewhere (`location = 'https://…'`, a form posted to another site, a
 popup, a download) is refused, the refusal is logged as a warning, and the note
 that was being exported is still the one printed. This holds for frames too on
 macOS and Linux, whose webviews ask about every frame; on Windows, WebView2
-asks only about the page itself.
+asks only about the page itself. WebView2 also opens a connection to a
+navigation's address as it starts, before mbr refuses it: no request is sent
+on it (nothing of the page leaves), but the address's host name is looked up,
+so a script could still spell a few bytes into a host name it controls. A
+`Content-Security-Policy` does not stop that either; on Windows, export only
+notes you would open in a browser.
 
 Requests a page makes without navigating (`fetch`, images from other sites) are
 not navigations and are not stopped by this. A program exporting pages it does
