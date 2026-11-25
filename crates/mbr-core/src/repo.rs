@@ -3072,6 +3072,41 @@ mod tests {
         )
     }
 
+    /// A note whose frontmatter is a YAML alias bomb is still indexed (its
+    /// frontmatter ignored, title from its H1), and the scan goes on to the
+    /// other notes. Before the bounded loader this scan was killed for memory.
+    #[test]
+    fn test_scan_survives_alias_bomb_frontmatter() {
+        let tmp = visible_tempdir();
+        let root = tmp.path().canonicalize().unwrap();
+        let mut bomb = String::from("---\ntype: person\nl0: &l0 [x, x, x, x, x, x, x, x, x]\n");
+        for level in 1..9 {
+            let items = vec![format!("*l{}", level - 1); 9].join(", ");
+            bomb.push_str(&format!("l{level}: &l{level} [{items}]\n"));
+        }
+        bomb.push_str("---\n# Bomb\n");
+        std::fs::write(root.join("bomb.md"), bomb).unwrap();
+        std::fs::write(root.join("fine.md"), "---\ntitle: Fine\n---\n").unwrap();
+
+        let started = std::time::Instant::now();
+        let repo = test_repo(&root);
+        repo.scan_all().unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let files = repo.markdown_files.pin();
+        let bomb = files.get(&root.join("bomb.md")).expect("bomb note indexed");
+        let bomb_fm = bomb.frontmatter.as_ref().expect("metadata");
+        assert_eq!(bomb_fm.get("title"), Some(&serde_json::json!("Bomb")));
+        assert!(!bomb_fm.contains_key("type"));
+        let fine = files
+            .get(&root.join("fine.md"))
+            .expect("other note indexed");
+        assert_eq!(
+            fine.frontmatter.as_ref().and_then(|fm| fm.get("title")),
+            Some(&serde_json::json!("Fine"))
+        );
+    }
+
     /// Frontmatter links: the scan keeps their sources, `Repo` resolves them
     /// with the wikilink index and checks targets with the path resolver, and
     /// `site.json` gets them only on notes that have any.

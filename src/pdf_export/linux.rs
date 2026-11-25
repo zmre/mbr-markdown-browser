@@ -44,8 +44,8 @@ use webkit2gtk::{PrintOperation, PrintOperationExt};
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
 
 use super::{
-    EXPORT_VIEWPORT, PdfOptions, PrintDone, gtk_name_for_paper, linux_preflight_decision,
-    paper_for_gtk_name,
+    EXPORT_VIEWPORT, ExportOrigins, PdfOptions, PrintDone, gtk_name_for_paper,
+    linux_preflight_decision, paper_for_gtk_name,
 };
 use crate::errors::PdfError;
 use crate::pdf_config::{Orientation, Paper, paper_for_locale, paper_locale_from_env};
@@ -79,7 +79,14 @@ pub fn export_window(builder: WindowBuilder) -> WindowBuilder {
 
 /// The webview, in a `gtk::OffscreenWindow` that is mapped (so WebKit lays
 /// out, loads and runs the page as for a visible view) but never on screen.
-pub fn build_webview(builder: WebViewBuilder<'_>, _window: &Window) -> Result<WebView, PdfError> {
+///
+/// Nothing beyond wry's navigation handler is needed: WebKit asks it before
+/// any request is made, for frames too.
+pub fn build_webview(
+    builder: WebViewBuilder<'_>,
+    _window: &Window,
+    _origins: &ExportOrigins,
+) -> Result<WebView, PdfError> {
     let host = gtk::OffscreenWindow::new();
     // Whole pixels; the viewport is a plausible desktop size, not exact.
     host.set_default_size(EXPORT_VIEWPORT.width as i32, EXPORT_VIEWPORT.height as i32);

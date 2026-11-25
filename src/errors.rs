@@ -95,6 +95,11 @@ pub enum PdfError {
     #[error("Could not start the server for the export: {0}")]
     Server(String),
 
+    /// A URL the export was given to load, or an origin a host allowed it to
+    /// navigate to, is not an `http(s)` URL with a host.
+    #[error("Not a usable URL for a PDF export ({url}): {reason}")]
+    ExportUrl { url: String, reason: String },
+
     #[error("Could not create the export window")]
     Window(#[source] tao::error::OsError),
 
@@ -151,6 +156,7 @@ impl PdfError {
                 | PdfError::OutputDirNotDirectory { .. }
                 | PdfError::OutputDirNotWritable { .. }
                 | PdfError::Server(_)
+                | PdfError::ExportUrl { .. }
                 | PdfError::PageTemplate(_)
         )
     }

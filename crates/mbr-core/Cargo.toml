@@ -31,6 +31,7 @@ ffmpeg-static = ["ffmpeg-next/static", "metadata/static"]
 
 [dependencies]
 aho-corasick.workspace = true
+ammonia.workspace = true
 argon2.workspace = true
 chrono.workspace = true
 figment.workspace = true
@@ -40,6 +41,7 @@ glob.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 html-escape.workspace = true
+html5ever.workspace = true
 http.workspace = true
 itertools.workspace = true
 lopdf.workspace = true

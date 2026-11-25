@@ -70,7 +70,8 @@ impl Renderer {
     /// [`MbrError::Template`] when the templates cannot be loaded.
     pub fn new(config: &Config) -> Result<Self, MbrError> {
         let templates = Templates::new(&config.root_dir, config.template_folder.as_deref())
-            .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?;
+            .inspect_err(|e| tracing::error!("Error parsing template: {e}"))?
+            .with_output_limit(config.template_output_max_bytes);
         Ok(Self {
             templates,
             vault: LocalVault::new(&config.root_dir),
@@ -250,6 +251,7 @@ impl Renderer {
             incomplete_markers: &self.config.incomplete_markers,
             wikilink_index: self.wikilink_index.clone(),
             math_fences: true,
+            raw_html: self.config.raw_html,
         }
     }
 
@@ -786,6 +788,39 @@ mod tests {
                 MbrError::PageTemplate(PageTemplateError::Hidden { .. })
             ),
             "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn unsaved_templates_cannot_read_the_environment_or_run_away() {
+        let (_d, mut config) = invoice_repo();
+        config.template_output_max_bytes = 4096;
+        let renderer = Renderer::new(&config).unwrap();
+        let note = Path::new("invoices/2026-001.md");
+        let template = Path::new("invoices/tpl/invoice.html");
+        for (draft, expected) in [
+            (
+                r#"{{ get_env(name="HOME", default="") }}"#,
+                "get_env is disabled",
+            ),
+            (
+                "{% for i in range(end=100000000) %}{{ i }}{% endfor %}",
+                "`range`",
+            ),
+            (
+                "{% for i in range(end=5000) %}xx{% endfor %}",
+                "larger than 4096 bytes",
+            ),
+        ] {
+            let error = renderer
+                .render_source_with_template(note, INVOICE, template, draft)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{draft}: {error}");
+        }
+        // The saved note's own template is unaffected.
+        assert_eq!(
+            renderer.render_source(note, INVOICE).unwrap(),
+            "saved Inv [lines 3]"
         );
     }
 

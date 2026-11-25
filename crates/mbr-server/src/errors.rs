@@ -29,6 +29,10 @@ pub enum ServerError {
     #[error("Host theme refused: {0}")]
     HostHead(#[from] mbr_core::host_head::HostHeadError),
 
+    /// A `ServerConfig::content_security_policy` value is not a valid header value.
+    #[error("Content-Security-Policy for {class} is not a valid header value: {value:?}")]
+    ContentSecurityPolicy { class: &'static str, value: String },
+
     #[error("Tracing initialization failed")]
     TracingInit,
 }

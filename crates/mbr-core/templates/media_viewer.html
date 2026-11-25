@@ -4,13 +4,10 @@
   <head>
 {% include "_head.html" %}
     <title>{{title_prefix | default(value="")}}{{ title | default(value="Media Viewer") | escape }}{{title_suffix | default(value="")}}</title>
-    <script>
-      // Media viewer configuration
-      window.__MBR_MEDIA_VIEWER__ = {
-        mediaType: "{{ media_type | default(value='') | safe }}",
-        title: "{{ title | default(value='Media Viewer') | escape }}"
-      };
-    </script>
+    {# Media viewer configuration: window.__MBR_MEDIA_VIEWER__, defined from
+       these attributes by mbr-bootstrap.js (no inline script). #}
+    <meta name="mbr-media-viewer" data-media-type="{{ media_type | default(value='') }}" data-title="{{ title | default(value='Media Viewer') }}" />
+    <script src="{{ asset_base }}mbr-bootstrap.js"></script>
   </head>
   <body>
 {% if sidebar_style == "single" %}<mbr-browse-single{% if sidebar_max_items %} max-items="{{ sidebar_max_items }}"{% endif %}>{% include "_browse_footer.html" %}</mbr-browse-single>{% endif %}

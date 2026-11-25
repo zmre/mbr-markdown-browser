@@ -288,6 +288,14 @@ pub struct PageInfo {
 }
 
 impl PageInfo {
+    /// True when the embed runs a script (a GitHub gist's `<script src>`),
+    /// which a raw-HTML policy other than passthrough does not allow.
+    pub fn embeds_script(&self) -> bool {
+        self.embed_html
+            .as_deref()
+            .is_some_and(|html| html.contains("<script"))
+    }
+
     /// Estimates the memory size of this PageInfo in bytes.
     ///
     /// Used by OembedCache for size-based eviction. This is an approximation

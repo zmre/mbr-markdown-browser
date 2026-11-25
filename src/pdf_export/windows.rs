@@ -19,6 +19,20 @@
 //! - `E_NOINTERFACE` on either cast means a runtime older than
 //!   `PrintToPdf` (WebView2 1.0.1020): said so in the error.
 //!
+//! Requests leaving the exported page's origin are stopped twice. wry's
+//! navigation handler is WebView2's `NavigationStarting`, whose cancel can
+//! come after Chromium has already sent the request (measured in CI: a
+//! script's `location.href = 'http://other/…?d=…'` reached the other server
+//! although the navigation was cancelled), and which is never asked about a
+//! frame's navigation. So [`build_webview`] also registers a
+//! `WebResourceRequested` handler for every **document** request — top-level
+//! and frame, from any source kind where the runtime supports
+//! `ICoreWebView2_22` — and answers each one [`ExportOrigins`] refuses with a
+//! local 403 before it is sent ([`refuse_foreign_documents`]). Subresources
+//! (images, `fetch`) are deliberately not filtered, as on macOS and Linux.
+//! wry registers no `WebResourceRequested` handler of its own here: it does
+//! so only for custom protocols, and the export uses none.
+//!
 //! The export window is **shown, off-screen and never activated**
 //! ([`export_window`]) rather than hidden: Chromium may throttle a view whose
 //! window is hidden (timers, image decoding), and the page's readiness check
@@ -37,16 +51,18 @@ use tao::event_loop::EventLoop;
 use tao::platform::windows::WindowBuilderExtWindows;
 use tao::window::{Window, WindowBuilder};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT, ICoreWebView2_7, ICoreWebView2Environment6,
-    ICoreWebView2PrintSettings, ICoreWebView2PrintToPdfCompletedHandler,
+    COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL, ICoreWebView2_7, ICoreWebView2_22,
+    ICoreWebView2Environment, ICoreWebView2Environment6, ICoreWebView2PrintSettings,
+    ICoreWebView2PrintToPdfCompletedHandler, ICoreWebView2WebResourceRequestedEventArgs,
 };
-use webview2_com::{PrintToPdfCompletedHandler, take_pwstr};
+use webview2_com::{PrintToPdfCompletedHandler, WebResourceRequestedEventHandler, take_pwstr};
 use windows::Win32::Foundation::E_NOINTERFACE;
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::core::{HSTRING, Interface, PWSTR};
 use wry::{WebView, WebViewBuilder, WebViewExtWindows};
 
-use super::{PdfOptions, PrintDone, locale_from_utf16};
+use super::{ExportOrigins, PdfOptions, PrintDone, locale_from_utf16};
 use crate::errors::PdfError;
 use crate::pdf_config::{Paper, paper_for_locale, paper_locale_from_env};
 
@@ -79,8 +95,99 @@ pub fn export_window(builder: WindowBuilder) -> WindowBuilder {
         .with_visible(true)
 }
 
-pub fn build_webview(builder: WebViewBuilder<'_>, window: &Window) -> Result<WebView, PdfError> {
-    builder.build(window).map_err(PdfError::WebView)
+/// The webview, with [`refuse_foreign_documents`] installed. Fails closed: a
+/// view whose guard could not be registered is dropped, not exported from.
+pub fn build_webview(
+    builder: WebViewBuilder<'_>,
+    window: &Window,
+    origins: &ExportOrigins,
+) -> Result<WebView, PdfError> {
+    let webview = builder.build(window).map_err(PdfError::WebView)?;
+    refuse_foreign_documents(&webview, origins.clone())
+        .map_err(|e| PdfError::WebView(wry::Error::WebView2Error(e.into())))?;
+    Ok(webview)
+}
+
+/// Answers every document request (top-level or frame) that `origins` does
+/// not allow with a local `403 Forbidden`, so it is never sent. Registered
+/// right after `build`, while the first navigation (the exported page, which
+/// is allowed) is still pending: WebView2 raises its events from the message
+/// loop, which has not run yet.
+fn refuse_foreign_documents(
+    webview: &WebView,
+    origins: ExportOrigins,
+) -> windows::core::Result<()> {
+    let view = webview.webview();
+    let environment = webview.environment();
+    let every_uri = HSTRING::from("*");
+    // SAFETY: `view` is a live WebView2 used on the UI thread it was created
+    // on; the filter string outlives the call.
+    unsafe {
+        // Runtimes with `ICoreWebView2_22` raise `WebResourceRequested` only
+        // for the source kinds named (wry does the same for its custom
+        // protocols, so iframes and workers are covered); the older call is
+        // the documents-only equivalent.
+        match view.cast::<ICoreWebView2_22>() {
+            Ok(view_22) => view_22.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                &every_uri,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+            )?,
+            Err(_) => view.AddWebResourceRequestedFilter(
+                &every_uri,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+            )?,
+        }
+    }
+
+    let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        // An unreadable URI is refused too.
+        let uri = request_uri(&args);
+        if uri.as_deref().is_ok_and(|uri| origins.allows(uri)) {
+            return Ok(());
+        }
+        let shown = uri.as_deref().unwrap_or("an unreadable URL");
+        tracing::warn!("The export page tried to load {shown}; refused before it was sent");
+        forbid(&environment, &args).inspect_err(|e| {
+            tracing::error!("Could not refuse the export page's request for {shown}: {e}");
+        })
+    }));
+    let mut token = 0_i64;
+    // SAFETY: as above; WebView2 keeps its own reference to the handler for
+    // the life of the view, and `token` is a valid out-parameter.
+    unsafe { view.add_WebResourceRequested(&handler, &mut token) }
+}
+
+/// The request's URI, as WebView2 reports it.
+fn request_uri(args: &ICoreWebView2WebResourceRequestedEventArgs) -> windows::core::Result<String> {
+    let mut uri = PWSTR::null();
+    // SAFETY: the event's arguments, on the UI thread during the event; `Uri`
+    // fills a `CoTaskMemAlloc`ed string that `take_pwstr` copies and frees.
+    unsafe { args.Request()?.Uri(&mut uri)? };
+    Ok(take_pwstr(uri))
+}
+
+/// Sets an empty `403 Forbidden` as the request's response, which WebView2
+/// then serves instead of sending the request.
+fn forbid(
+    environment: &ICoreWebView2Environment,
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+) -> windows::core::Result<()> {
+    // SAFETY: the environment that created the view and the event's
+    // arguments, on the UI thread during the event; the strings outlive the
+    // calls, and no body stream is passed.
+    unsafe {
+        let response = environment.CreateWebResourceResponse(
+            None,
+            403,
+            &HSTRING::from("Forbidden"),
+            &HSTRING::new(),
+        )?;
+        args.SetResponse(&response)
+    }
 }
 
 /// Nothing: the light scheme is not forced (see the module comment).

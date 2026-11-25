@@ -660,25 +660,109 @@ fn verify_pdf_reports_the_size() {
 
 // ---- navigation ------------------------------------------------------------
 
+fn export_origins(page: &str) -> ExportOrigins {
+    ExportOrigins::new(page, NavigationAllowlist::default()).expect("a usable export URL")
+}
+
 #[test]
-fn the_export_view_never_hands_off_to_another_application() {
+fn the_export_view_stays_on_its_own_origin() {
+    let origins = export_origins("http://127.0.0.1:5555/note/");
     for allowed in [
         "http://127.0.0.1:5555/note/",
-        "https://www.youtube.com/embed/x",
+        "http://127.0.0.1:5555/other/page/?x=1#y",
+        "HTTP://127.0.0.1:5555/redirected/",
+        "blob:http://127.0.0.1:5555/0c1d-uuid",
         "about:blank",
-        "data:text/html,x",
-        "blob:http://127.0.0.1/x",
+        "about:srcdoc",
     ] {
-        assert!(export_navigation_allowed(allowed), "{allowed}");
+        assert!(origins.allows(allowed), "{allowed}");
     }
     for refused in [
+        // A data: document escapes the host's CSP and could load
+        // `<img src=https://evil/?secret>` from its own (opaque) origin.
+        "data:text/html,x",
+        "data:text/html,<img src=https://evil.example/?k>",
+        // Another origin, or the same host on another port or scheme.
+        "https://evil.example/?secret",
+        "https://www.youtube.com/embed/x",
+        "http://127.0.0.1:5556/note/",
+        "http://127.0.0.1/note/",
+        "https://127.0.0.1:5555/note/",
+        "http://localhost:5555/note/",
+        "ws://127.0.0.1:5555/",
+        // Userinfo that looks like the page's host.
+        "http://127.0.0.1:5555@evil.example/",
+        "http://127.0.0.1:5555:x@evil.example/",
+        // A blob another origin made.
+        "blob:https://evil.example/0c1d",
+        "blob:null/0c1d",
+        // Other about: pages, and hand-offs to other applications.
+        "about:config",
         "mailto:a@example.com",
         "file:///etc/passwd",
         "zoommtg://x",
         "javascript:alert(1)",
         "",
+        "not a url",
     ] {
-        assert!(!export_navigation_allowed(refused), "{refused}");
+        assert!(!origins.allows(refused), "{refused}");
+    }
+}
+
+#[test]
+fn the_export_origin_normalizes_default_ports_and_case() {
+    let origins = export_origins("HTTP://LocalHost/note/");
+    assert!(origins.allows("http://localhost:80/x/"));
+    assert!(origins.allows("http://LOCALHOST/x/"));
+    assert!(!origins.allows("http://localhost:8080/x/"));
+    let origins = export_origins("https://notes.example:443/a/");
+    assert!(origins.allows("https://notes.example/b/"));
+    assert!(!origins.allows("http://notes.example/b/"));
+}
+
+#[test]
+fn an_allowlisted_origin_is_allowed_and_nothing_else_is() {
+    let allowlist = NavigationAllowlist::new()
+        .allow_origin("https://www.youtube.com/embed/ignored-path")
+        .unwrap()
+        .allow_origin("http://assets.example:8080")
+        .unwrap();
+    assert_eq!(
+        allowlist.origins().collect::<Vec<_>>(),
+        ["https://www.youtube.com", "http://assets.example:8080"]
+    );
+    let origins = ExportOrigins::new("http://127.0.0.1:5555/note/", allowlist).unwrap();
+    assert!(origins.allows("https://www.youtube.com/embed/x"));
+    assert!(origins.allows("http://assets.example:8080/a.png"));
+    assert!(origins.allows("http://127.0.0.1:5555/note/"));
+    assert!(!origins.allows("http://www.youtube.com/embed/x"));
+    assert!(!origins.allows("https://youtube.com/embed/x"));
+    assert!(!origins.allows("http://assets.example/a.png"));
+    assert!(!origins.allows("https://evil.example/"));
+}
+
+#[test]
+fn only_http_origins_can_be_allowed_or_exported() {
+    for bad in [
+        "",
+        "not a url",
+        "file:///tmp/x.html",
+        "data:text/html,x",
+        "about:blank",
+        "javascript:alert(1)",
+        "mbr://localhost/",
+    ] {
+        match NavigationAllowlist::new().allow_origin(bad) {
+            Err(e @ PdfError::ExportUrl { .. }) => assert!(e.is_refusal()),
+            other => panic!("{bad}: {other:?}"),
+        }
+        assert!(
+            matches!(
+                ExportOrigins::new(bad, NavigationAllowlist::default()),
+                Err(PdfError::ExportUrl { .. })
+            ),
+            "{bad}"
+        );
     }
 }
 

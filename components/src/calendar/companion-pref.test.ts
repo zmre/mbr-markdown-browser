@@ -8,6 +8,7 @@ import {
 } from './companion-pref.ts'
 
 declare const __MBR_HEAD_TEMPLATE__: string
+declare const __MBR_BOOTSTRAP_JS__: string
 
 const REPO_A = 'aaaa1111'
 const REPO_B = 'bbbb2222'
@@ -18,35 +19,41 @@ afterEach(() => {
   delete (window as { __MBR_CONFIG__?: unknown }).__MBR_CONFIG__
 })
 
-/** The `_head.html` pre-paint script, as shipped. */
-function prePaintScript(): string {
-  // Sliced by position rather than matched with a regex: this reads one
-  // known template, it is not HTML filtering.
-  const html = __MBR_HEAD_TEMPLATE__
-  const at = html.indexOf('mbr_calendar_companion_hidden')
-  expect(at).toBeGreaterThan(-1)
-  const open = '<script>'
-  const start = html.lastIndexOf(open, at)
-  const end = html.indexOf('</script>', at)
-  expect(start).toBeGreaterThan(-1)
-  expect(end).toBeGreaterThan(at)
-  const body = html.slice(start + open.length, end)
-  expect(body).not.toContain('<')
-  return body
+/**
+ * Runs `mbr-bootstrap.js`, as shipped, as the `<script>` `_head.html` writes:
+ * with `data-mbr-companion-prepaint` exactly when the page has the column.
+ */
+function runBootstrap(prePaint: boolean): void {
+  const script = document.createElement('script')
+  if (prePaint) script.setAttribute('data-mbr-companion-prepaint', '')
+  Object.defineProperty(document, 'currentScript', { configurable: true, get: () => script })
+  try {
+    new Function(__MBR_BOOTSTRAP_JS__)()
+  } finally {
+    delete (document as { currentScript?: unknown }).currentScript
+  }
 }
 
-/** Runs the pre-paint script on a fresh page served for `repoId`. */
+/** Runs the pre-paint check on a fresh page served for `repoId`. */
 function runPrePaint(repoId: string): boolean {
   document.documentElement.classList.remove(COMPANION_HIDDEN_CLASS)
   ;(window as { __MBR_CONFIG__?: unknown }).__MBR_CONFIG__ = { repoId }
-  new Function(prePaintScript())()
+  runBootstrap(true)
   return isCompanionHidden()
 }
 
 describe('the companion dismissal preference', () => {
   it('reads storage before paint only on a page with the docked column', () => {
-    // `calendar_companion` is the server's flag behind body.mbr-has-companion.
-    expect(__MBR_HEAD_TEMPLATE__).toMatch(/\{% if calendar_companion %\}<script>[^<]*mbr_calendar_companion_hidden/)
+    // `calendar_companion` is the server's flag behind body.mbr-has-companion;
+    // the bootstrap is a synchronous script in the head, so it runs pre-paint.
+    expect(__MBR_HEAD_TEMPLATE__).toMatch(
+      /<script src="\{\{ asset_base \}\}mbr-bootstrap\.js"\{% if calendar_companion %\} data-mbr-companion-prepaint\{% endif %\}><\/script>/
+    )
+    setCompanionHidden(true, REPO_A)
+    document.documentElement.classList.remove(COMPANION_HIDDEN_CLASS)
+    ;(window as { __MBR_CONFIG__?: unknown }).__MBR_CONFIG__ = { repoId: REPO_A }
+    runBootstrap(false)
+    expect(isCompanionHidden()).toBe(false)
   })
 
   it('sets the class and remembers it, and clears both', () => {
@@ -70,12 +77,9 @@ describe('the companion dismissal preference', () => {
     expect(runPrePaint(REPO_B)).toBe(false)
   })
 
-  it('is read before paint by _head.html, under the same key and class', () => {
-    const script = prePaintScript()
-    expect(script).toContain(`"${COMPANION_HIDDEN_KEY}"`)
-    expect(script).toContain(`classList.add("${COMPANION_HIDDEN_CLASS}")`)
-    // A top-level `var` would leak a global into every page.
-    expect(script).not.toMatch(/\bvar\b|\blet\b|\bconst\b/)
+  it('is read before paint by the bootstrap, under the same key and class', () => {
+    expect(__MBR_BOOTSTRAP_JS__).toContain(`"${COMPANION_HIDDEN_KEY}"`)
+    expect(__MBR_BOOTSTRAP_JS__).toContain(`classList.add("${COMPANION_HIDDEN_CLASS}")`)
 
     // And it computes the runtime key, scoped and unscoped alike.
     for (const repoId of [REPO_A, '']) {
@@ -89,7 +93,7 @@ describe('the companion dismissal preference', () => {
 
   it('survives a page without __MBR_CONFIG__ (bare key)', () => {
     localStorage.setItem(COMPANION_HIDDEN_KEY, '1')
-    new Function(prePaintScript())()
+    runBootstrap(true)
     expect(isCompanionHidden()).toBe(true)
   })
 })

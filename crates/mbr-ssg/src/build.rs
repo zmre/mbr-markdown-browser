@@ -1179,6 +1179,7 @@ impl Builder {
             mark_incomplete,
             &self.config.incomplete_markers,
             Some(self.repo.wikilink_index.clone()),
+            self.config.raw_html,
         )
         .map_err(|e| BuildError::RenderFailed {
             path: path.to_path_buf(),

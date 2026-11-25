@@ -11,6 +11,7 @@
 //!
 //! Built on `mbr-core`; nothing here is reachable from the core.
 
+mod csp;
 pub mod errors;
 pub mod file_write;
 pub mod link_grep;

@@ -532,6 +532,7 @@ impl LinkChecker {
                 incomplete_markers: &[],
                 wikilink_index: Some(Arc::clone(&wikilink_index)),
                 math_fences: true,
+                raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
             },
         ) {
             Ok(rendered) => rendered,

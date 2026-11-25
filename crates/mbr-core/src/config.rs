@@ -207,6 +207,11 @@ fn default_upload_max_bytes() -> usize {
     DEFAULT_UPLOAD_MAX_BYTES
 }
 
+/// Serde default for [`Config::template_output_max_bytes`].
+fn default_template_output_max_bytes() -> usize {
+    crate::template_guard::DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES
+}
+
 /// Configuration for a tag source - a frontmatter field that contains tags.
 ///
 /// # Examples
@@ -857,6 +862,25 @@ pub struct Config {
     /// splits on `__`). See [`crate::pdf_config`].
     #[serde(default)]
     pub pdf: PdfConfig,
+    /// What a render does with HTML written in a note: `passthrough` (the
+    /// default: verbatim), `sanitize` (allowed formatting kept, scripts,
+    /// handlers and script URLs removed) or `escape` (shown as text). See
+    /// [`crate::raw_html`]. Environment: `MBR_RAW_HTML=sanitize`.
+    ///
+    /// A repository may set it here, since a stricter setting only protects
+    /// its readers. An app embedding the server decides last (it sets
+    /// `ServerConfig::raw_html` after reading this) and can keep a
+    /// repository from lowering its own choice with
+    /// [`crate::raw_html::RawHtmlPolicy::strictest`].
+    #[serde(default)]
+    pub raw_html: crate::raw_html::RawHtmlPolicy,
+    /// `Content-Security-Policy` header per route class: the
+    /// `[content_security_policy]` table (`pages`, `user_files`,
+    /// `mbr_assets`), server and GUI only. Nothing is sent by default. See
+    /// [`crate::csp`]. Environment:
+    /// `MBR_CONTENT_SECURITY_POLICY__PAGES="sandbox allow-same-origin"`.
+    #[serde(default)]
+    pub content_security_policy: crate::csp::ContentSecurityPolicy,
     /// Glob patterns whose matching files are left out of the **task index**.
     ///
     /// Each pattern is matched against a markdown file's repository-relative
@@ -905,6 +929,22 @@ pub struct Config {
     /// rejected with `413 Payload Too Large`. Default: 25 MiB (26214400 bytes).
     #[serde(default = "default_upload_max_bytes")]
     pub upload_max_bytes: usize,
+    /// The most bytes one page rendered through a template may have. A
+    /// template writing more (a runaway loop in a `.mbr/` override or a
+    /// note's page template) stops there with an error instead of building
+    /// the whole page in memory. Default: 16 MiB (16777216 bytes). Applies
+    /// to the server, GUI, `mbr -o`, `--pdf` and QuickLook; static builds
+    /// use the default. See [`crate::template_guard`].
+    ///
+    /// **Operator-only**, like [`Config::no_symlink_mounts`]: the cap
+    /// protects the operator from the repository's templates, so the
+    /// repository's `.mbr/config.toml` must not be able to raise it.
+    /// `serde(skip)` keeps both the file and figment's `MBR_*` layer from
+    /// setting it; [`Config::read`] reads [`TEMPLATE_OUTPUT_MAX_BYTES_ENV`]
+    /// itself ([`template_output_max_bytes_from_env`]), and an embedder sets
+    /// the field (or `ServerConfig::template_output_max_bytes`) directly.
+    #[serde(skip, default = "default_template_output_max_bytes")]
+    pub template_output_max_bytes: usize,
 }
 
 impl std::fmt::Display for IpArray {
@@ -1008,11 +1048,14 @@ impl Default for Config {
             slides: SlideSettings::default(),
             calendar: CalendarConfig::default(),
             pdf: PdfConfig::default(),
+            raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
+            content_security_policy: crate::csp::ContentSecurityPolicy::default(),
             tasks_ignore_globs: Vec::new(), // Opt-in: index every file's tasks by default
             edit_enabled: false,
             edit_token_hash: None,
             edit_require_token_on_loopback: false,
             upload_max_bytes: DEFAULT_UPLOAD_MAX_BYTES,
+            template_output_max_bytes: default_template_output_max_bytes(),
         }
     }
 }
@@ -1084,6 +1127,34 @@ fn contains_home_dir(path: &Path) -> bool {
 
 /// The environment variable that disables symlink mounts.
 pub const NO_SYMLINK_MOUNTS_ENV: &str = "MBR_NO_SYMLINK_MOUNTS";
+
+/// The environment variable that sets [`Config::template_output_max_bytes`],
+/// the only way besides an embedder's own code (see the field docs).
+pub const TEMPLATE_OUTPUT_MAX_BYTES_ENV: &str = "MBR_TEMPLATE_OUTPUT_MAX_BYTES";
+
+/// [`TEMPLATE_OUTPUT_MAX_BYTES_ENV`]: `None` when unset, else its value.
+///
+/// # Errors
+///
+/// A value that is not a whole number of bytes (fail closed: a cap must not
+/// silently fall back on a spelling it does not understand). `0` parses and
+/// is refused by [`Config::validate`].
+pub fn template_output_max_bytes_from_env() -> Result<Option<usize>, ConfigError> {
+    std::env::var_os(TEMPLATE_OUTPUT_MAX_BYTES_ENV)
+        .map(|value| parse_byte_count(&value))
+        .transpose()
+}
+
+/// The parsing rule of [`template_output_max_bytes_from_env`], testable
+/// without the process environment.
+fn parse_byte_count(value: &std::ffi::OsStr) -> Result<usize, ConfigError> {
+    let text = value.to_string_lossy();
+    text.trim()
+        .parse::<usize>()
+        .map_err(|_| ConfigError::InvalidTemplateOutputMaxBytesEnv {
+            value: text.into_owned(),
+        })
+}
 
 /// Set once by the binary when it was started with `--no-symlink-mounts`
 /// ([`disable_symlink_mounts_for_process`]).
@@ -1336,6 +1407,10 @@ impl Config {
         // here, never from the repository's config file (see the field docs).
         config.no_symlink_mounts =
             no_symlink_mounts_from_env() || NO_SYMLINK_MOUNTS_FOR_PROCESS.load(Ordering::Relaxed);
+        // Operator-only too: never from the repository's config file.
+        if let Some(bytes) = template_output_max_bytes_from_env()? {
+            config.template_output_max_bytes = bytes;
+        }
         // After `root_dir` is assigned: before it, the value is
         // `Config::default()`'s (the process's working directory), which made
         // the log name the wrong repository.
@@ -1424,6 +1499,7 @@ impl Config {
     /// - `graph_depth`: Must be between 1 and 5
     /// - `flashcards_concentric_threshold`: Must be in (0, 1]
     /// - `build_concurrency`: If set, must be > 0
+    /// - `template_output_max_bytes`: Must be > 0
     /// - `static_folder`: Must stay inside `root_dir`, or land under a directory
     ///   at most [`MAX_STATIC_FOLDER_ASCENT`] levels above it (see
     ///   [`Config::validate_static_folder`])
@@ -1467,6 +1543,11 @@ impl Config {
         // build_concurrency of 0 would mean no parallelism (None means auto-detect)
         if matches!(self.build_concurrency, Some(0)) {
             return Err(ConfigError::InvalidBuildConcurrency { value: 0 });
+        }
+
+        // 0 would refuse every page, the error page included.
+        if self.template_output_max_bytes == 0 {
+            return Err(ConfigError::InvalidTemplateOutputMaxBytes { value: 0 });
         }
 
         // Task-ignore patterns are compiled once, at `TaskIndex` construction,
@@ -2373,6 +2454,67 @@ mod tests {
             ),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_template_output_max_bytes_defaults_reads_and_validates() {
+        let _guard = env_lock();
+        assert_eq!(
+            Config::default().template_output_max_bytes,
+            crate::template_guard::DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES
+        );
+
+        // The repository's config file can neither raise nor lower the cap,
+        // and the key does not break parsing (unknown keys are ignored).
+        for toml in [
+            "template_output_max_bytes = 999999999999\n",
+            "template_output_max_bytes = 0\n",
+            "template_output_max_bytes = \"lots\"\n",
+        ] {
+            let repo = repo_with_mbr_dir(Some(toml));
+            for read in [Config::read, Config::read_at_root, Config::read_for_gui] {
+                assert_eq!(
+                    read(repo.path()).unwrap().template_output_max_bytes,
+                    crate::template_guard::DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
+                    "{toml}"
+                );
+            }
+        }
+
+        // The operator's environment sets it, beating the file, on every path.
+        let repo = repo_with_mbr_dir(Some("template_output_max_bytes = 4096\n"));
+        {
+            let _env = EnvVars::set(&[(TEMPLATE_OUTPUT_MAX_BYTES_ENV, " 8192 ")]);
+            for read in [Config::read, Config::read_at_root, Config::read_for_gui] {
+                assert_eq!(read(repo.path()).unwrap().template_output_max_bytes, 8192);
+            }
+        }
+
+        // Fail closed: 0 and an unparsable value refuse to load.
+        {
+            let _env = EnvVars::set(&[(TEMPLATE_OUTPUT_MAX_BYTES_ENV, "0")]);
+            let err = Config::read(repo.path()).expect_err("0 must abort loading");
+            assert!(
+                matches!(
+                    err,
+                    crate::MbrError::Config(ConfigError::InvalidTemplateOutputMaxBytes {
+                        value: 0
+                    })
+                ),
+                "got: {err:?}"
+            );
+        }
+        for bad in ["16MB", "-1", "", "1e6"] {
+            let _env = EnvVars::set(&[(TEMPLATE_OUTPUT_MAX_BYTES_ENV, bad)]);
+            let err = Config::read(repo.path()).expect_err(bad);
+            assert!(
+                matches!(
+                    err,
+                    crate::MbrError::Config(ConfigError::InvalidTemplateOutputMaxBytesEnv { .. })
+                ),
+                "{bad}: {err:?}"
+            );
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tao::window::{Window, WindowBuilder};
 use wry::{WebView, WebViewBuilder, WebViewExtMacOS};
 
-use super::{PdfOptions, PrintDone};
+use super::{ExportOrigins, PdfOptions, PrintDone};
 use crate::errors::PdfError;
 use crate::pdf_config::{Orientation, Paper};
 
@@ -54,7 +54,13 @@ pub fn export_window(builder: WindowBuilder) -> WindowBuilder {
     builder
 }
 
-pub fn build_webview(builder: WebViewBuilder<'_>, window: &Window) -> Result<WebView, PdfError> {
+/// Nothing beyond wry's navigation handler is needed: WebKit asks it before
+/// any request is made, for frames too.
+pub fn build_webview(
+    builder: WebViewBuilder<'_>,
+    window: &Window,
+    _origins: &ExportOrigins,
+) -> Result<WebView, PdfError> {
     builder.build(window).map_err(PdfError::WebView)
 }
 

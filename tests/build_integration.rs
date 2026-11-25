@@ -182,11 +182,11 @@ async fn test_build_sets_static_mode() {
 
     // Should have serverMode: false
     assert!(
-        html.contains("serverMode: false"),
+        html.contains("\"serverMode\": false"),
         "Expected serverMode: false in output"
     );
     assert!(
-        !html.contains("serverMode: true"),
+        !html.contains("\"serverMode\": true"),
         "Should not have serverMode: true"
     );
 }
@@ -209,7 +209,7 @@ async fn test_build_omits_find_bar() {
         "Static builds must not ship the GUI-only find bar"
     );
     assert!(
-        html.contains("guiMode: false"),
+        html.contains("\"guiMode\": false"),
         "Expected guiMode: false in output"
     );
 }
@@ -247,7 +247,7 @@ async fn test_build_head_includes_graph_depth() {
 
     // The default graph_depth flows into the __MBR_CONFIG__ head script.
     assert!(
-        html.contains("graphDepth: 2"),
+        html.contains("\"graphDepth\": 2"),
         "Expected graphDepth: 2 in built HTML"
     );
 }
@@ -262,8 +262,8 @@ async fn test_build_head_includes_flashcard_options() {
     let output = build_site(&repo).await;
 
     let html = fs::read_to_string(output.join("deck").join("index.html")).unwrap();
-    assert!(html.contains("flashcardsConcentricThreshold: 0.7,"));
-    assert!(html.contains("flashcardsProgressIndicators: true,"));
+    assert!(html.contains("\"flashcardsConcentricThreshold\": 0.7,"));
+    assert!(html.contains("\"flashcardsProgressIndicators\": true,"));
 }
 
 /// Deck backgrounds in a static build are relative to the page, so a
@@ -301,11 +301,11 @@ async fn test_build_head_resolves_slide_backgrounds_relative_to_the_page() {
     .unwrap();
     // `/talks/2026/deck/` is three levels deep.
     assert!(
-        html.contains(r#"slides: {"background_image":"../../../images/default.jpg"},"#),
+        html.contains(r#""slides": {"background_image":"../../../images/default.jpg"},"#),
         "config background not relativized"
     );
     assert!(
-        html.contains(r#"slidesPage: {"background_image":"../img/bg.png"},"#),
+        html.contains(r#""slidesPage": {"background_image":"../img/bg.png"},"#),
         "note background not resolved against the note"
     );
 }
@@ -329,7 +329,7 @@ async fn test_build_head_disables_tasks() {
     ] {
         let html = fs::read_to_string(&page).unwrap();
         assert!(
-            html.contains("tasksEnabled: false"),
+            html.contains("\"tasksEnabled\": false"),
             "Expected tasksEnabled: false in {}",
             page.display()
         );
@@ -796,7 +796,7 @@ async fn test_build_404_html_anchors_assets_at_the_site_root() {
         "404.html should load the components from /.mbr/"
     );
     assert!(
-        html.contains(r#"basePath: "/","#),
+        html.contains(r#""basePath": "/","#),
         "404.html's basePath should be the site root"
     );
     assert!(
@@ -810,7 +810,7 @@ async fn test_build_404_html_anchors_assets_at_the_site_root() {
         "404.html's Home link should be the site root"
     );
     assert!(
-        html.contains("serverMode: false"),
+        html.contains("\"serverMode\": false"),
         "404.html should have serverMode: false for static builds"
     );
 }
@@ -826,7 +826,7 @@ async fn test_build_404_html_honours_base_url() {
 
     assert!(html.contains(r#"href="/my-repo/.mbr/theme.css""#));
     assert!(html.contains(r#"src="/my-repo/.mbr/components/mbr-components.min.js""#));
-    assert!(html.contains(r#"basePath: "/my-repo/","#));
+    assert!(html.contains(r#""basePath": "/my-repo/","#));
     assert!(html.contains(r#"<a href="/my-repo/" role="button" class="outline">Home</a>"#));
     assert!(
         !html.contains(r#""/.mbr/"#),
@@ -1757,7 +1757,8 @@ async fn test_build_media_viewer_pages_use_relative_paths() {
 
     // Should have serverMode: false for static build
     assert!(
-        videos_html.contains("serverMode: false") || videos_html.contains("serverMode:false"),
+        videos_html.contains("\"serverMode\": false")
+            || videos_html.contains("\"serverMode\":false"),
         "Media viewer page should have serverMode: false for static builds"
     );
 }
@@ -1992,19 +1993,19 @@ async fn test_build_injects_readability_scores() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     assert!(
-        html.contains("fleschReadingEase:"),
+        html.contains("\"fleschReadingEase\":"),
         "Static build should include fleschReadingEase in extendedMeta"
     );
     assert!(
-        html.contains("fleschKincaidGrade:"),
+        html.contains("\"fleschKincaidGrade\":"),
         "Static build should include fleschKincaidGrade in extendedMeta"
     );
     assert!(
-        !html.contains("fleschReadingEase: null"),
+        !html.contains("\"fleschReadingEase\": null"),
         "FRE should be a number for a document with prose"
     );
     assert!(
-        !html.contains("fleschKincaidGrade: null"),
+        !html.contains("\"fleschKincaidGrade\": null"),
         "FKGL should be a number for a document with prose"
     );
 }
@@ -2023,11 +2024,11 @@ async fn test_build_readability_scores_null_for_code_only() {
     let html = fs::read_to_string(&html_path).unwrap();
 
     assert!(
-        html.contains("fleschReadingEase: null"),
+        html.contains("\"fleschReadingEase\": null"),
         "FRE should render as null for a code-only document"
     );
     assert!(
-        html.contains("fleschKincaidGrade: null"),
+        html.contains("\"fleschKincaidGrade\": null"),
         "FKGL should render as null for a code-only document"
     );
 }
@@ -3648,7 +3649,7 @@ async fn build_emits_no_data_mbr_line() {
             page.display()
         );
         assert!(
-            html.contains("reviewEnabled: false"),
+            html.contains("\"reviewEnabled\": false"),
             "{} must report the feature off",
             page.display()
         );
@@ -3966,7 +3967,7 @@ async fn test_build_periodic_note_has_relative_calendar_nav() {
         "next skips the gap: {html}"
     );
     assert!(html.contains(r#"href="../../weekly/2026-W44/""#), "{html}");
-    assert!(html.contains(r#"calendar: {"enabled":true"#), "{html}");
+    assert!(html.contains(r#""calendar": {"enabled":true"#), "{html}");
 
     // The day note reserves the companion column; the week note does not.
     assert!(
@@ -4206,4 +4207,61 @@ async fn test_build_publishes_frontmatter_links() {
         page.contains(r#"<a id="m" href="../../../customers/msa.pdf">pdf</a>"#),
         "{page}"
     );
+}
+
+/// Built pages run under a strict `script-src`: no inline script, handler
+/// attribute or `javascript:` URL, and the bootstrap that defines the page
+/// globals is copied and loaded by a URL that reaches it from any depth.
+#[tokio::test]
+async fn test_built_pages_need_no_unsafe_inline() {
+    let repo = TestRepo::new();
+    repo.create_markdown("readme.md", "# Hello\n\n- [ ] task\n");
+    repo.create_markdown("docs/deep/page.md", "---\ntitle: Deep\n---\n\n# Deep\n");
+
+    let output = build_site(&repo).await;
+    assert!(output.join(".mbr/mbr-bootstrap.js").is_file());
+
+    for (page, bootstrap) in [
+        ("readme/index.html", "../.mbr/mbr-bootstrap.js"),
+        (
+            "docs/deep/page/index.html",
+            "../../../.mbr/mbr-bootstrap.js",
+        ),
+        ("docs/index.html", "../.mbr/mbr-bootstrap.js"),
+        ("index.html", ".mbr/mbr-bootstrap.js"),
+        ("404.html", "/.mbr/mbr-bootstrap.js"),
+    ] {
+        let html = read_page(&output.join(page));
+        let violations =
+            mbr::csp::strict_script_violations(&html, mbr::csp::TEMPLATE_INLINE_SCRIPT_HASHES);
+        assert!(violations.is_empty(), "{page}: {violations:#?}");
+        assert!(
+            html.contains(&format!(r#"<script src="{bootstrap}""#)),
+            "{page}: no bootstrap at {bootstrap}"
+        );
+    }
+}
+
+/// `raw_html` from the configuration applies to static builds too.
+#[tokio::test]
+async fn test_build_honours_raw_html_policy() {
+    let repo = TestRepo::new();
+    repo.create_markdown(
+        "note.md",
+        "# Note\n\n<script>alert('x')</script>\n\n<kbd>Ctrl</kbd>\n",
+    );
+    let config = mbr::Config {
+        root_dir: repo.path().to_path_buf(),
+        raw_html: mbr::raw_html::RawHtmlPolicy::Sanitize,
+        ..Default::default()
+    };
+    let output_dir = repo.path().join("build");
+    mbr::build::Builder::new(config, output_dir.clone())
+        .expect("builder")
+        .build()
+        .await
+        .expect("build");
+    let html = read_page(&output_dir.join("note/index.html"));
+    assert!(!html.contains("alert('x')"), "{html}");
+    assert!(html.contains("<kbd>Ctrl</kbd>"), "{html}");
 }

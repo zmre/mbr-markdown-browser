@@ -123,6 +123,14 @@ pub const EXPORT_READY_JS: &[u8] =
 pub const QUICKLOOK_CALENDAR_JS: &[u8] =
     include_bytes!("../templates/components-js/mbr-quicklook-calendar.min.js");
 
+/// Defines the page globals (`window.__MBR_CONFIG__`, `window.frontmatter`, …)
+/// from the templates' `data-mbr-globals` JSON blocks, runs the docked
+/// companion's pre-paint check and wires error pages' Back button: the inline
+/// scripts the templates used to carry, as a `'self'` file so a strict
+/// Content-Security-Policy covers every page (see [`crate::csp`]). Hand-written
+/// ES5, served at [`crate::csp::BOOTSTRAP_SCRIPT`] and copied by static builds.
+pub const BOOTSTRAP_JS: &[u8] = include_bytes!("../templates/mbr-bootstrap.js");
+
 pub const MERMAID_JS: &[u8] = include_bytes!("../templates/mermaid.12.3.0.min.js");
 
 /// AsciiMath → TeX converter (asciimath2tex, Apache-2.0; its license is
@@ -152,6 +160,7 @@ pub const DEFAULT_FILES: &[(&str, &[u8], &str)] = &[
     ("/theme.css", THEME_CSS, CSS),
     ("/user.css", USER_CSS, CSS),
     ("/export.css", EXPORT_CSS, CSS),
+    (crate::csp::BOOTSTRAP_SCRIPT, BOOTSTRAP_JS, JS),
     ("/pico.min.css", embedded_pico::PICO_DEFAULT, CSS),
     ("/components/mbr-components.min.js", COMPONENTS_JS, JS),
     ("/components/mbr-editor.min.js", EDITOR_JS, JS),

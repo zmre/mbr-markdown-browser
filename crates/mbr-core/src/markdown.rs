@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-use yaml_rust2::{Yaml, YamlLoader};
+use yaml_rust2::Yaml;
 
 /// Markdown parser options.
 ///
@@ -76,10 +76,13 @@ fn strip_bom_in_place(input: &mut String) {
 /// yaml-rust2 returns `Ok(vec![])` for a metadata block whose body is only
 /// comments (`# tags: [draft]`), so indexing `[0]` on the result panics — and
 /// release builds abort (`panic = 'abort'`). Always go through this helper.
+///
+/// Loads through [`crate::yaml_load`], so a "billion laughs" alias bomb is
+/// refused (→ `None`, like malformed YAML) instead of expanded.
 fn load_first_yaml_doc(text: &str) -> Option<Yaml> {
-    YamlLoader::load_from_str(text)
+    crate::yaml_load::load_first_yaml_document(text)
         .ok()
-        .and_then(|docs| docs.into_iter().next())
+        .flatten()
 }
 
 /// A note's leading metadata block, parsed: see [`parse_frontmatter_block`].
@@ -189,6 +192,7 @@ pub fn parse<P: AsRef<Path>>(file: P) -> Result<ParsedDocument, MarkdownError> {
         TaskMarkup::Skip,
         &mut TextLines::disabled(),
         &mut BlockLines::disabled(),
+        crate::raw_html::RawHtmlPolicy::Passthrough,
     );
     let has_h1 = headings.first().is_some_and(|h| h.level == 1);
 
@@ -1259,15 +1263,19 @@ fn collect_events_and_headings<'a>(
     task_markup: TaskMarkup,
     text_lines: &mut TextLines,
     block_lines: &mut BlockLines,
+    raw_html: crate::raw_html::RawHtmlPolicy,
 ) -> (
     Vec<Event<'a>>,
     Vec<HeadingInfo>,
     HashMap<usize, ParsedAttrs>,
 ) {
-    let parser = TextMergeWithOffset::new(crate::frontmatter::parse_with_offsets(
-        markdown_input,
-        markdown_options(),
-    ));
+    let parser = crate::raw_html::RawHtmlFilter::new(
+        TextMergeWithOffset::new(crate::frontmatter::parse_with_offsets(
+            markdown_input,
+            markdown_options(),
+        )),
+        raw_html,
+    );
 
     let mut events = Vec::new();
     let mut headings = Vec::new();
@@ -1391,7 +1399,7 @@ fn collect_events_and_headings<'a>(
                 Event::Text(text) => chat.source.push_str(&text),
                 Event::End(TagEnd::CodeBlock) => {
                     if let Some(chat) = chat_block.take() {
-                        push_chat_block(&mut events, text_lines, block_lines, &chat);
+                        push_chat_block(&mut events, text_lines, block_lines, &chat, raw_html);
                     }
                 }
                 // A code block holds nothing but text; nothing else can arrive.
@@ -1676,6 +1684,7 @@ fn push_chat_block<'a>(
     text_lines: &mut TextLines,
     block_lines: &mut BlockLines,
     chat: &PendingChat,
+    raw_html: crate::raw_html::RawHtmlPolicy,
 ) {
     use crate::chat::{self, ChatItem};
 
@@ -1728,6 +1737,7 @@ fn push_chat_block<'a>(
                     block_lines,
                     &message.body,
                     line_at(message.body_offset),
+                    raw_html,
                 );
                 html(
                     events,
@@ -1749,7 +1759,14 @@ fn push_chat_block<'a>(
                     chat::MARKDOWN_OPEN_HTML
                 };
                 html(events, text_lines, block_lines, open.to_string());
-                push_chat_markdown(events, text_lines, block_lines, &text, line_at(offset));
+                push_chat_markdown(
+                    events,
+                    text_lines,
+                    block_lines,
+                    &text,
+                    line_at(offset),
+                    raw_html,
+                );
                 html(
                     events,
                     text_lines,
@@ -1781,6 +1798,7 @@ fn push_chat_markdown<'a>(
     block_lines: &mut BlockLines,
     text: &str,
     first_line: Option<u32>,
+    raw_html: crate::raw_html::RawHtmlPolicy,
 ) {
     let options = markdown_options()
         - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
@@ -1788,7 +1806,10 @@ fn push_chat_markdown<'a>(
         - Options::ENABLE_FOOTNOTES
         - Options::ENABLE_OLD_FOOTNOTES;
     let index = first_line.map(|_| LineIndex::build(text));
-    let parser = TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter());
+    let parser = crate::raw_html::RawHtmlFilter::new(
+        TextMergeWithOffset::new(MDParser::new_ext(text, options).into_offset_iter()),
+        raw_html,
+    );
     for (event, range) in parser {
         let wants_line =
             (text_lines.enabled && matches!(event, Event::Text(_))) || block_lines.wants(&event);
@@ -1940,6 +1961,10 @@ pub struct RenderOptions<'a> {
     /// KaTeX (server, GUI, static build, CLI); QuickLook turns it off so a
     /// preview, which has no KaTeX, keeps a highlighted code block.
     pub math_fences: bool,
+    /// What to do with HTML the author wrote in the note (`raw_html` in
+    /// config). Applied to the parser's events only, never to mbr's own
+    /// markup; see [`crate::raw_html`].
+    pub raw_html: crate::raw_html::RawHtmlPolicy,
 }
 
 /// Rewrites the URL-valued Reveal.js background attributes of every
@@ -2220,6 +2245,7 @@ fn first_pass<'a>(markdown_input: &'a str, opts: &RenderOptions<'_>) -> FirstPas
         TaskMarkup::Render,
         &mut text_lines,
         &mut block_lines,
+        opts.raw_html,
     );
     FirstPass {
         events,
@@ -2256,6 +2282,15 @@ fn finish_render(
 
     // Read before `opts` is taken apart by pass 2.
     let math_fences = opts.math_fences;
+    let raw_html = opts.raw_html;
+
+    // A gist embed is a `<script>` from gist.github.com: under a raw-HTML
+    // policy that keeps an author's scripts out, a bare gist URL must not
+    // bring one in. It stays a plain link.
+    let mut prefetched_oembed = prefetched_oembed;
+    if raw_html != crate::raw_html::RawHtmlPolicy::Passthrough {
+        prefetched_oembed.retain(|_, info| !info.embeds_script());
+    }
 
     // Pass 2: process events through our custom logic (link transforms, media embeds, etc.)
     let (processed_events, state) = process_all_events(
@@ -2274,6 +2309,9 @@ fn finish_render(
     // their Reveal.js background URLs get the same rewrite as an image source.
     let section_attrs =
         transform_section_background_urls(section_attrs, &state.link_transform_config);
+    // Author attributes on an element mbr writes: no event handlers or script
+    // URLs unless raw HTML passes through.
+    let section_attrs = crate::raw_html::filter_section_attrs(section_attrs, raw_html);
 
     // Pass 3 (optional): highlight TK/TODO/FIXME/XXX. Off by default in build
     // mode. It also re-keys `block_lines` onto its own output; skipping it
@@ -2414,6 +2452,7 @@ pub async fn render_with_cache(
         incomplete_markers,
         wikilink_index,
         math_fences: true,
+        raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
     };
     render_text_with_cache(&raw_markdown_input, &file, opts).await
 }
@@ -2452,6 +2491,7 @@ pub async fn render_from_vault_with_cache(
         incomplete_markers,
         wikilink_index,
         math_fences: true,
+        raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
     };
     render_text_with_cache(&raw_markdown_input, &file, opts).await
 }
@@ -3179,6 +3219,7 @@ pub fn render_sync(
             incomplete_markers,
             wikilink_index,
             math_fences: true,
+            raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
         },
     )
 }
@@ -3200,6 +3241,7 @@ pub fn render_sync_from_vault(
     mark_incomplete: bool,
     incomplete_markers: &[String],
     wikilink_index: Option<Arc<WikilinkIndex>>,
+    raw_html: crate::raw_html::RawHtmlPolicy,
 ) -> Result<MarkdownRenderResult, MarkdownError> {
     let raw_markdown_input = read_source(vault, &file)?;
     render_str(
@@ -3218,6 +3260,7 @@ pub fn render_sync_from_vault(
             incomplete_markers,
             wikilink_index,
             math_fences: true,
+            raw_html,
         },
     )
 }
@@ -3308,6 +3351,7 @@ pub fn extract_outbound_links_from_str(
         TaskMarkup::Skip,
         &mut TextLines::disabled(),
         &mut BlockLines::disabled(),
+        crate::raw_html::RawHtmlPolicy::Passthrough,
     );
 
     let prefetched_oembed = collect_local_embeds(&events_with_ids);
@@ -3728,19 +3772,20 @@ pub fn extract_metadata_from_bytes(path: &Path, buffer: &[u8]) -> FileMetadata {
         // notes that referenced this one by an alias that never made it into
         // the index. Log it, naming the file, then fall back to empty
         // metadata exactly as before so the scan continues.
-        let metadata_parsed =
-            match YamlLoader::load_from_str(&markdown_input[leading.content.clone()]) {
-                Ok(docs) => docs.into_iter().next(),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "Failed to parse YAML frontmatter: {e}; the whole \
-                         frontmatter block (including any `aliases` and \
-                         `relationships`) is ignored for this note"
-                    );
-                    None
-                }
-            };
+        let metadata_parsed = match crate::yaml_load::load_first_yaml_document(
+            &markdown_input[leading.content.clone()],
+        ) {
+            Ok(doc) => doc,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "Failed to parse YAML frontmatter: {e}; the whole \
+                     frontmatter block (including any `aliases` and \
+                     `relationships`) is ignored for this note"
+                );
+                None
+            }
+        };
 
         if let Some(ref yaml) = metadata_parsed {
             relationships = crate::relationships::parse_relationships(yaml);
@@ -4091,8 +4136,8 @@ fn process_event(
                 }
             }
             if state.in_metadata {
-                match YamlLoader::load_from_str(text) {
-                    Ok(docs) => state.metadata_parsed = docs.into_iter().next(),
+                match crate::yaml_load::load_first_yaml_document(text) {
+                    Ok(doc) => state.metadata_parsed = doc,
                     Err(e) => {
                         // Invalid YAML aborts the whole frontmatter block, so
                         // otherwise-valid fields (e.g. `style: slides`) are
@@ -4172,6 +4217,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use yaml_rust2::YamlLoader;
 
     /// A labeled `aliases:` map is published once, as the flat list — not
     /// also as the generic flattening's `aliases.<label>` keys, which the info
@@ -4225,6 +4271,7 @@ mod tests {
             incomplete_markers: &[],
             wikilink_index: None,
             math_fences: true,
+            raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
         }
     }
 
@@ -6361,6 +6408,154 @@ mod tests {
         assert_eq!(section_rule_source_attrs("--- &#123;a&#125;"), None);
     }
 
+    // ============ Raw HTML policy tests ============
+
+    /// `content` rendered in server mode under `policy`.
+    fn render_with_policy(content: &str, policy: crate::raw_html::RawHtmlPolicy) -> String {
+        let root = Path::new("/nonexistent-mbr-test-root");
+        render_str(
+            content,
+            &root.join("note.md"),
+            RenderOptions {
+                raw_html: policy,
+                ..plain_options(root, true)
+            },
+        )
+        .expect("render")
+        .html
+    }
+
+    /// A note exercising both author HTML and mbr's own markup: a section with
+    /// attributes, a task, a wikilink, a media embed, a chat bubble and a math
+    /// fence. None of mbr's markup may be touched by a raw-HTML policy.
+    const MIXED_NOTE: &str = "\
+# Title {onclick=alert(1) data-x=1}
+
+Text <script>alert('inline')</script> and <kbd>Ctrl</kbd> <img src=x onerror=alert(2)>.
+
+<div class=\"box\" onmouseover=\"alert(3)\">
+<script>alert('block')</script>
+<b>bold</b> <a href=\"javascript:alert(4)\">js</a>
+</div>
+
+--- {.intro onclick=alert(5) data-background-iframe=\"javascript:alert(6)\" data-transition=slide}
+
+- [ ] a task
+
+[[Some Note]]
+
+![clip](media/clip.mp4)
+
+```chat
+{{Ann|hi <script>alert(7)</script> <b>there</b>|}}
+```
+
+```math
+x < y
+```
+
+https://gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea
+";
+
+    #[test]
+    fn raw_html_passthrough_is_unchanged() {
+        use crate::raw_html::RawHtmlPolicy;
+        let html = render_with_policy(MIXED_NOTE, RawHtmlPolicy::Passthrough);
+        assert_eq!(html, render_str_with_mode(MIXED_NOTE, true).html);
+        assert!(html.contains("<script>alert('block')</script>"), "{html}");
+        assert!(html.contains("gist.github.com/rpinna/b97f8505940f255e8ebbd9a17c76f3ea.js"));
+    }
+
+    /// mbr's own markup on the page, whatever the policy.
+    fn assert_mbr_markup_intact(html: &str) {
+        assert!(html.contains("<section class=\"intro\""), "section: {html}");
+        assert!(
+            html.contains("data-transition=\"slide\""),
+            "section attr: {html}"
+        );
+        assert!(html.contains("mbr-task-check"), "task: {html}");
+        assert!(html.contains("<video"), "media embed: {html}");
+        assert!(html.contains("class=\"mbr-chat"), "chat: {html}");
+        assert!(html.contains("math math-display"), "math fence: {html}");
+        assert!(html.contains("x &lt; y"), "math source: {html}");
+        assert!(html.contains("data-x=\"1\""), "heading attr: {html}");
+    }
+
+    /// Nothing that runs script survives.
+    fn assert_no_script(html: &str) {
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("<script"), "script tag: {html}");
+        assert!(!lower.contains("javascript:"), "script URL: {html}");
+        for handler in ["onclick", "onerror", "onmouseover"] {
+            assert!(!lower.contains(&format!("{handler}=")), "{handler}: {html}");
+        }
+    }
+
+    #[test]
+    fn raw_html_sanitize_strips_scripts_and_keeps_mbr_markup() {
+        let html = render_with_policy(MIXED_NOTE, crate::raw_html::RawHtmlPolicy::Sanitize);
+        assert_no_script(&html);
+        assert_mbr_markup_intact(&html);
+        // The author's formatting survives, split across events or not.
+        assert!(html.contains("<kbd>Ctrl</kbd>"), "{html}");
+        assert!(html.contains("<div class=\"box\">"), "{html}");
+        assert!(html.contains("<b>bold</b>"), "{html}");
+        assert!(html.contains("<b>there</b>"), "chat bubble: {html}");
+        // Script content is dropped, not shown.
+        assert!(!html.contains("alert('block')"), "{html}");
+        // A bare gist URL is a plain link, not a third-party script.
+        assert!(!html.contains(".js\""), "{html}");
+    }
+
+    #[test]
+    fn raw_html_escape_shows_the_source_as_text() {
+        let html = render_with_policy(MIXED_NOTE, crate::raw_html::RawHtmlPolicy::Escape);
+        // The author's markup is text: no live tag, and no handler on the
+        // elements mbr writes (heading, section).
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("<img src=x"), "{html}");
+        let tags: Vec<&str> = html
+            .split('<')
+            .filter_map(|t| t.split('>').next())
+            .filter(|t| t.starts_with("h1") || t.starts_with("section"))
+            .collect();
+        assert!(
+            tags.iter()
+                .all(|t| !t.contains("onclick") && !t.contains("javascript:")),
+            "{tags:?}"
+        );
+        assert_mbr_markup_intact(&html);
+        assert!(html.contains("&lt;kbd&gt;Ctrl&lt;/kbd&gt;"), "{html}");
+        assert!(
+            html.contains("&lt;script&gt;alert('block')&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(!html.contains("<kbd>"), "{html}");
+        assert!(!html.contains("<div class=\"box\""), "{html}");
+    }
+
+    #[test]
+    fn raw_html_escape_hides_comments() {
+        let html = render_with_policy(
+            "a <!-- secret --> b\n\n<!-- block secret -->\n\nc\n",
+            crate::raw_html::RawHtmlPolicy::Escape,
+        );
+        assert!(!html.contains("secret"), "{html}");
+        assert!(html.contains("<p>c</p>"), "{html}");
+    }
+
+    #[test]
+    fn raw_html_sanitize_keeps_details_across_blocks() {
+        let html = render_with_policy(
+            "<details>\n<summary>More</summary>\n\nInside **markdown**\n\n</details>\n",
+            crate::raw_html::RawHtmlPolicy::Sanitize,
+        );
+        let open = html.find("<details>").expect("details open");
+        let inner = html.find("<strong>markdown</strong>").expect("markdown");
+        let close = html.find("</details>").expect("details close");
+        assert!(open < inner && inner < close, "{html}");
+    }
+
     // ============ Raw HTML URL tests ============
 
     /// The `href` a markdown link to `path` gets on a non-index page.
@@ -6610,6 +6805,7 @@ mod tests {
             TaskMarkup::Render,
             &mut TextLines::recording(),
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         let injected: Vec<&str> = events
             .iter()
@@ -7360,6 +7556,7 @@ mod tests {
             &root.join("note.md"),
             RenderOptions {
                 math_fences: false,
+                raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
                 ..plain_options(root, false)
             },
         )
@@ -7713,6 +7910,7 @@ mod tests {
             TaskMarkup::Render,
             &mut text_lines,
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         let expected = events.len();
         let config = LinkTransformConfig {
@@ -8148,6 +8346,62 @@ mod tests {
         assert!(html.contains(r#"<li data-mbr-line="10">"#), "{html}");
     }
 
+    /// A "billion laughs" frontmatter block: nine levels of nine aliases,
+    /// ~430 million nodes once expanded (an OOM kill before the bounded
+    /// loader). Under 500 bytes.
+    fn alias_bomb_note() -> String {
+        let mut text = String::from("---\ntitle: Bomb\nl0: &l0 [x, x, x, x, x, x, x, x, x]\n");
+        for level in 1..9 {
+            let items = vec![format!("*l{}", level - 1); 9].join(", ");
+            text.push_str(&format!("l{level}: &l{level} [{items}]\n"));
+        }
+        text.push_str("---\n# Still here\n\nBody text.\n");
+        text
+    }
+
+    #[test]
+    fn alias_bomb_frontmatter_is_refused_and_the_note_still_renders() {
+        let started = std::time::Instant::now();
+        let result = render_str_with_mode(&alias_bomb_note(), true);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let error = result.frontmatter_error.expect("refusal is reported");
+        assert!(error.starts_with("frontmatter refused"), "{error}");
+        // Ignored like malformed frontmatter: its `title: Bomb` is dropped
+        // (the H1 stands in), the body is intact.
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("Still here")));
+        assert!(result.html.contains("Body text."), "{}", result.html);
+        assert_eq!(
+            crate::page_errors::frontmatter_parse_errors(&Some(error.clone())).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn alias_bomb_frontmatter_is_refused_on_the_scan_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.md");
+        std::fs::write(&path, alias_bomb_note()).unwrap();
+        let (result, logs) =
+            crate::test_support::capture_tracing(|| extract_metadata_from_file(&path));
+        let meta = result.expect("extraction must still succeed");
+        // Frontmatter ignored; the H1 fallback still names the note.
+        assert_eq!(meta.metadata.get("title"), Some(&json!("Still here")));
+        assert!(logs.contains("frontmatter refused"), "{logs}");
+        assert!(logs.contains("bomb.md"), "{logs}");
+        assert!(parse_frontmatter_block(&alias_bomb_note()).yaml.is_none());
+    }
+
+    #[test]
+    fn frontmatter_with_a_few_anchors_still_parses() {
+        let result = render_str_with_mode(
+            "---\ntitle: T\nbase: &b {lang: en}\npost: *b\ntags: &t [a, b]\nalso: *t\n---\nx\n",
+            false,
+        );
+        assert_eq!(result.frontmatter_error, None);
+        assert_eq!(result.frontmatter.get("title"), Some(&json!("T")));
+        assert_eq!(result.frontmatter.get("tags"), Some(&json!(["a", "b"])));
+    }
+
     #[test]
     fn leading_frontmatter_errors_are_still_reported() {
         let result = render_str_with_mode("---\ntags:\n\t* a\n---\n# H\n", false);
@@ -8301,6 +8555,7 @@ mod tests {
             TaskMarkup::Skip,
             &mut TextLines::disabled(),
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         assert!(
             collect_bare_urls(&fenced).is_empty(),
@@ -8312,6 +8567,7 @@ mod tests {
             TaskMarkup::Skip,
             &mut TextLines::disabled(),
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         assert_eq!(
             collect_bare_urls(&prose).len(),
@@ -8527,6 +8783,7 @@ mod tests {
             TaskMarkup::Skip,
             &mut TextLines::disabled(),
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         let results = prefetch_oembed_urls(&events, 500, &None).await;
         assert_eq!(results.len(), 3);
@@ -8550,6 +8807,7 @@ mod tests {
             TaskMarkup::Render,
             &mut TextLines::recording(),
             &mut block_lines,
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         let recorded = block_lines
             .into_entries()
@@ -8788,6 +9046,7 @@ mod tests {
             TaskMarkup::Render,
             &mut TextLines::disabled(),
             &mut block_lines,
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         assert!(block_lines.into_entries().is_empty());
     }
@@ -9663,6 +9922,7 @@ mod tests {
             false,
             &[],
             None,
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         )
         .expect("render through the vault");
         let source = String::from_utf8(vault.contents("docs/page.md").unwrap()).unwrap();
@@ -9682,6 +9942,7 @@ mod tests {
                 incomplete_markers: &[],
                 wikilink_index: None,
                 math_fences: true,
+                raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
             },
         )
         .unwrap();
@@ -9889,6 +10150,7 @@ mod proptests {
             incomplete_markers: &markers,
             wikilink_index: None,
             math_fences: true,
+            raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
         };
         render_str(md, &root.join("note.md"), options).unwrap().html
     }
@@ -9959,6 +10221,7 @@ mod proptests {
                 incomplete_markers: &[],
                 wikilink_index: None,
                 math_fences: true,
+                raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
             };
             let file = root.join("note.md");
             let before = render_str(base, &file, options()).unwrap();
@@ -10022,6 +10285,7 @@ mod proptests {
                     incomplete_markers: &[],
                     wikilink_index: None,
                     math_fences: true,
+                    raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
                 },
             )
             .unwrap()
@@ -10088,6 +10352,7 @@ mod proptests {
             TaskMarkup::Render,
             &mut text_lines,
             &mut BlockLines::disabled(),
+            crate::raw_html::RawHtmlPolicy::Passthrough,
         );
         let marked = mark_incomplete_blocks(
             events.clone(),
@@ -10147,6 +10412,7 @@ mod proptests {
                 TaskMarkup::Render,
                 &mut text_lines,
                 &mut BlockLines::disabled(),
+                crate::raw_html::RawHtmlPolicy::Passthrough,
             );
             let marked = mark_incomplete_blocks(events, &rule, &text_lines, &mut BlockLines::disabled());
             let mut html = String::new();

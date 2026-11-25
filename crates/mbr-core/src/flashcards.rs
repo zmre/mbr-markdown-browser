@@ -1662,6 +1662,7 @@ mod tests {
             incomplete_markers: &[],
             wikilink_index: None,
             math_fences: true,
+            raw_html: crate::raw_html::RawHtmlPolicy::Passthrough,
         };
         render_str(source, std::path::Path::new("deck.md"), opts)
             .expect("renders")

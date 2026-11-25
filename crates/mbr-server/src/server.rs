@@ -17,6 +17,7 @@ use crate::file_write::{FileWriteLocks, create_unique_temp_file};
 use crate::link_grep::InboundLinkCache;
 use mbr_core::backlinks::{BacklinkIndexConfig as LinkIndexConfig, populate_inbound_index};
 use mbr_core::config::{RelationType, SortField, TagSource};
+use mbr_core::csp::ContentClass;
 use mbr_core::embedded_katex;
 use mbr_core::embedded_pico;
 use mbr_core::errors::{FlashcardPatchError, MbrError, TaskPatchError};
@@ -1531,6 +1532,12 @@ pub struct ServerConfig {
     pub edit_token_hash: Option<String>,
     /// Maximum size in bytes of a single asset uploaded via `/.mbr/upload`.
     pub upload_max_bytes: usize,
+    /// The most bytes one page rendered through a template may have
+    /// (`template_output_max_bytes`, see [`mbr_core::template_guard`]). An
+    /// app opening repositories it did not write may set this after
+    /// [`ServerConfig::from`], since a repository's `.mbr/config.toml` can
+    /// change the configured value.
+    pub template_output_max_bytes: usize,
     #[cfg(feature = "media-metadata")]
     pub transcode_enabled: bool,
     /// Storage (and optionally a saved index) supplied by an app that embeds
@@ -1557,6 +1564,20 @@ pub struct ServerConfig {
     /// [`Server::init`], which refuses a name or value that could leave its
     /// declaration ([`ServerError::HostHead`]). Empty by default.
     pub theme_vars: std::collections::BTreeMap<String, String>,
+    /// `Content-Security-Policy` header per route class (rendered pages,
+    /// repository files served as they are, mbr's `/.mbr/` UI). Empty by
+    /// default: no header. [`ServerConfig::from`] takes the repository's
+    /// `[content_security_policy]` table; an embedding app sets it after,
+    /// e.g. to [`mbr_core::csp::ContentSecurityPolicy::sandbox_user_content`].
+    /// A value that is not a valid header value fails [`Server::init`]
+    /// ([`ServerError::ContentSecurityPolicy`]).
+    pub content_security_policy: mbr_core::csp::ContentSecurityPolicy,
+    /// What a page render does with HTML written in a note (see
+    /// [`mbr_core::raw_html`]). [`ServerConfig::from`] takes `raw_html` from
+    /// the configuration; an embedding app that must not let a repository
+    /// lower its choice uses
+    /// [`mbr_core::raw_html::RawHtmlPolicy::strictest`].
+    pub raw_html: mbr_core::raw_html::RawHtmlPolicy,
 }
 
 /// The repository storage an embedding app hands the server.
@@ -1646,12 +1667,15 @@ impl From<&mbr_core::config::Config> for ServerConfig {
             edit_require_token_on_loopback: config.edit_require_token_on_loopback,
             edit_token_hash: config.edit_token_hash.clone(),
             upload_max_bytes: config.upload_max_bytes,
+            template_output_max_bytes: config.template_output_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled: config.transcode,
             embedded: None,
             config_problem: None,
             extra_head_html: None,
             theme_vars: std::collections::BTreeMap::new(),
+            content_security_policy: config.content_security_policy.clone(),
+            raw_html: config.raw_html,
         }
     }
 }
@@ -1957,6 +1981,8 @@ pub struct ServerState {
     pub upload_max_bytes: usize,
     /// See [`ServerConfig::config_problem`].
     pub config_problem: Option<String>,
+    /// See [`ServerConfig::raw_html`].
+    pub raw_html: mbr_core::raw_html::RawHtmlPolicy,
     /// Serializes read-patch-write cycles on one file across the in-place
     /// write endpoints (`/.mbr/edit`, `/.mbr/task`, `/.mbr/flashcard-review`).
     pub file_write_locks: Arc<FileWriteLocks>,
@@ -2549,15 +2575,19 @@ impl Server {
             edit_require_token_on_loopback,
             edit_token_hash,
             upload_max_bytes,
+            template_output_max_bytes,
             #[cfg(feature = "media-metadata")]
             transcode_enabled,
             embedded,
             config_problem,
             extra_head_html,
             theme_vars,
+            content_security_policy,
+            raw_html,
         } = config;
         let host_head =
             mbr_core::host_head::HostHead::new(extra_head_html.as_deref(), &theme_vars)?;
+        let csp_headers = crate::csp::CspHeaders::new(&content_security_policy)?;
 
         let oembed_cache = match previous {
             Some(previous) if previous.oembed_cache_size == oembed_cache_size => {
@@ -2611,7 +2641,8 @@ impl Server {
 
         let templates = templates::Templates::new(base_dir.as_path(), template_folder.as_deref())
             .map_err(ServerError::TemplateInit)?
-            .with_host_head(host_head);
+            .with_host_head(host_head)
+            .with_output_limit(template_output_max_bytes);
 
         let is_embedded = embedded.is_some();
         // A reload that leaves the scan inputs alone keeps the repository:
@@ -3063,6 +3094,7 @@ impl Server {
             edit_token_hash,
             upload_max_bytes,
             config_problem,
+            raw_html,
             changes: change_applier.clone(),
         };
 
@@ -3120,7 +3152,9 @@ impl Server {
                 get(Self::serve_outside_link),
             )
             .route("/.mbr/{*path}", get(Self::serve_mbr_assets))
-            .route("/{*path}", get(Self::handle))
+            .route("/{*path}", get(Self::handle));
+        // Innermost, so it sees the handler's class marker before any other layer.
+        let router = crate::csp::layer(router, csp_headers)
             .layer(CompressionLayer::new().compress_when(compression_predicate()))
             .layer(TraceLayer::new_for_http().on_failure(on_request_failure))
             .with_state(state);
@@ -5445,7 +5479,9 @@ impl Server {
             tracing::trace!("Checking template folder for: {}", relative_path);
 
             if let Some(file_path) = safe_join_asset(template_folder, &relative_path) {
-                return Self::serve_mbr_file(&config, &file_path).await;
+                return Self::serve_mbr_file(&config, &file_path)
+                    .await
+                    .map(|response| crate::csp::mark(response, ContentClass::UserFiles));
             }
         }
 
@@ -5454,7 +5490,9 @@ impl Server {
         tracing::trace!("Checking .mbr dir for: {}", asset_path);
 
         if let Some(file_path) = safe_join_asset(&mbr_dir, &asset_path) {
-            return Self::serve_mbr_file(&config, &file_path).await;
+            return Self::serve_mbr_file(&config, &file_path)
+                .await
+                .map(|response| crate::csp::mark(response, ContentClass::UserFiles));
         }
 
         // Handle /pico.min.css dynamically based on theme config
@@ -5784,7 +5822,7 @@ impl Server {
                 if let Some(response) =
                     Self::try_serve_pdf_cover_sidecar(&path, &file_path, &config).await
                 {
-                    return Ok(response);
+                    return Ok(crate::csp::mark(response, ContentClass::UserFiles));
                 }
                 tracing::debug!("serving static file: {:?}", &file_path);
                 let Some((vault, vault_path)) = config.repo.locate_shared(&file_path) else {
@@ -5801,10 +5839,12 @@ impl Server {
                 // `ServeFile` (Range, ETag, Last-Modified, content type) for a
                 // real file — every file on the desktop. Anything else streams
                 // through the vault, with the same Range handling.
+                // Served as it is: the user-files class, whatever its path.
                 match vault.local_path(&vault_path) {
                     Some(local) => Self::serve_static_file(local, req).await,
                     None => Self::serve_vault_file(vault, vault_path, req).await,
                 }
+                .map(|response| crate::csp::mark(response, ContentClass::UserFiles))
             }
             ResolvedPath::MarkdownFile(md_path) => {
                 // A markdown page has exactly one URL — the directory-style one
@@ -8128,6 +8168,7 @@ impl Server {
                 incomplete_markers: &config.incomplete_markers,
                 wikilink_index: Some(config.repo.wikilink_index.clone()),
                 math_fences: true,
+                raw_html: config.raw_html,
             },
         )
         .await

@@ -49,6 +49,7 @@ pub mod chat;
 pub mod config;
 pub mod constants;
 pub mod contact;
+pub mod csp;
 pub mod date_expr;
 pub mod edit_auth;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub mod path_resolver;
 pub mod pdf_config;
 #[cfg(feature = "media-metadata")]
 pub mod pdf_metadata;
+pub mod raw_html;
 pub mod readability;
 pub mod relationships;
 pub mod repo;
@@ -93,6 +95,7 @@ pub mod tag_index;
 pub mod task_index;
 pub mod task_query;
 pub mod tasks;
+pub mod template_guard;
 pub mod templates;
 #[cfg(test)]
 mod test_support;
@@ -112,6 +115,7 @@ pub mod video_transcode;
 pub mod video_transcode_cache;
 pub mod wikilink;
 pub mod wikilink_index;
+pub mod yaml_load;
 
 pub use config::{Config, RelationType, SortField, TagSource, find_root_dir};
 #[cfg(feature = "media-metadata")]

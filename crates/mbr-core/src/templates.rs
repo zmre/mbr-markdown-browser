@@ -9,6 +9,9 @@ use crate::errors::TemplateError;
 use crate::host_head::HostHead;
 use crate::markdown::SimpleMetadata;
 use crate::page_template::{PageTemplate, PageTemplateError};
+use crate::template_guard::{
+    CostFailureMemo, DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES, RenderFailure, render_bounded,
+};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use tera::{Context, Tera};
@@ -21,6 +24,12 @@ pub struct Templates {
     /// What `host_head()` renders on every page ([`Self::with_host_head`]),
     /// kept so a [`Self::reload`] registers it again.
     host_head: Option<HostHead>,
+    /// The most bytes one rendered page may have ([`Self::with_output_limit`]).
+    output_limit: usize,
+    /// Page-template renders stopped for their cost, refused at once until
+    /// the template or the note changes (see [`CostFailureMemo`]). Shared by
+    /// clones, like the engine.
+    cost_failures: Arc<CostFailureMemo>,
 }
 
 /// Returns true if `dir` contains at least one `.html` file at any depth.
@@ -132,7 +141,7 @@ fn collect_user_templates(dir: &Path) -> Vec<(String, String)> {
 /// later add, so each attempt runs against a clone that is committed only on
 /// success. Templates skipped here fall back to the compiled-in defaults.
 fn load_tera_per_file(template_path: &Path) -> Tera {
-    let mut tera = Tera::default();
+    let mut tera = crate::template_guard::new_engine();
     let mut pending = collect_user_templates(template_path);
 
     while !pending.is_empty() {
@@ -186,7 +195,25 @@ impl Templates {
             tera: Arc::new(RwLock::new(tera)),
             template_path,
             host_head: None,
+            output_limit: DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
+            cost_failures: Arc::default(),
         })
+    }
+
+    /// Caps every page these templates render at `bytes` bytes
+    /// (`template_output_max_bytes`; default
+    /// [`DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES`]): a render that would write more
+    /// stops there with an error. See [`crate::template_guard`].
+    #[must_use]
+    pub fn with_output_limit(mut self, bytes: usize) -> Self {
+        self.output_limit = bytes;
+        self
+    }
+
+    /// The most bytes one rendered page may have ([`Self::with_output_limit`]).
+    #[must_use]
+    pub fn output_limit(&self) -> usize {
+        self.output_limit
     }
 
     /// Makes `host_head()` render `host_head` on every page these templates
@@ -299,7 +326,7 @@ impl Templates {
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_markdown_with_tera(&tera, html, frontmatter, extra_context)
+        Self::render_markdown_limited(&tera, self.output_limit, html, frontmatter, extra_context)
     }
 
     /// Lock-free variant of `render_markdown` that takes a `&Tera` directly.
@@ -312,13 +339,30 @@ impl Templates {
         frontmatter: SimpleMetadata,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
+        Self::render_markdown_limited(
+            tera,
+            DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
+            html,
+            frontmatter,
+            extra_context,
+        )
+    }
+
+    /// [`Self::render_markdown_with_tera`] with at most `output_limit` bytes.
+    fn render_markdown_limited(
+        tera: &Tera,
+        output_limit: usize,
+        html: &str,
+        frontmatter: SimpleMetadata,
+        extra_context: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
         let context = markdown_context(html, &frontmatter, &extra_context);
-        render_with_url_root(tera, "index.html", &context, &extra_context).map_err(|e| {
-            TemplateError::RenderFailed {
+        render_with_url_root(tera, "index.html", &context, &extra_context, output_limit).map_err(
+            |e| TemplateError::RenderFailed {
                 template_name: "index.html".to_string(),
-                source: e,
-            }
-        })
+                source: e.error,
+            },
+        )
     }
 
     /// Renders a note through its own page template (`template:` in its
@@ -327,6 +371,11 @@ impl Templates {
     ///
     /// Clones the loaded engine under the read lock; see
     /// [`Self::render_page_template_with_tera`].
+    ///
+    /// A render stopped for its cost (see [`crate::template_guard`]) is
+    /// remembered: the same template over the same note fails at once with
+    /// the same error, without rendering again, until the template, a
+    /// sibling, or the note changes.
     pub fn render_page_template(
         &self,
         template: &PageTemplate,
@@ -334,8 +383,39 @@ impl Templates {
         frontmatter: SimpleMetadata,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, PageTemplateError> {
+        let key = cost_memo_key(template, html, &frontmatter);
+        if let Some(message) = self.cost_failures.get(key) {
+            tracing::debug!(
+                "page template {} was stopped for its cost before; not rendering it again",
+                template.authored
+            );
+            return Err(PageTemplateError::Render {
+                template: template.authored.clone(),
+                message,
+            });
+        }
         let base = self.tera_clone();
-        Self::render_page_template_with_tera(&base, template, html, frontmatter, extra_context)
+        Self::render_page_template_limited(
+            &base,
+            self.output_limit,
+            template,
+            html,
+            frontmatter,
+            extra_context,
+        )
+        .map_err(|(error, over_budget)| {
+            if over_budget && let PageTemplateError::Render { message, .. } = &error {
+                self.cost_failures.insert(key, message.clone());
+            }
+            error
+        })
+    }
+
+    /// How many page-template renders stopped for their cost are remembered
+    /// (see [`Self::render_page_template`]).
+    #[must_use]
+    pub fn remembered_cost_failures(&self) -> usize {
+        self.cost_failures.len()
     }
 
     /// Lock-free [`Self::render_page_template`] over a loaded engine (the
@@ -363,6 +443,27 @@ impl Templates {
         frontmatter: SimpleMetadata,
         extra_context: HashMap<String, serde_json::Value>,
     ) -> Result<String, PageTemplateError> {
+        Self::render_page_template_limited(
+            base,
+            DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
+            template,
+            html,
+            frontmatter,
+            extra_context,
+        )
+        .map_err(|(error, _)| error)
+    }
+
+    /// [`Self::render_page_template_with_tera`] with at most `output_limit`
+    /// bytes; the error says whether a cost limit stopped the render.
+    fn render_page_template_limited(
+        base: &Tera,
+        output_limit: usize,
+        template: &PageTemplate,
+        html: &str,
+        frontmatter: SimpleMetadata,
+        extra_context: HashMap<String, serde_json::Value>,
+    ) -> Result<String, (PageTemplateError, bool)> {
         let render_error = |message: String| PageTemplateError::Render {
             template: template.authored.clone(),
             message,
@@ -423,10 +524,12 @@ impl Templates {
         };
 
         let mut tera = base.clone();
-        tera.add_raw_templates(added).map_err(fail)?;
+        tera.add_raw_templates(added)
+            .map_err(|e| (fail(e), false))?;
 
         let context = markdown_context(html, &frontmatter, &extra_context);
-        render_with_url_root(&tera, &main_name, &context, &extra_context).map_err(fail)
+        render_with_url_root(&tera, &main_name, &context, &extra_context, output_limit)
+            .map_err(|e| (fail(e.error), e.over_budget))
     }
 }
 
@@ -534,16 +637,31 @@ impl Templates {
         template_name: &str,
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
+        Self::render_template_limited(
+            tera,
+            DEFAULT_TEMPLATE_OUTPUT_MAX_BYTES,
+            template_name,
+            context_data,
+        )
+    }
+
+    /// [`Self::render_template_with_tera`] with at most `output_limit` bytes.
+    fn render_template_limited(
+        tera: &Tera,
+        output_limit: usize,
+        template_name: &str,
+        context_data: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TemplateError> {
         let mut context = Context::new();
         context_data.iter().for_each(|(k, v)| {
             context.insert(k, v);
         });
-        render_with_url_root(tera, template_name, &context, &context_data).map_err(|e| {
-            TemplateError::RenderFailed {
+        render_with_url_root(tera, template_name, &context, &context_data, output_limit).map_err(
+            |e| TemplateError::RenderFailed {
                 template_name: template_name.to_string(),
-                source: e,
-            }
-        })
+                source: e.error,
+            },
+        )
     }
 
     pub fn render_section(
@@ -551,7 +669,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "section.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "section.html", context_data)
     }
 
     /// Renders the home page (root directory) using home.html template.
@@ -561,7 +679,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "home.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "home.html", context_data)
     }
 
     /// Renders an error page using error.html template.
@@ -579,7 +697,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "error.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "error.html", context_data)
     }
 
     /// Renders a tag page showing all pages with a specific tag.
@@ -598,7 +716,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "tag.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "tag.html", context_data)
     }
 
     /// Renders a tag source index showing all tags from a source.
@@ -616,7 +734,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "tag_index.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "tag_index.html", context_data)
     }
 
     /// Renders a media viewer page for video, PDF, or audio content.
@@ -636,7 +754,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "media_viewer.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "media_viewer.html", context_data)
     }
 
     /// Renders `outside.html`, the page `/.mbr/outside/?path=…` links lead to
@@ -648,7 +766,7 @@ impl Templates {
         context_data: HashMap<String, serde_json::Value>,
     ) -> Result<String, TemplateError> {
         let tera = self.tera.read();
-        Self::render_template_with_tera(&tera, "outside.html", context_data)
+        Self::render_template_limited(&tera, self.output_limit, "outside.html", context_data)
     }
 }
 
@@ -763,6 +881,7 @@ fn collapse_dashes(slug: &str) -> String {
 /// - `url(path=…)` writes a site URL for the page being rendered (see
 ///   [`site_url`]).
 pub fn register_template_helpers(tera: &mut Tera) {
+    crate::template_guard::harden(tera);
     tera.register_filter("humandate", humandate_filter);
     tera.register_function("icon", crate::icons::icon_function);
     tera.register_function("url", UrlFunction);
@@ -876,13 +995,15 @@ thread_local! {
 
 /// `tera.render(name, context)` with [`URL_ROOT`] set to `values`'
 /// `relative_root` (static builds; absent on the server and in QuickLook)
-/// for the duration, restored afterwards even if the render panics.
+/// for the duration, restored afterwards even if the render panics, and the
+/// cost limits of [`render_bounded`] (`output_limit` bytes at most).
 fn render_with_url_root(
     tera: &Tera,
     name: &str,
     context: &Context,
     values: &HashMap<String, serde_json::Value>,
-) -> tera::Result<String> {
+    output_limit: usize,
+) -> Result<String, RenderFailure> {
     struct Restore(Option<String>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -895,7 +1016,24 @@ fn render_with_url_root(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let _restore = Restore(URL_ROOT.with(|cell| cell.replace(root)));
-    tera.render(name, context)
+    render_bounded(tera, name, context, output_limit)
+}
+
+/// The [`CostFailureMemo`] key of rendering `template` over a note whose
+/// body rendered to `html` with `frontmatter`.
+fn cost_memo_key(template: &PageTemplate, html: &str, frontmatter: &SimpleMetadata) -> u64 {
+    let frontmatter = serde_json::to_vec(frontmatter).unwrap_or_default();
+    let mut parts: Vec<&[u8]> = vec![
+        template.path.as_str().as_bytes(),
+        template.source.as_bytes(),
+        html.as_bytes(),
+        &frontmatter,
+    ];
+    for (name, source) in &template.siblings {
+        parts.push(name.as_bytes());
+        parts.push(source.as_bytes());
+    }
+    CostFailureMemo::key(&parts)
 }
 
 /// The URL a template should write for `path`, a path relative to the
@@ -1139,8 +1277,11 @@ mod tests {
     #[test]
     fn test_head_omits_concentric_threshold_unless_supplied() {
         let html = render_default_error(404, false);
-        assert!(html.contains("window.__MBR_CONFIG__"), "{html}");
-        assert!(!html.contains("flashcardsConcentricThreshold:"), "{html}");
+        assert!(html.contains(r#"{"__MBR_CONFIG__": {"#), "{html}");
+        assert!(
+            !html.contains("\"flashcardsConcentricThreshold\":"),
+            "{html}"
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let templates = Templates::new(tmp.path(), None).unwrap();
@@ -1153,7 +1294,7 @@ mod tests {
         );
         let html = templates.render_error(ctx).unwrap();
         assert!(
-            html.contains("flashcardsConcentricThreshold: 0.85,"),
+            html.contains("\"flashcardsConcentricThreshold\": 0.85,"),
             "{html}"
         );
     }
@@ -1437,8 +1578,8 @@ mod tests {
             .expect("page should render")
     }
 
-    /// Extracts the JSON/JS text assigned to `field` in the inline head
-    /// script, e.g. `js_value(html, "filePath: ")`.
+    /// Extracts the JSON text of `field` in the head's `data-mbr-globals`
+    /// block, e.g. `js_value(html, "\"filePath\": ")`.
     ///
     /// Line-based, which is sound because JSON never contains a raw newline —
     /// and is itself part of the regression guard: the old hand-built
@@ -1525,7 +1666,7 @@ mod tests {
         ]);
         let html = render_page(frontmatter, HashMap::new());
 
-        let payload = js_value(&html, "window.frontmatter = ");
+        let payload = js_value(&html, "\"frontmatter\": ");
         assert!(
             !payload.contains("</script>"),
             "frontmatter payload must not contain a raw script terminator: {payload}"
@@ -1540,7 +1681,7 @@ mod tests {
         );
 
         // Still valid data with the original values intact.
-        let parsed = parse_js_value(&html, "window.frontmatter = ");
+        let parsed = parse_js_value(&html, "\"frontmatter\": ");
         assert_eq!(parsed["title"], json!("Avoiding </script> in templates"));
         assert_eq!(parsed["note"], json!("<img src=x onerror=alert(1)>"));
     }
@@ -1602,13 +1743,13 @@ mod tests {
         ]);
         let html = render_page(SimpleMetadata::new(), extra);
 
-        assert_eq!(parse_js_value(&html, "filePath: "), json!(file_path));
+        assert_eq!(parse_js_value(&html, "\"filePath\": "), json!(file_path));
 
-        let prev = parse_js_value(&html, "prevPage: ");
+        let prev = parse_js_value(&html, "\"prevPage\": ");
         assert_eq!(prev["url"], json!(r#"/a"b\c/"#));
         assert_eq!(prev["title"], json!(r#"A "quoted" & <angled> title"#));
 
-        let next = parse_js_value(&html, "nextPage: ");
+        let next = parse_js_value(&html, "\"nextPage\": ");
         assert_eq!(next["url"], json!("/plain/"));
         assert_eq!(next["title"], json!("Plain"));
     }
@@ -1621,8 +1762,8 @@ mod tests {
         let extra = HashMap::from([("file_location".to_string(), location.clone())]);
         let html = render_page(SimpleMetadata::new(), extra);
 
-        assert_eq!(parse_js_value(&html, "fileLocation: "), location);
-        assert!(!js_value(&html, "fileLocation: ").contains("</script>"));
+        assert_eq!(parse_js_value(&html, "\"fileLocation\": "), location);
+        assert!(!js_value(&html, "\"fileLocation\": ").contains("</script>"));
     }
 
     /// Headings were emitted as a hand-built multi-line JS literal with
@@ -1639,7 +1780,7 @@ mod tests {
         )]);
         let html = render_page(SimpleMetadata::new(), extra);
 
-        let headings = parse_js_value(&html, "window.headings = ");
+        let headings = parse_js_value(&html, "\"headings\": ");
         assert_eq!(headings[0]["level"], json!(2));
         assert_eq!(headings[0]["id"], json!("q-and-a"));
         assert_eq!(
@@ -1649,7 +1790,7 @@ mod tests {
         );
         assert_eq!(headings[1]["text"], json!("Plain"));
         assert!(
-            !js_value(&html, "window.headings = ").contains("</script>"),
+            !js_value(&html, "\"headings\": ").contains("</script>"),
             "heading text must not terminate the script block"
         );
     }
@@ -1659,14 +1800,14 @@ mod tests {
     #[test]
     fn test_script_payload_defaults_without_extra_context() {
         let html = render_page(SimpleMetadata::new(), HashMap::new());
-        assert_eq!(parse_js_value(&html, "window.headings = "), json!([]));
-        assert_eq!(parse_js_value(&html, "filePath: "), json!(""));
-        assert_eq!(parse_js_value(&html, "fileLocation: "), json!(null));
-        assert!(!html.contains("prevPage:"));
-        assert!(!html.contains("nextPage:"));
+        assert_eq!(parse_js_value(&html, "\"headings\": "), json!([]));
+        assert_eq!(parse_js_value(&html, "\"filePath\": "), json!(""));
+        assert_eq!(parse_js_value(&html, "\"fileLocation\": "), json!(null));
+        assert!(!html.contains("\"prevPage\":"));
+        assert!(!html.contains("\"nextPage\":"));
         // Numeric fields keep their unquoted-key literal form.
-        assert!(html.contains("fleschReadingEase: null"));
-        assert!(html.contains("wordCount: 0"));
+        assert!(html.contains("\"fleschReadingEase\": null"));
+        assert!(html.contains("\"wordCount\": 0"));
     }
 
     // ------------------------------------------------------------------
@@ -1832,7 +1973,7 @@ mod tests {
         // …and the same value still reaches the body class.
         assert_eq!(body_tag(&html), r#"<body class="person">"#);
         assert_eq!(
-            parse_js_value(&html, "window.frontmatter = ")["type"],
+            parse_js_value(&html, "\"frontmatter\": ")["type"],
             json!("person"),
             "frontmatter payload should carry the authored type"
         );
@@ -1856,7 +1997,7 @@ mod tests {
         let html = render_parsed("Type: person\nTitle: Ada\n");
         assert!(html.contains("<mbr-genealogy></mbr-genealogy>"), "{html}");
         assert_eq!(body_tag(&html), r#"<body class="person">"#);
-        let fm = parse_js_value(&html, "window.frontmatter = ");
+        let fm = parse_js_value(&html, "\"frontmatter\": ");
         assert_eq!(fm["type"], json!("person"));
         assert!(fm.get("Type").is_none(), "one spelling only: {fm}");
         // Only the keys the contact hook owns are canonicalized.
@@ -1876,14 +2017,14 @@ mod tests {
         );
         assert_eq!(body_tag(&html), r#"<body class="person">"#);
         assert_eq!(
-            parse_js_value(&html, "window.frontmatter = ")["type"],
+            parse_js_value(&html, "\"frontmatter\": ")["type"],
             json!("person")
         );
 
         let html = render_parsed("type: \"Meeting Notes \"\n");
         assert_eq!(body_tag(&html), r#"<body class="meeting-notes">"#);
         assert_eq!(
-            parse_js_value(&html, "window.frontmatter = ")["type"],
+            parse_js_value(&html, "\"frontmatter\": ")["type"],
             json!("Meeting Notes")
         );
 
@@ -1893,7 +2034,7 @@ mod tests {
         let html = render_parsed("type: \"   \"\n");
         assert_eq!(body_tag(&html), "<body>");
         assert!(
-            parse_js_value(&html, "window.frontmatter = ")
+            parse_js_value(&html, "\"frontmatter\": ")
                 .get("type")
                 .is_none()
         );
@@ -2838,5 +2979,164 @@ mod tests {
         register_template_helpers(&mut tera);
         tera.add_raw_template("t", "[{{ host_head() }}]").unwrap();
         assert_eq!(tera.render("t", &Context::new()).unwrap(), "[]");
+    }
+
+    /// A template that reads an environment variable through Tera's
+    /// `get_env`, which mbr disables in every engine.
+    const GET_ENV: &str = r#"[{{ get_env(name="HOME", default="none") }}]"#;
+
+    #[test]
+    fn get_env_is_disabled_in_the_page_engine_and_after_a_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbr = tmp.path().join(".mbr");
+        std::fs::create_dir_all(&mbr).unwrap();
+        std::fs::write(mbr.join("index.html"), GET_ENV).unwrap();
+        let templates = Templates::new(tmp.path(), None).unwrap();
+        let refuses = |templates: &Templates| {
+            let err = templates
+                .render_markdown("<p>x</p>", SimpleMetadata::new(), HashMap::new())
+                .unwrap_err();
+            let message = error_chain(&err);
+            assert!(message.contains("get_env is disabled"), "{message}");
+        };
+        refuses(&templates);
+
+        // A reload builds a new engine (`Tera::new`), which registers Tera's
+        // own `get_env` again; it must be disabled again too.
+        std::fs::write(mbr.join("section.html"), GET_ENV).unwrap();
+        templates.reload().unwrap();
+        refuses(&templates);
+        let err = templates.render_section(HashMap::new()).unwrap_err();
+        assert!(error_chain(&err).contains("get_env is disabled"));
+
+        // The per-file fallback (a malformed sibling) builds its own engine.
+        std::fs::write(mbr.join("broken.html"), "{% if %}").unwrap();
+        templates.reload().unwrap();
+        refuses(&templates);
+        // And the clones a static build renders with.
+        let err = Templates::render_markdown_with_tera(
+            &templates.tera_clone(),
+            "",
+            SimpleMetadata::new(),
+            HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(error_chain(&err).contains("get_env is disabled"));
+    }
+
+    #[test]
+    fn get_env_is_disabled_in_page_templates_and_bare_engines() {
+        let template = page_template("inv/invoice.html", GET_ENV, &[]);
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("get_env is disabled"), "{err}");
+
+        // A sibling it includes, too.
+        let template = page_template(
+            "inv/invoice.html",
+            "{% include \"env.html\" %}",
+            &[("env.html", GET_ENV)],
+        );
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("get_env is disabled"), "{err}");
+
+        // QuickLook's engine: `register_template_helpers` on a plain Tera.
+        let mut tera = Tera::default();
+        register_template_helpers(&mut tera);
+        tera.add_raw_template("t", GET_ENV).unwrap();
+        let err = tera.render("t", &Context::new()).unwrap_err();
+        assert!(error_chain(&err).contains("get_env is disabled"));
+    }
+
+    #[test]
+    fn a_huge_range_in_a_page_template_fails_fast() {
+        let template = page_template(
+            "inv/invoice.html",
+            "{% for i in range(end=100000000) %}x{% endfor %}",
+            &[],
+        );
+        let started = std::time::Instant::now();
+        let err = render_with_page_template(&[], &template, SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let message = err.to_string();
+        assert!(message.contains("`range`"), "{message}");
+        assert!(message.contains("invoice.html"), "{message}");
+    }
+
+    /// A page template writing `n` times `x`.
+    fn x_template(n: usize) -> PageTemplate {
+        page_template(
+            "inv/invoice.html",
+            &format!("{{% for i in range(end={n}) %}}x{{% endfor %}}"),
+            &[],
+        )
+    }
+
+    #[test]
+    fn output_over_the_limit_fails_with_the_size_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_output_limit(1000);
+        assert_eq!(templates.output_limit(), 1000);
+        let render = |template: &PageTemplate| {
+            templates.render_page_template(template, "", SimpleMetadata::new(), HashMap::new())
+        };
+        assert_eq!(render(&x_template(1000)).unwrap().len(), 1000);
+        let message = render(&x_template(1001)).unwrap_err().to_string();
+        assert!(message.contains("larger than 1000 bytes"), "{message}");
+        assert!(message.contains("template_output_max_bytes"), "{message}");
+
+        // mbr's own pages are capped too.
+        let small = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_output_limit(100);
+        let err = small
+            .render_markdown("<p>x</p>", SimpleMetadata::new(), HashMap::new())
+            .unwrap_err();
+        assert!(error_chain(&err).contains("larger than 100 bytes"));
+        assert!(small.render_section(HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn a_page_template_stopped_for_its_cost_is_not_rendered_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let small = Templates::new(tmp.path(), None)
+            .unwrap()
+            .with_output_limit(1000);
+        // A clone shares the engine and the memo; with a larger cap a real
+        // render of the same template would now succeed, so an error from it
+        // can only come from the memo.
+        let large = small.clone().with_output_limit(1_000_000);
+        let template = x_template(5000);
+        let render = |templates: &Templates, template: &PageTemplate, html: &str| {
+            templates.render_page_template(template, html, SimpleMetadata::new(), HashMap::new())
+        };
+
+        let first = render(&small, &template, "<p>a</p>")
+            .unwrap_err()
+            .to_string();
+        assert!(first.contains("larger than 1000 bytes"), "{first}");
+        assert_eq!(small.remembered_cost_failures(), 1);
+        let again = render(&large, &template, "<p>a</p>")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(again, first);
+
+        // A changed note renders again.
+        assert_eq!(render(&large, &template, "<p>b</p>").unwrap().len(), 5000);
+        // So does a changed template.
+        assert_eq!(
+            render(&large, &x_template(4000), "<p>a</p>").unwrap().len(),
+            4000
+        );
+
+        // An ordinary template error is not remembered: it is cheap to find
+        // again, and a context change may fix it.
+        let broken = page_template("inv/invoice.html", "{{ nope.nope }}", &[]);
+        assert!(render(&small, &broken, "").is_err());
+        assert_eq!(small.remembered_cost_failures(), 1);
     }
 }

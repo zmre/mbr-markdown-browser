@@ -110,11 +110,96 @@ by a note's own `host_head:` field.
 `config.toml` changes) builds its `ServerConfig` from the configuration file
 alone, so it carries no host markup. An embedding app uses `Server` directly.
 
+## Serving notes written by someone else
+
+mbr's pages are served from your origin. A note or an `.html` file in the
+repository that someone else wrote (a customer's shared note, a contract synced
+from elsewhere) can contain `<script>`. By default mbr writes a note's HTML out
+as written and serves a repository `.html` file as it is, so that script runs
+with your origin's privileges: it can read your app's pages and call your API.
+Two settings change that, and both are off unless you turn them on.
+
 ### Content Security Policy
 
-mbr sends no `Content-Security-Policy` header; its pages already rely on inline
-scripts (`window.__MBR_CONFIG__`). If your server adds a policy, allow the
-theme's inline style by its hash rather than with `'unsafe-inline'`:
+`ServerConfig::content_security_policy` adds a `Content-Security-Policy` header
+to each response, with one value per route class
+(`mbr_core::csp::ContentClass`):
+
+| Field | Responses |
+|-------|-----------|
+| `pages` | HTML mbr renders from the repository: notes, the home page, folder listings, tag pages, error pages |
+| `user_files` | Repository files served as they are: static files (an `.html` file included), media, and a repository's own `.mbr/` files (`user.css`, overridden components, `.mbr/*.html`) |
+| `mbr_assets` | mbr's own UI under `/.mbr/`: built-in CSS and scripts, `site.json` and the other JSON endpoints, the media viewers, the outside-link page |
+
+`None` (the default) sends no header for that class. A value that is not a
+valid header value fails `Server::init` with
+`ServerError::ContentSecurityPolicy`. `ServerConfig::from` copies the
+repository's `[content_security_policy]` table
+([configuration](configuration/#content-security-policy)); whatever you assign
+afterwards replaces it.
+
+```rust
+use mbr_core::csp::{ContentSecurityPolicy, SANDBOX};
+
+let mut server_config = ServerConfig::from(&config);
+server_config.content_security_policy = ContentSecurityPolicy {
+    // mbr's own pages keep working: they need no inline script.
+    pages: Some("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:".into()),
+    // A repository file opened in the browser runs nothing.
+    user_files: Some(SANDBOX.into()), // "sandbox allow-same-origin"
+    mbr_assets: None,
+};
+```
+
+`SANDBOX` (`sandbox allow-same-origin`, no `allow-scripts`) is the preset for
+content that must never run script. The document keeps its origin, so its
+images and stylesheets still load, but no script, form, popup or top-level
+navigation works. `ContentSecurityPolicy::sandbox_user_content()` sets it for
+`pages` and `user_files` and leaves `mbr_assets` alone. On `pages` it stops
+mbr's own components too (sidebar, search, editor, live reload): the note is
+plain, read-only markup. That is your call; use a strict `script-src` on
+`pages` instead to keep them.
+
+### Strict `script-src` for mbr's pages
+
+mbr's templates contain no inline script, no `on…=` handler attribute and no
+`javascript:` URL, so its pages work under `script-src 'self'`
+(`mbr_core::csp::STRICT_SCRIPT_SRC`) with no `'unsafe-inline'`. That covers
+note pages (including the page `mbr --pdf` and Save as PDF… export), listings,
+tag, error, media-viewer and outside-link pages.
+
+The page data the components read (`window.__MBR_CONFIG__`,
+`window.frontmatter`, `window.headings`, `window.extendedMeta`) is written as
+`<script type="application/json" data-mbr-globals>` blocks, which `script-src`
+does not govern, and turned into those globals by `/.mbr/mbr-bootstrap.js`
+(`mbr_core::csp::BOOTSTRAP_SCRIPT`), a plain script loaded right after each
+block, before any component runs. The globals and their timing are what they
+were when the templates assigned them inline, so components and repository
+templates that read them need no change.
+
+`mbr_core::csp::TEMPLATE_INLINE_SCRIPT_HASHES` lists the `'sha256-…'` sources
+of any inline script the default templates still carry, for a policy to name.
+It is empty. `mbr_core::csp::strict_script_violations(html, hashes)` reports
+what a strict `script-src` would block in a page, and
+`mbr_core::csp::script_hash_source(text)` gives the hash source for an inline
+script of your own.
+
+Not covered:
+
+- a repository's own `.mbr/` copy of `_head.html` (or another template) made
+  before this change still has the inline scripts it was copied with; it keeps
+  working without a policy;
+- a note's [page template](../features/custom-page-templates/) may carry inline
+  script of its own;
+- HTML in a note, unless `raw_html` is `sanitize` or `escape` (below);
+- a bare GitHub gist URL in a note, which embeds `gist.github.com`'s script
+  under `passthrough`;
+- `extra_head_html`: hash inline code you put there yourself, or load it from
+  a URL.
+
+mbr's pages also set `style` attributes and Lit's styles, so a policy that
+restricts `style-src` needs `'unsafe-inline'` there. If your policy restricts
+`style-src` with a hash instead, allow the theme's inline style by its hash:
 
 ```rust
 use mbr_core::host_head::HostHead;
@@ -124,8 +209,30 @@ let style_src = head.as_ref().and_then(HostHead::style_csp_source); // Some("'sh
 ```
 
 The hash depends only on the variables, so it is the same for every page.
-It does not cover anything in `extra_head_html`; hash inline code you put
-there yourself, or load it from a URL.
+
+### Raw HTML in notes
+
+`ServerConfig::raw_html` (`mbr_core::raw_html::RawHtmlPolicy`) decides what a
+page render does with HTML a note's author wrote:
+
+- `Passthrough` (the default): written as is.
+- `Sanitize`: formatting is kept, scripts, `on…` handlers, `style` attributes,
+  frames, forms and script URLs are removed
+  ([details](../markdown/#raw-html)).
+- `Escape`: shown as text.
+
+Only the author's HTML is affected: mbr's own markup (sections, media embeds,
+task checkboxes, wikilinks) is untouched. `ServerConfig::from` takes `raw_html`
+from the repository's configuration, which may raise it. To make sure the
+repository cannot lower your choice, combine the two:
+
+```rust
+use mbr_core::raw_html::RawHtmlPolicy;
+
+server_config.raw_html = server_config.raw_html.strictest(RawHtmlPolicy::Sanitize);
+```
+
+`mbr_core::standalone::Renderer` reads `raw_html` from the `Config` it is given.
 
 ## Rendering a note from a string
 
